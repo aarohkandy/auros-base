@@ -1,0 +1,54 @@
+#!/usr/bin/bash
+# auros-kiosk-session -- start the one application this machine exists to run.
+#
+# Invoked by auros-kiosk.service as the unprivileged `auroskiosk` account. Everything it needs is
+# decided at build time and written into /etc/auros/kiosk.conf by apply-policy; this script reads that
+# and execs. It deliberately contains no fallback to a shell, a terminal or a desktop: the point of
+# kiosk mode is that no code path on the machine ends at a prompt, and a "helpful" rescue branch here
+# would be exactly such a path.
+set -euo pipefail
+
+CONF=/etc/auros/kiosk.conf
+STATE=/usr/lib/auros/policy
+
+die() { printf 'auros-kiosk: FATAL: %s\n' "$*" >&2; exit 1; }
+
+[ -r "$CONF" ] || die "$CONF is missing. A kiosk image without a configured application is not a kiosk image; apply-policy refuses to build one, so if you are reading this the file was removed after the build."
+# shellcheck disable=SC1090
+. "$CONF"
+
+: "${KIOSK_EXEC:?KIOSK_EXEC is unset in $CONF}"
+
+COMPOSITOR=""
+[ -r "$STATE/kiosk-compositor" ] && COMPOSITOR="$(cat "$STATE/kiosk-compositor")"
+[ -n "$COMPOSITOR" ] || die "no compositor recorded at $STATE/kiosk-compositor"
+
+# XDG_RUNTIME_DIR comes from pam_systemd via the service's PAMName. If logind did not register the
+# session there is no runtime dir, the compositor fails with a message nobody is standing there to
+# read, and Restart=always turns that into a silent loop. Say it once, clearly, in the journal.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+    die "XDG_RUNTIME_DIR is not set or does not exist -- systemd-logind did not register a session for this unit. Check PAMName=auros-kiosk and /etc/pam.d/auros-kiosk."
+fi
+
+printf 'auros-kiosk: compositor=%s exec=%s\n' "$COMPOSITOR" "$KIOSK_EXEC"
+
+case "$COMPOSITOR" in
+  cage)
+    # NOTE on flags, because the absent one matters more than the present one:
+    #   -d  no client-side decorations -- the application gets no titlebar, so no close button.
+    #   -s  IS DELIBERATELY NOT PASSED. -s enables VT switching. With it, Ctrl+Alt+F2 leaves the
+    #       kiosk session. Without it, there is nowhere to switch to. This single omission is a
+    #       meaningful part of what the mode promises, which is why it is written down rather than
+    #       left to whoever edits this next.
+    exec /usr/bin/cage -d -- /usr/bin/env bash -lc "exec $KIOSK_EXEC"
+    ;;
+  weston)
+    # Fallback path, used only when `cage` is not available in the repositories at build time.
+    # apply-policy records which one it installed, and kiosk/assert.sh checks the RUNNING process
+    # against that record -- so whichever path was taken is proven at runtime rather than assumed.
+    exec /usr/bin/weston --shell=kiosk-shell --idle-time=0 -- /usr/bin/env bash -lc "exec $KIOSK_EXEC"
+    ;;
+  *)
+    die "unknown compositor '$COMPOSITOR'"
+    ;;
+esac

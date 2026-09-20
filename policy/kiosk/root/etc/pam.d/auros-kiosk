@@ -1,0 +1,16 @@
+#%PAM-1.0
+# PAM stack for the Auros kiosk session.
+#
+# This is NOT a login path. Nobody authenticates here: systemd starts the service as auroskiosk and
+# uses PAMName purely so that systemd-logind registers a session, assigns seat0 and creates
+# XDG_RUNTIME_DIR. Without a registered session the compositor has no seat and no runtime directory.
+#
+# auth is pam_permit because there is no credential to check -- the account has no password and is
+# not reachable from outside. The account restrictions live in polkit, sudoers and the account's
+# nologin shell, not here.
+auth        required    pam_permit.so
+account     required    pam_permit.so
+session     required    pam_permit.so
+session     optional    pam_keyinit.so force revoke
+session     optional    pam_loginuid.so
+session     optional    pam_systemd.so class=user type=wayland

@@ -1,0 +1,57 @@
+[Unit]
+Description=Auros kiosk session (single application, no desktop)
+Documentation=file:///usr/share/auros/policy/kiosk/description.md
+After=systemd-user-sessions.service plymouth-quit-wait.service systemd-logind.service
+Wants=systemd-logind.service
+# There is no display manager on a kiosk image. graphical.target normally exists only to pull one in,
+# so the session is bound to multi-user.target instead and brings up its own compositor.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+# The application runs as an unprivileged account with /usr/sbin/nologin as its shell. Nobody logs in
+# as this user; systemd starts it and the polkit rules give it nothing.
+User=auroskiosk
+Group=auroskiosk
+# video/render/input as a fallback path to the DRM and evdev nodes. pam_systemd should grant these via
+# the seat ACLs once the session is registered; carrying the groups as well means the compositor still
+# starts on a machine where logind did not hand out a seat, instead of failing with a blank screen and
+# a permissions error nobody is standing there to read.
+SupplementaryGroups=video render input
+# PAMName registers a logind session, which is what creates XDG_RUNTIME_DIR and attaches seat0.
+PAMName=auros-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+Environment=XDG_SESSION_CLASS=user
+ExecStart=/usr/libexec/auros/auros-kiosk-session
+# An appliance that stops being an appliance because a browser crashed is not an appliance.
+Restart=always
+RestartSec=2s
+# ... but a session that cannot start must not spin forever hiding the reason. After five failures in
+# a minute the unit gives up and the failure is visible in the journal and to greenboot, instead of
+# being buried under an infinite restart loop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# Hardening. NoNewPrivileges is the one that matters: it makes every setuid binary on the image inert
+# for this process tree, so even a compromised kiosk application cannot reach sudo or pkexec.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+
+[Install]
+WantedBy=multi-user.target

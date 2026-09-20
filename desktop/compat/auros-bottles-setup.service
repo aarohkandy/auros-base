@@ -1,0 +1,22 @@
+[Unit]
+# Auros — installed to /usr/lib/systemd/user/auros-bottles-setup.service, enabled image-wide via
+# /usr/lib/systemd/user/graphical-session.target.wants/.
+#
+# Enabled on EVERY image, including the ones where the .exe capability is off.  The script's first act
+# is to check whether Bottles is installed and exit if it is not, which costs a few milliseconds per
+# login and means a recipe can turn the capability on later without the image needing a new unit.
+Description=Auros Windows-programs setup (once per user, only when Bottles is installed)
+Documentation=file:///usr/share/doc/auros/EXE-COMPATIBILITY.md
+ConditionPathExists=!%S/auros/windows-apps.v1.stamp
+After=graphical-session.target auros-first-run.service
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/auros/auros-bottles-setup
+# Downloading a Wine runner on school Wi-Fi.  The script's own timeout is 1800s; this is the backstop.
+TimeoutStartSec=2100
+RemainAfterExit=no
+
+[Install]
+WantedBy=graphical-session.target

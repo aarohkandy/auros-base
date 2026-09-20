@@ -1,0 +1,55 @@
+# NEVER REMOVED, in any mode, by anything in this directory.
+#
+# apply-policy resolves the removal transaction BEFORE executing it and aborts the build if the
+# transaction would take any of these with it -- directly or as a dependency cascade. This is the
+# trap D12 warns about from the other side: `dnf remove plasma-workspace` looks surgical right up
+# until the closure decides systemd is no longer required by anything.
+#
+# A recipe that prunes its own update path produces a machine we can never patch again, which is
+# precisely the abandoned laptop we sell against. Check S10 asserts the same set from outside; this
+# file is what stops the image from being built in the first place.
+
+# the update path -- lose this and the machine is orphaned, which is the thing we sell against
+bootc
+rpm-ostree
+ostree
+bootupd
+greenboot
+greenboot-default-health-checks
+greenboot-grub2
+grub2-common
+grub2-efi-x64
+shim-x64
+
+# init, hardware, network
+systemd
+systemd-udev
+systemd-resolved
+kernel
+kernel-core
+kernel-modules
+NetworkManager
+dbus
+dbus-broker
+polkit
+polkit-libs
+sudo
+
+# the security posture we ship
+selinux-policy
+selinux-policy-targeted
+container-selinux
+
+# what the kiosk session itself is made of
+cage
+weston
+pipewire
+wireplumber
+xdg-desktop-portal
+mesa-dri-drivers
+mesa-vulkan-drivers
+
+# the package manager itself -- removing it is the classic way a prune makes an image unbuildable
+dnf
+dnf5
+rpm

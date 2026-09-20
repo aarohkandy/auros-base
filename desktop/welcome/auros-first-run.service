@@ -1,0 +1,24 @@
+[Unit]
+# Auros — installed to /usr/lib/systemd/user/auros-first-run.service and enabled image-wide by a
+# symlink in /usr/lib/systemd/user/graphical-session.target.wants/.
+#
+# Enabled in /usr/lib rather than by `systemctl --user enable` per account: a bootc image cannot run
+# `systemctl --user enable` for users who do not exist yet, and every user of these machines is created
+# after the image was built.
+Description=Auros first-run setup (once per user)
+Documentation=file:///usr/share/doc/auros/desktop-README.md
+# Cheap early exit so we do not even start a shell on the thousandth login.  The stamp version here
+# MUST match STAMP_VERSION in /usr/libexec/auros/auros-first-run.
+ConditionPathExists=!%S/auros/first-run.v1.stamp
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/auros/auros-first-run
+# It polls for plasmashell for up to 90 seconds and then gives up on its own; this is the backstop.
+TimeoutStartSec=300
+RemainAfterExit=no
+
+[Install]
+WantedBy=graphical-session.target

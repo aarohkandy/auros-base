@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Auros — installed to /usr/libexec/auros/auros-first-run
+# Run once per user by auros-first-run.service (a systemd --user oneshot), guarded by a stamp file.
+#
+# WHAT IT DOES, in order:
+#   1. creates the Windows-named user folders
+#   2. applies the Auros look-and-feel
+#   3. feeds the layout script to plasmashell, which is what actually builds the taskbar
+#   4. opens the welcome wizard
+#   5. writes the stamp
+#
+# WHAT IT MUST NOT DO: run again after the user has arranged their own desktop.  The stamp is the whole
+# safety property.  It is VERSIONED (first-run.v1.stamp) so that a future image which genuinely needs to
+# re-run first-run can do so by bumping the version, deliberately and visibly, rather than by deleting
+# somebody's panel because a filename happened to change.
+set -euo pipefail
+
+STAMP_VERSION=v1
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/auros"
+STAMP="$STATE_DIR/first-run.${STAMP_VERSION}.stamp"
+LOG="$STATE_DIR/first-run.log"
+LAYOUT=/usr/share/plasma/look-and-feel/org.auros.windows.desktop/contents/layouts/org.kde.plasma.desktop-layout.js
+
+mkdir -p "$STATE_DIR"
+exec >>"$LOG" 2>&1
+echo "=== auros-first-run $(date -Is) user=$(id -un) ==="
+
+if [[ -e "$STAMP" ]]; then
+    echo "stamp present ($STAMP) — nothing to do"
+    exit 0
+fi
+
+# 1. Windows-named folders ------------------------------------------------------------------------
+# Reads /etc/xdg/user-dirs.defaults.  Safe to run repeatedly; it never renames a folder that has
+# content in it without being told to.
+if command -v xdg-user-dirs-update >/dev/null 2>&1; then
+    xdg-user-dirs-update && echo "xdg-user-dirs-update: ok"
+else
+    echo "xdg-user-dirs-update: MISSING — user folders may not exist"
+fi
+
+# 2 + 3. Appearance and the taskbar ----------------------------------------------------------------
+# plasmashell has to be up before it can be asked to evaluate a layout script.  Poll rather than sleep a
+# fixed amount: on the low-ram profile (4 GB, throttled disk) the shell can take well over 30 seconds to
+# reach the bus, and a fixed sleep would either waste time on fast machines or lose the taskbar on slow
+# ones — and "the taskbar is missing" is indistinguishable from a broken computer to our user.
+plasmashell_ready() {
+    gdbus introspect --session --dest org.kde.plasmashell \
+        --object-path /PlasmaShell >/dev/null 2>&1
+}
+
+ready=false
+for _ in $(seq 1 45); do
+    if plasmashell_ready; then ready=true; break; fi
+    sleep 2
+done
+
+if [[ "$ready" == true ]]; then
+    echo "plasmashell: on the bus"
+
+    if command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
+        if plasma-apply-lookandfeel -a org.auros.windows.desktop; then
+            echo "look-and-feel: applied"
+        else
+            echo "look-and-feel: FAILED (non-fatal; /etc/xdg defaults still apply)"
+        fi
+    else
+        echo "plasma-apply-lookandfeel: MISSING (non-fatal)"
+    fi
+
+    if [[ -r "$LAYOUT" ]]; then
+        # The layout script removes existing panels first, so this is safe even if plasmashell has
+        # already built a default panel of its own from the look-and-feel package.
+        if gdbus call --session --dest org.kde.plasmashell \
+                --object-path /PlasmaShell \
+                --method org.kde.PlasmaShell.evaluateScript "$(cat "$LAYOUT")"; then
+            echo "layout: applied"
+        else
+            echo "layout: FAILED — the user has whatever panel Plasma built by default"
+        fi
+    else
+        echo "layout: MISSING at $LAYOUT"
+    fi
+else
+    echo "plasmashell: never reached the session bus after 90s — skipping layout"
+fi
+
+# 4. The welcome wizard ----------------------------------------------------------------------------
+# Detached, so this oneshot unit completes instead of staying active for as long as the user reads.
+if [[ -x /usr/bin/auros-welcome ]]; then
+    setsid /usr/bin/auros-welcome >/dev/null 2>&1 < /dev/null &
+    echo "welcome: launched"
+else
+    echo "welcome: /usr/bin/auros-welcome missing"
+fi
+
+# 5. Stamp ------------------------------------------------------------------------------------------
+# Written unconditionally once we have got this far, INCLUDING after a partial failure.  A first-run
+# that retries every single login is a first-run that reopens the welcome wizard every single login,
+# and being greeted by a wizard forever is a worse failure than a missing taskbar.  The log above says
+# what happened, and desktop/README.md documents how a support person re-runs it from the GUI.
+date -Is > "$STAMP"
+echo "stamp written: $STAMP"

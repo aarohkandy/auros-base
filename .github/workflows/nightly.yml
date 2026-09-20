@@ -1,0 +1,264 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# nightly — the thing we actually sell.
+#
+# Spec §1: "rebuilt every night so it is still patched in four years." Spec §3: "CVE response is one
+# rebuild." Both of those sentences are this file. If it stops running, the product quietly becomes
+# the abandoned laptop we sell against, and nobody gets an alert, because nothing failed — something
+# merely stopped happening.
+#
+# What it does:
+#   1. Re-resolve ghcr.io/ublue-os/aurora:stable.
+#   2. If the digest moved: update base.lock (and the Containerfile's literal FROM, if that is the
+#      convention in use), commit it, and run the ENTIRE gated build — same jobs, same gate, same
+#      no-bypass property. It calls build.yml rather than reimplementing it, because two copies of a
+#      publish path means one of them is out of date and you find out which the hard way.
+#   3. Tell auros-recipes that the base moved, if a credential exists to do so. Otherwise say so
+#      clearly and let the recipes' own poll handle it.
+#
+# WHAT THIS WORKFLOW CANNOT DO, and why that is fine:
+#
+#   D18 — the default GITHUB_TOKEN is issued FOR THIS REPOSITORY. It cannot authenticate
+#   `POST /repos/aarohkandy/auros-recipes/dispatches`. (The commonly-cited recursion rule is not the
+#   cause; the docs explicitly exempt repository_dispatch.) Cross-repo propagation therefore needs a
+#   fine-grained PAT or a GitHub App token — BLOCKED.md B2, and no agent can mint one.
+#
+#   So the dispatch is attempted when `secrets.AUROS_DISPATCH_TOKEN` exists and is SKIPPED, loudly and
+#   non-fatally, when it does not. auros-recipes also polls on `*/10` and compares the base digest to
+#   its lockfile (BLOCKED.md B2), so propagation still happens unattended — on a poll interval rather
+#   than instantly. Gate 2 allows 20 minutes; a 10-minute poll fits, with the caveat in B7 that free
+#   public-repo crons are delayed under load.
+#
+#   A missing secret must never fail this build. The base being rebuilt and published is the valuable
+#   half; the notification is an optimisation on top of a fallback that already works.
+#
+# D19: pipefail everywhere.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+name: nightly
+
+on:
+  schedule:
+    # 04:17 UTC. Off the hour on purpose: GitHub queues an enormous number of `0 * * * *` jobs and
+    # delays them under load (BLOCKED.md B7). An odd minute is the cheapest thing that helps.
+    - cron: '17 4 * * *'
+  # No inputs. This exists so a human can force a nightly after fixing something at 23:00, and it
+  # runs the identical gated pipeline — it is not a bypass and cannot be made into one.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false   # never interrupt a publish
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  META_REPO: aarohkandy/auros
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  drift:
+    name: has upstream moved?
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write   # to commit the new base.lock to THIS repo (same-repo write is fine; D18 is about OTHER repos)
+    outputs:
+      moved:        ${{ steps.check.outputs.moved }}
+      old_digest:   ${{ steps.check.outputs.old_digest }}
+      new_digest:   ${{ steps.check.outputs.upstream_digest }}
+      pull_bytes:   ${{ steps.check.outputs.upstream_pull_size_bytes }}
+      recipes_repo: ${{ steps.cfg.outputs.recipes_repo }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.META_REPO }}
+          path: meta
+          ref: main
+
+      - name: Namespace from the one file that owns it
+        id: cfg
+        run: echo "recipes_repo=$(jq -r '.repos.recipes' meta/auros.config.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Re-resolve the upstream digest
+        id: check
+        run: |
+          OLD=$(grep -E '^UPSTREAM_DIGEST=' base.lock | cut -d= -f2-)
+          echo "old_digest=$OLD" >> "$GITHUB_OUTPUT"
+          # `update` is idempotent: against an unmoved tag it rewrites nothing and emits moved=false.
+          ./tools/resolve-upstream.sh update
+
+      - name: Commit the new lock
+        if: steps.check.outputs.moved == 'true'
+        run: |
+          git config user.name  "auros-ci"
+          git config user.email "auros-ci@users.noreply.github.com"
+          git add base.lock Containerfile 2>/dev/null || git add base.lock
+          if git diff --cached --quiet; then
+            echo "::error::resolve-upstream.sh reported drift but changed no files. That is a bug in the script, not a no-op."
+            exit 1
+          fi
+          git commit -m "base.lock: upstream ${{ steps.check.outputs.old_digest }} -> ${{ steps.check.outputs.upstream_digest }}
+
+ghcr.io/ublue-os/aurora:stable moved. Rebuilding against the new digest and running the full
+check matrix. Nothing publishes unless every check passes on every profile.
+
+Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # This push does NOT trigger build.yml — pushes made with GITHUB_TOKEN never trigger
+          # workflows. That is deliberate on GitHub's side and fine here: the `build` job below calls
+          # build.yml directly, and build.yml checks out the branch TIP, so it picks up this commit.
+          git push origin HEAD:main
+          echo "pushed $(git rev-parse --short HEAD)"
+
+      - name: Say what happened
+        run: |
+          {
+            echo "## nightly · upstream check"
+            echo ""
+            if [ '${{ steps.check.outputs.moved }}' = 'true' ]; then
+              echo "**Upstream moved.** Rebuilding."
+              echo ""
+              echo "| | |"
+              echo "|---|---|"
+              echo "| was | \`${{ steps.check.outputs.old_digest }}\` |"
+              echo "| now | \`${{ steps.check.outputs.upstream_digest }}\` |"
+              echo "| created | ${{ steps.check.outputs.upstream_created }} |"
+              echo "| compressed | $(numfmt --to=iec '${{ steps.check.outputs.upstream_pull_size_bytes }}' 2>/dev/null || echo '${{ steps.check.outputs.upstream_pull_size_bytes }}') |"
+              echo ""
+              echo "That compressed figure is a pull **per machine** when a low layer changes."
+              echo "See BLOCKED.md B6 before repeating it to a customer."
+            else
+              echo "No change. \`ghcr.io/ublue-os/aurora:stable\` still resolves to \`${{ steps.check.outputs.old_digest }}\`."
+              echo ""
+              echo "Not rebuilding. PLAN.md 2.5: children rebuild when the base digest or the recipe"
+              echo "changes, not unconditionally every night — a 180-machine site does not need a"
+              echo "3.5 GB pull for a build that produced identical bytes."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  build:
+    name: rebuild and gate
+    needs: drift
+    if: needs.drift.outputs.moved == 'true'
+    # The same file that runs on every push. One publish path, one gate, one place to audit.
+    # No inputs are passed because build.yml accepts none.
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    secrets: inherit
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  propagate:
+    name: tell auros-recipes
+    needs: [drift, build]
+    if: always() && needs.build.result == 'success' && needs.build.outputs.published == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch if we have a credential, fall back cleanly if we do not
+        env:
+          DISPATCH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN }}
+          RECIPES: ${{ needs.drift.outputs.recipes_repo }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            {
+              echo "## propagation · POLL"
+              echo ""
+              echo "\`AUROS_DISPATCH_TOKEN\` is not set, so no \`repository_dispatch\` was sent."
+              echo ""
+              echo "This is expected and is **not a failure**. D18: the default \`GITHUB_TOKEN\` is issued"
+              echo "for \`${{ github.repository }}\` and cannot authenticate"
+              echo "\`POST /repos/${RECIPES}/dispatches\`. It needs a fine-grained PAT"
+              echo "(\`contents: write\` on \`${RECIPES}\` only) or a GitHub App installation token —"
+              echo "BLOCKED.md **B2**, which needs a human."
+              echo ""
+              echo "**\`${RECIPES}\` polls every 10 minutes** and compares the base digest against its"
+              echo "lockfile, so \`${DIGEST}\` still reaches customer recipes unattended. Gate 2 allows"
+              echo "20 minutes and a 10-minute poll fits, subject to BLOCKED.md **B7** (free public-repo"
+              echo "crons are delayed under load)."
+              echo ""
+              echo "Instant dispatch is the upgrade, not the mechanism."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::no dispatch credential; relying on the auros-recipes poll (BLOCKED.md B2)"
+            exit 0
+          fi
+
+          echo "dispatching base-updated to ${RECIPES}"
+          code=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' \
+            -X POST "https://api.github.com/repos/${RECIPES}/dispatches" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$(jq -nc --arg d "$DIGEST" --arg r "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+                  '{event_type:"base-updated", client_payload:{base_digest:$d, run_url:$r}}')" ) || code=000
+
+          if [ "$code" = "204" ]; then
+            echo "## propagation · DISPATCHED" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`${RECIPES}\` was notified that the base is now \`${DIGEST}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Still not a failure. A token that has expired or lost its scope is exactly the case the
+            # poll exists for, and failing the nightly here would turn a degraded notification into a
+            # red build for a base that published perfectly well.
+            cat /tmp/dispatch.out || true
+            {
+              echo "## propagation · DISPATCH FAILED (HTTP ${code}) — falling back to the poll"
+              echo ""
+              echo "The token is present but the dispatch was rejected. Check that"
+              echo "\`AUROS_DISPATCH_TOKEN\` still has \`contents: write\` on \`${RECIPES}\` and has not expired."
+              echo "\`${RECIPES}\` polls every 10 minutes regardless, so propagation is delayed, not lost."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::repository_dispatch to ${RECIPES} failed with HTTP ${code}; the poll will carry it (BLOCKED.md B2)"
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  schedule-health:
+    name: the 60-day rule
+    needs: drift
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Keep the schedule enabled, and say plainly what we cannot guarantee
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GitHub disables scheduled workflows on PUBLIC repos after 60 days of repository
+          # inactivity. The failure mode is the worst kind: nothing goes red, the nightly simply
+          # stops, and the first symptom is an unpatched fleet months later.
+          #
+          # This call is a no-op while the workflow is enabled. It cannot rescue a workflow that is
+          # ALREADY disabled — a disabled workflow does not run, so this step does not run either.
+          # The job that covers that case is `keep-nightly-enabled` in build.yml, which runs on every
+          # push to main. Neither helps a repo with no pushes and no upstream movement for 60 days.
+          gh api --method PUT "repos/${{ github.repository }}/actions/workflows/nightly.yml/enable" >/dev/null 2>&1 \
+            && echo "nightly.yml enabled" \
+            || echo "::warning::could not confirm nightly.yml is enabled"
+
+          LAST_PUSH=$(gh api "repos/${{ github.repository }}" --jq '.pushed_at')
+          NOW=$(date -u +%s); THEN=$(date -u -d "$LAST_PUSH" +%s)
+          DAYS=$(( (NOW - THEN) / 86400 ))
+          echo "days since last push: ${DAYS}"
+          {
+            echo "## schedule health"
+            echo ""
+            echo "- last push to \`${{ github.repository }}\`: ${LAST_PUSH} (**${DAYS} days ago**)"
+            echo "- GitHub disables scheduled workflows on public repos after **60 days** of repository inactivity."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DAYS" -ge 45 ]; then
+            echo "::warning::${DAYS} days since the last push. The nightly will be disabled at 60. Push anything, or click Enable workflow. See CI.md."
+            echo "- ⚠️ **Action needed within $((60 - DAYS)) days.** Push any commit, or re-enable from the Actions tab." >> "$GITHUB_STEP_SUMMARY"
+          fi

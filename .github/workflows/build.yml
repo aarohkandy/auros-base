@@ -39,8 +39,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Called by nightly.yml. No inputs, no secrets: the nightly gets exactly this pipeline or none.
+  # Called by nightly.yml. No `inputs:` and no `secrets:` block — a caller gets exactly this pipeline
+  # or none of it. Outputs are read-only facts about what happened; nothing here steers the run.
   workflow_call:
+    outputs:
+      digest:
+        description: The content digest that was built (whether or not it was published).
+        value: ${{ jobs.build.outputs.digest }}
+      published:
+        description: "\"true\" only if the gate passed and :hardened was moved. Empty if the publish job never ran."
+        value: ${{ jobs.publish.outputs.published }}
 
 permissions:
   contents: read
@@ -62,7 +70,7 @@ env:
   # `--new-bundle-format=false` is what keeps the signature discoverable by containers/image, and it
   # is explicitly deprecated upstream while containers/container-libs#388 stays open. If cosign
   # removes the flag, this pin is what stops it happening to us silently on a random Tuesday.
-  COSIGN_VERSION: v2.5.3
+  COSIGN_VERSION: v3.1.3
   # A publish only happens on the default branch and never from a pull request. Fork PRs have a
   # read-only token and no OIDC anyway; this makes the intent explicit rather than incidental.
   IS_PUBLISHABLE: ${{ github.event_name != 'pull_request' && github.ref_name == 'main' }}
@@ -71,7 +79,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   plan:
     name: plan · S1 base is pinned by digest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       image:          ${{ steps.cfg.outputs.image }}
@@ -151,7 +159,7 @@ jobs:
   build:
     name: build · S7 determinism
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
@@ -312,7 +320,7 @@ jobs:
   static:
     name: static · S2-S6 S9 S10
     needs: [plan, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -342,7 +350,7 @@ jobs:
   boot:
     name: boot · ${{ matrix.profile }}
     needs: [plan, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false   # one profile failing must not hide what the other six would have said
@@ -389,7 +397,7 @@ jobs:
     name: sign · S8 signature is discoverable
     needs: [plan, build, static, boot]
     if: needs.plan.outputs.publishable == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -474,7 +482,7 @@ jobs:
     name: update · U1-U5 R1
     needs: [plan, build, sign]
     if: needs.plan.outputs.publishable == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
       contents: read
@@ -557,11 +565,13 @@ jobs:
     name: publish · gated
     needs: [plan, build, static, boot, sign, update]
     if: needs.plan.outputs.publishable == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+    outputs:
+      published: ${{ steps.promote.outputs.published }}
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ env.CHECKOUT_REF }}" }
@@ -632,6 +642,7 @@ jobs:
           echo "gate: PASS for ${{ needs.build.outputs.digest }}"
 
       - name: Promote to :hardened
+        id: promote
         env:
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
@@ -644,6 +655,7 @@ jobs:
             echo "tagged ${IMAGE}:${TAG}"
           done
           skopeo inspect --no-tags "docker://${IMAGE}:hardened" | jq -r '"hardened now points at \(.Digest)"'
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
       - name: Carry the ledger back to the control repo, or say why not
         env:
@@ -696,7 +708,7 @@ Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.r
     name: cleanup staging tags
     needs: [plan, build, static, boot, sign, update, publish]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       packages: write
@@ -712,3 +724,30 @@ Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.r
             echo "would remove tag ${T}"
           done
           echo "::notice::staging tags stay until a token with delete:packages exists; they are unsigned and cannot be installed."
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  keep-nightly-enabled:
+    # GitHub disables a scheduled workflow on a PUBLIC repo after 60 days of repository inactivity,
+    # and a disabled workflow cannot re-enable itself — by definition it is not running. So the job
+    # that re-enables it has to live somewhere that runs on a push. That is here.
+    #
+    # This job has `actions: write` and nothing else. It cannot build, sign, tag or publish. It is
+    # listed in the no-bypass audit at the top of this file for exactly that reason.
+    name: keep the nightly schedule alive
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A no-op while the workflow is enabled, which is the point: it costs nothing and closes the
+          # window where a push happens after the nightly was silently switched off.
+          if gh api --method PUT \
+              "repos/${{ github.repository }}/actions/workflows/nightly.yml/enable" >/dev/null 2>&1; then
+            echo "nightly.yml is enabled"
+          else
+            echo "::warning::could not confirm nightly.yml is enabled — check the Actions tab. See CI.md, 'the 60-day rule'."
+          fi

@@ -124,11 +124,31 @@ pkg_ensure() {
 }
 
 # ── systemd, offline ─────────────────────────────────────────────────────────────────────────────
-# There is no running systemd inside an image build, so `systemctl` has to be told to operate on the
-# filesystem. `--root=/` does that. Where systemctl refuses, the operations below fall back to the
-# symlinks systemctl would have created, because "masked" and "enabled" are filesystem states, not
-# daemon opinions — and a hardening step that silently no-ops is the worst possible outcome.
-_systemctl_offline() { systemctl --root=/ --no-reload "$@" 2>/dev/null; }
+# There is no running systemd inside an image build, so systemctl has to be told to operate on the
+# filesystem rather than on a bus. Two spellings of that are tried, because which one a given
+# systemd accepts is version-dependent and this repo has not measured it on the pinned base:
+#   1. `systemctl --root=/`   — explicit offline root. Some versions reject "/" specifically.
+#   2. `SYSTEMD_OFFLINE=1`    — forces offline mode without naming a root.
+# If BOTH fail, the callers below fall back to creating the symlinks systemctl would have created,
+# because "masked" and "enabled" are filesystem states, not daemon opinions — and a hardening step
+# that silently no-ops is the worst outcome available.
+_systemctl_offline() {
+  SYSTEMD_OFFLINE=1 systemctl --root=/ "$@" >/dev/null 2>&1 && return 0
+  SYSTEMD_OFFLINE=1 systemctl "$@" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# The WantedBy targets a unit asks to be started by, read out of its own [Install] section. Used only
+# by the manual fallback path.
+_unit_wantedby() {
+  local u="$1" f
+  for f in "/etc/systemd/system/$u" "/usr/lib/systemd/system/$u" "/lib/systemd/system/$u"; do
+    if [ -f "$f" ]; then
+      sed -n 's/^WantedBy=//p' "$f" | tr ' ' '\n' | grep -v '^$' || true
+      return 0
+    fi
+  done
+}
 
 # mask_unit <unit> — masked, not disabled. A disabled unit is one `systemctl enable` away from
 # running, and socket-, dbus- and path-activated units start on activation even while disabled.
@@ -138,7 +158,7 @@ mask_unit() {
   if ! have_unit "$u" && [ ! -e "/usr/lib/systemd/system/$u" ]; then
     return 1
   fi
-  _systemctl_offline mask "$u" || true
+  _systemctl_offline mask --no-reload "$u" || true
   if [ "$(readlink -f "$link" 2>/dev/null || true)" != "/dev/null" ]; then
     mkdir -p /etc/systemd/system
     ln -sfn /dev/null "$link"
@@ -148,11 +168,30 @@ mask_unit() {
   return 0
 }
 
-# enable_unit <unit> — creates the WantedBy symlink the unit's [Install] section asks for.
+# enable_unit <unit> — creates the WantedBy symlinks the unit's [Install] section asks for, and then
+# proves they exist. Enablement is verified by looking at the filesystem rather than by trusting
+# systemctl's exit code, because the offline paths above are the part we are least sure of.
 enable_unit() {
-  local u="$1"
-  _systemctl_offline enable "$u" || die "could not enable $u offline — check its [Install] section"
-  systemctl --root=/ is-enabled "$u" >/dev/null 2>&1 || die "$u is still not enabled after enabling it"
+  local u="$1" t linked=0
+  _systemctl_offline enable --no-reload "$u" || true
+
+  for t in $(_unit_wantedby "$u"); do
+    if [ -e "/etc/systemd/system/$t.wants/$u" ] || [ -e "/usr/lib/systemd/system/$t.wants/$u" ]; then
+      linked=1
+      continue
+    fi
+    # Fallback: create the symlink ourselves, in /usr rather than /etc. On a bootc host /usr is
+    # replaced wholesale by an image update while /etc is machine-local and three-way merged, so a
+    # default that belongs to the image belongs in /usr — and an administrator can still override it
+    # with a masking symlink in /etc.
+    mkdir -p "/usr/lib/systemd/system/$t.wants"
+    ln -sfn "../$u" "/usr/lib/systemd/system/$t.wants/$u"
+    [ -e "/usr/lib/systemd/system/$t.wants/$u" ] || die "could not enable $u for $t"
+    linked=1
+    found "enabled $u for $t by symlink (systemctl offline enable did not do it)"
+  done
+
+  [ "$linked" -eq 1 ] || die "$u has no WantedBy target — it cannot be enabled, only started by something else"
   did "enabled $u"
   record enabled-unit "$u"
 }
@@ -227,8 +266,10 @@ auros_preflight() {
   # Trusting the image to tell us what image it is defeats the point of pinning.
   local lock="$AUROS_BUILD_DIR/base.lock" lock_digest lock_image
   [ -f "$lock" ] || die "base.lock was not COPYed into the build context"
-  lock_digest="$(grep -E '^UPSTREAM_DIGEST=' "$lock" | head -1 | cut -d= -f2-)"
-  lock_image="$(grep -E '^UPSTREAM_IMAGE=' "$lock" | head -1 | cut -d= -f2-)"
+  # `|| true` on both: `set -o pipefail` is in force, so a grep that matches nothing would otherwise
+  # abort here with no message instead of reaching the explanatory die below.
+  lock_digest="$(grep -E '^UPSTREAM_DIGEST=' "$lock" | head -1 | cut -d= -f2- || true)"
+  lock_image="$(grep -E '^UPSTREAM_IMAGE=' "$lock" | head -1 | cut -d= -f2- || true)"
   [ -n "$lock_digest" ] || die "base.lock has no UPSTREAM_DIGEST line"
   case "$lock_digest" in sha256:*) ;; *) die "base.lock UPSTREAM_DIGEST is not a sha256 digest: $lock_digest" ;; esac
 

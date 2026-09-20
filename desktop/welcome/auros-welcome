@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Auros — installed to /usr/bin/auros-welcome
+# The "Help and Getting Started" entry in the start menu, and what first-run opens.
+#
+# Prefers KDE's own plasma-welcome (which we customise with our intro text and two extra pages) and
+# falls back to the static orientation page in a browser.  Which one is present is decided at BUILD
+# time and recorded in /usr/share/auros/desktop-facts.env; this script re-checks at run time anyway,
+# because the fact file records what we built, not what survived.
+set -euo pipefail
+
+if command -v plasma-welcome >/dev/null 2>&1; then
+    exec plasma-welcome "$@"
+fi
+
+if [[ -r /usr/share/auros/orientation.html ]] && command -v xdg-open >/dev/null 2>&1; then
+    exec xdg-open /usr/share/auros/orientation.html
+fi
+
+# Last resort: say something the user can act on, with no terminal.  kdialog ships with Plasma.
+if command -v kdialog >/dev/null 2>&1; then
+    exec kdialog --title "Auros" --sorry \
+        "The getting-started guide is not installed on this computer. Please tell whoever set it up."
+fi
+exit 1

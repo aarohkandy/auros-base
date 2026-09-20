@@ -1,0 +1,13 @@
+[Desktop Entry]
+# Auros — installed to /usr/share/applications/org.auros.Welcome.desktop and copied (executable) to
+# /etc/skel/Desktop/ so it is also an icon on a new user's desktop, the way Windows puts one there.
+Type=Application
+Name=Help and Getting Started
+GenericName=Guide to this computer
+Comment=Where things are, how to install programs, and what did not come across from Windows
+Exec=/usr/bin/auros-welcome
+Icon=help-contents
+Terminal=false
+Categories=System;Documentation;
+Keywords=help;guide;start;welcome;windows;getting started;manual;how;
+StartupNotify=true

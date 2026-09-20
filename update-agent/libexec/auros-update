@@ -1,0 +1,200 @@
+#!/usr/bin/bash
+#
+# auros-update -- the ExecStart of bootc-fetch-apply-updates.service on Auros.
+#
+# Contract (spec 6A): "pulls on boot, stages, keeps the previous image on disk, rolls back
+# automatically if the new image fails to reach a login prompt twice."
+#
+# This script owns the first three clauses. greenboot + the GRUB boot counter own the fourth.
+#
+# THE RULE
+#   Always fetch and stage.
+#   Reboot into the staged image only when nobody is using the machine.
+#
+# "Using the machine" means logind reports an Active session whose Class is `user`. The display
+# manager's own greeter is Class=greeter and does NOT count -- if it did, a laptop sitting at the
+# login screen would never update, which is most laptops most of the time, and check U1 (which
+# runs against a VM sitting at exactly that greeter) would never pass.
+#
+# Failure policy: registry unreachable, or another updater holding the bootc lock, exits 0. U5
+# says an offline machine must be a no-op, not a breakage, and a non-zero exit here becomes a
+# failed unit, which 40-no-new-failed-units.sh would then read as a regression and roll the
+# machine back because the school's uplink blinked. Real errors still exit non-zero.
+
+set -euo pipefail
+
+STATE_DIR=/var/lib/auros/update-agent
+CONF_DIR=/etc/auros/update-agent
+APPLY_POLICY_FILE="${CONF_DIR}/apply-policy"
+LOCK_RETRY_SECONDS=60
+
+log()  { printf '%s\n' "auros-update: $*"; }
+warn() { printf '<4>%s\n' "auros-update: $*" >&2; }
+err()  { printf '<3>%s\n' "auros-update: $*" >&2; }
+
+mkdir -p "${STATE_DIR}"
+
+# ---------------------------------------------------------------------------------------------
+# 0. Preconditions
+# ---------------------------------------------------------------------------------------------
+if ! command -v bootc >/dev/null 2>&1; then
+    err "bootc is not installed. This machine cannot update itself. Refusing to pretend otherwise."
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------------------------
+# 1. Apply policy
+# ---------------------------------------------------------------------------------------------
+# when-idle : stage always, reboot only when no user session is active   (default, shipped)
+# never     : stage always, never reboot on our own. For a fleet whose reboots the console drives.
+# always    : stage and reboot unconditionally. Servers and kiosks with no interactive user.
+apply_policy=when-idle
+if [[ -r "${APPLY_POLICY_FILE}" ]]; then
+    read -r apply_policy < "${APPLY_POLICY_FILE}" || apply_policy=when-idle
+    apply_policy="${apply_policy//[[:space:]]/}"
+fi
+case "${apply_policy}" in
+    when-idle|never|always) ;;
+    *)
+        warn "unrecognised apply-policy '${apply_policy}' in ${APPLY_POLICY_FILE}; using when-idle"
+        apply_policy=when-idle
+        ;;
+esac
+
+# ---------------------------------------------------------------------------------------------
+# 2. Is a human using this machine?
+# ---------------------------------------------------------------------------------------------
+# Conservative by construction: anything we cannot determine is treated as "yes, someone is
+# here". The cost of a wrong "no" is rebooting a child mid-sentence. The cost of a wrong "yes"
+# is that the update lands at the next boot instead of this minute.
+machine_in_use() {
+    command -v loginctl >/dev/null 2>&1 || { warn "loginctl missing; assuming in use"; return 0; }
+
+    local sessions session active class
+    if ! sessions="$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}')"; then
+        warn "could not enumerate sessions; assuming in use"
+        return 0
+    fi
+    [[ -z "${sessions}" ]] && return 1
+
+    while read -r session; do
+        [[ -z "${session}" ]] && continue
+        active="$(loginctl show-session "${session}" -p Active --value 2>/dev/null || echo unknown)"
+        class="$(loginctl show-session "${session}"  -p Class  --value 2>/dev/null || echo unknown)"
+        if [[ "${active}" == "unknown" || "${class}" == "unknown" ]]; then
+            warn "session ${session}: state unreadable; assuming in use"
+            return 0
+        fi
+        # greeter  = the login screen, nobody is logged in
+        # lock-screen = a locked session; someone IS logged in, their apps are open. In use.
+        if [[ "${active}" == "yes" && "${class}" == "user" ]]; then
+            log "session ${session} is an active user session"
+            return 0
+        fi
+    done <<< "${sessions}"
+
+    return 1
+}
+
+# ---------------------------------------------------------------------------------------------
+# 3. Fetch and stage
+# ---------------------------------------------------------------------------------------------
+bootc_json() { bootc status --json 2>/dev/null; }
+
+json_get() {
+    # json_get <jq-ish dotted path>   -- python3 so we do not depend on jq being in the image
+    python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for k in sys.argv[1].split("."):
+    if d is None: break
+    d = d.get(k) if isinstance(d, dict) else None
+print("" if d is None else (d if isinstance(d,str) else json.dumps(d)))
+' "$1" 2>/dev/null || printf ''
+}
+
+booted_digest_before="$(bootc_json | json_get status.booted.image.imageDigest)"
+log "booted digest before: ${booted_digest_before:-unknown}"
+
+stage_attempt() {
+    # `bootc upgrade` without --apply fetches and stages. It does not reboot.
+    bootc upgrade --quiet
+}
+
+upgrade_rc=0
+upgrade_out=""
+if ! upgrade_out="$(stage_attempt 2>&1)"; then
+    upgrade_rc=$?
+    warn "first fetch attempt failed (rc=${upgrade_rc}); retrying in ${LOCK_RETRY_SECONDS}s"
+    warn "${upgrade_out}"
+    sleep "${LOCK_RETRY_SECONDS}"
+    upgrade_rc=0
+    if ! upgrade_out="$(stage_attempt 2>&1)"; then
+        upgrade_rc=$?
+    fi
+fi
+[[ -n "${upgrade_out}" ]] && printf '%s\n' "${upgrade_out}"
+
+if (( upgrade_rc != 0 )); then
+    # Could not fetch. Offline (U5), or uupd.timer is holding the bootc lock -- Aurora ships
+    # uupd.timer enabled at 04:00 and uupd also runs `bootc upgrade`; bootc serialises with its
+    # own lock and the loser errors out. Neither is a fault of this machine's, and neither should
+    # produce a failed unit. Leave a breadcrumb and exit clean.
+    {
+        printf 'timestamp=%s\n' "$(date -uIseconds)"
+        printf 'rc=%s\n' "${upgrade_rc}"
+        printf 'output<<EOF\n%s\nEOF\n' "${upgrade_out}"
+    } > "${STATE_DIR}/last-error"
+    err "fetch failed (rc=${upgrade_rc}). Staying on the current image and retrying at the next timer run."
+    exit 0
+fi
+
+rm -f "${STATE_DIR}/last-error"
+date -uIseconds > "${STATE_DIR}/last-successful-fetch"
+
+# ---------------------------------------------------------------------------------------------
+# 4. Did anything actually stage?
+# ---------------------------------------------------------------------------------------------
+staged_digest="$(bootc_json | json_get status.staged.image.imageDigest)"
+if [[ -z "${staged_digest}" ]]; then
+    log "already up to date; nothing staged."
+    exit 0
+fi
+log "staged: ${staged_digest}"
+printf '%s\n' "${staged_digest}" > "${STATE_DIR}/staged-digest"
+
+# ---------------------------------------------------------------------------------------------
+# 5. Warn if this machine could not recover from a bad update
+# ---------------------------------------------------------------------------------------------
+# We do not refuse to stage on this basis. A machine that stops updating is the abandoned laptop
+# we sell against, and refusing would trade a recoverable risk for a certain one. But the
+# operator should be able to find this line in the journal afterwards.
+if [[ -r /boot/grub2/grub.cfg ]] && ! grep -q 'boot_counter' /boot/grub2/grub.cfg; then
+    err "ROLLBACK IS NOT WIRED: /boot/grub2/grub.cfg has no boot_counter logic."
+    err "Staging anyway, but a failed update on this machine will NOT roll back by itself."
+fi
+
+# ---------------------------------------------------------------------------------------------
+# 6. Apply, or wait for the next boot
+# ---------------------------------------------------------------------------------------------
+case "${apply_policy}" in
+    never)
+        log "apply-policy=never: staged and leaving it. It becomes active at the next boot."
+        exit 0
+        ;;
+    when-idle)
+        if machine_in_use; then
+            log "someone is using this machine. Staged and leaving it; it becomes active at the next boot."
+            exit 0
+        fi
+        log "no active user session."
+        ;;
+    always)
+        log "apply-policy=always."
+        ;;
+esac
+
+log "rebooting into ${staged_digest}"
+# --apply on an already-staged deployment is the reboot. bootc is idempotent here: it will not
+# re-fetch what it just staged.
+exec bootc upgrade --apply --quiet

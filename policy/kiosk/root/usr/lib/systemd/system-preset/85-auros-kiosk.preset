@@ -1,0 +1,21 @@
+# systemd presets for policy mode KIOSK.
+#
+# A preset is a declaration, not an enforcement. apply-policy runs the real enable/disable/mask for
+# every line below. See 85-auros-managed.preset.
+#
+# getty is disabled here and MASKED by apply-policy. Ctrl+Alt+F2 on a kiosk machine must not produce a
+# login prompt: the whole claim of the mode is that there is one application and no way past it, and a
+# text console is a way past it for anyone holding any set of credentials.
+#
+# What that costs, recorded rather than discovered: a kiosk machine with a broken kiosk service has no
+# local console to fix it from. Recovery is the GRUB path or a reimage. See policy/README.md,
+# "what kiosk costs you".
+enable auros-kiosk.service
+enable bootc-fetch-apply-updates.timer
+disable getty@.service
+disable serial-getty@.service
+disable debug-shell.service
+disable sddm.service
+disable gdm.service
+disable lightdm.service
+disable display-manager.service

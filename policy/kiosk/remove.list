@@ -1,0 +1,62 @@
+# Packages removed when policy mode KIOSK is applied.
+#
+# READ D12 BEFORE EDITING THIS FILE. We are not building a minimal image. We are removing the
+# BINARIES A USER COULD REACH A DESKTOP THROUGH from the one base we have, and leaving the shared
+# libraries the dependency closure will not release. That is a deliberate trade of image size for the
+# one-rebuild CVE property, and the real measured size is reported rather than a minimal one we did
+# not achieve. See policy/README.md, "what kiosk costs you".
+#
+# THIS LIST IS NOT THE POST-CONDITION. absent-binaries.list is. A package name can change, split or
+# be renamed upstream overnight; the binary a student would use to get a desktop cannot hide from
+# `command -v`. apply-policy removes what is here and then FAILS THE BUILD if anything in
+# absent-binaries.list is still on the image. Check S9 asserts the same thing independently.
+#
+# Missing packages are not an error -- they are logged and skipped. Upstream moves.
+
+# ---- the desktop shell itself -------------------------------------------------------------------
+plasma-workspace
+plasma-workspace-wayland
+plasma-workspace-x11
+plasma-desktop
+plasma-session
+gnome-shell
+gnome-session
+gnome-session-wayland-session
+
+# ---- display managers: the other way to a desktop ------------------------------------------------
+sddm
+sddm-x11
+sddm-wayland-plasma
+sddm-wayland-generic
+sddm-kcm
+gdm
+lightdm
+lightdm-gtk
+
+# ---- terminal emulators: a window with a shell in it is a way out --------------------------------
+konsole
+konsole5
+xterm
+gnome-terminal
+alacritty
+kitty
+foot
+
+# ---- desktop applications that are file managers, software installers or system editors ----------
+# Each of these is a door: browse the filesystem, install something, edit a unit, read a log.
+dolphin
+plasma-discover
+plasma-discover-notifier
+plasma-discover-flatpak
+plasma-discover-packagekit
+gnome-software
+nautilus
+kate
+kwrite
+plasma-systemmonitor
+ksysguard
+kinfocenter
+systemsettings
+plasma-welcome
+kde-partitionmanager
+gparted

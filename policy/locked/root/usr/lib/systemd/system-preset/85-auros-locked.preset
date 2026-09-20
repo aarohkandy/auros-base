@@ -1,0 +1,8 @@
+# systemd presets for policy mode LOCKED.
+#
+# A preset is a declaration, not an enforcement: it only affects units with no enablement state, and
+# only when something runs `systemctl preset`. apply-policy runs the real enable/disable/mask for
+# every line below, so the built image carries the state rather than an intention about it. See
+# 85-auros-managed.preset for the longer version of this warning.
+enable bootc-fetch-apply-updates.timer
+disable debug-shell.service

@@ -25,11 +25,22 @@
 #   assert    S1. Offline. Exit 2 if the Containerfile is not pinned to base.lock's digest.
 #   drift     Compare base.lock against what the tag resolves to now. Exit 0 = same, 10 = moved.
 #   update    Rewrite base.lock (and a literal digest in the Containerfile) to the current tag digest.
+#   mirror    D21. Ensure the pinned digest exists in OUR namespace, so the pin stays pullable after
+#             upstream garbage-collects it. Idempotent; a no-op when the mirror already has it.
 #
 # Options:
 #   --lock PATH            default <repo>/base.lock
 #   --containerfile PATH   default <repo>/Containerfile
+#   --mirror IMAGE         our mirror repo; default $AUROS_MIRROR_IMAGE, or MIRROR_IMAGE= in base.lock
 #   --quiet                suppress the human narration, keep the KEY=VALUE output
+#
+# D21, because it is the reason `mirror` exists and it is not obvious:
+#   ublue-os/aurora runs a GHCR cleanup weekly with older-than 90 days / keep-n-tagged 7. So the digest
+#   in base.lock is DELETED by upstream after ~90 days or 7 newer stable tags, whichever comes first.
+#   Pinning by digest protects us from a tag moving. It does not protect us from the blob going away.
+#   The failure mode is the worst kind: everything works for weeks, then every build fails with
+#   manifest-unknown on an image nobody touched — and a customer who forked our recipe to rebuild
+#   without us, which is the thing we advertise in spec §1.3, cannot.
 #
 # Idempotent: `update` run twice against an unmoved tag rewrites nothing and says so.
 #
@@ -42,6 +53,7 @@ REPO_DIR="$(cd "${SELF_DIR}/.." && pwd)"
 
 LOCK="${REPO_DIR}/base.lock"
 CONTAINERFILE="${REPO_DIR}/Containerfile"
+MIRROR="${AUROS_MIRROR_IMAGE:-}"
 QUIET=0
 CMD="${1:-}"
 shift || true
@@ -50,6 +62,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --lock)          LOCK="$2"; shift 2 ;;
     --containerfile) CONTAINERFILE="$2"; shift 2 ;;
+    --mirror)        MIRROR="$2"; shift 2 ;;
     --quiet)         QUIET=1; shift ;;
     *) echo "resolve-upstream.sh: unknown option '$1'" >&2; exit 1 ;;
   esac
@@ -76,6 +89,21 @@ lock_get() {
   v="$(grep -E "^${key}=" "$LOCK" | head -1 | cut -d= -f2- || true)"
   [ -n "$v" ] || die "$LOCK has no ${key}="
   printf '%s' "$v"
+}
+
+lock_get_opt() {  # like lock_get but returns empty instead of dying
+  local key="$1"
+  [ -f "$LOCK" ] || return 0
+  grep -E "^${key}=" "$LOCK" | head -1 | cut -d= -f2- || true
+}
+
+mirror_image() {
+  # Precedence: --mirror / $AUROS_MIRROR_IMAGE, then MIRROR_IMAGE= in base.lock. There is deliberately
+  # no hardcoded default with the org name in it: D1 says the namespace lives in exactly one file
+  # (auros.config.json), and CI passes it down from there. A default here would be a second one.
+  if [ -n "$MIRROR" ]; then printf '%s' "$MIRROR"; return 0; fi
+  local m; m="$(lock_get_opt MIRROR_IMAGE)"
+  printf '%s' "$m"
 }
 
 DIGEST_RE='sha256:[0-9a-f]{64}'
@@ -193,14 +221,28 @@ cmd_assert() {
        the same name, and 'same recipe in, same image out' would stop being true."
   fi
 
-  local cf_image cf_digest
+  local cf_image cf_digest mirror via
   cf_image="${CF_REF%@*}"
   cf_digest="${CF_REF##*@}"
+  mirror="$(mirror_image)"
+  via="upstream"
 
   if [ "$cf_image" != "$image" ]; then
-    emit s1_status fail
-    die "S1 FAIL — the Containerfile builds on '${cf_image}' but base.lock pins '${image}'.
+    # D21: the legitimate second source is OUR mirror of the same digest. `skopeo copy --all`
+    # preserves the manifest digest, so the mirror and upstream are the same bytes under a different
+    # name — which is exactly why accepting it here is safe rather than a loophole.
+    if [ -n "$mirror" ] && [ "$cf_image" = "$mirror" ]; then
+      via="mirror"
+    elif [ -z "$mirror" ] && printf '%s' "$cf_image" | grep -qE '/auros-upstream-mirror$'; then
+      # No mirror name was supplied (a bare local run). Accept on the D21 naming convention and say
+      # so out loud, so nobody reads this as the script having verified which mirror it is.
+      via="mirror (accepted on name convention; no --mirror supplied to verify against)"
+    else
+      emit s1_status fail
+      die "S1 FAIL — the Containerfile builds on '${cf_image}' but base.lock pins '${image}'
+       and the mirror is '${mirror:-<unset>}'.
        Spec §3: there is exactly one base, and it derives from exactly one upstream."
+    fi
   fi
 
   # fails_on: a mismatch of a single character

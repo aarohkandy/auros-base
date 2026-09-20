@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!--
+  Auros — installed to /usr/share/auros/orientation.html
+
+  THE DEGRADED PATH, not the main one.  /usr/bin/auros-welcome runs plasma-welcome when it is present
+  and falls back to opening this file in the default browser when it is not.  It exists so that a base
+  image which one night no longer carries plasma-welcome still greets a stranger with something, rather
+  than with a bare desktop.
+
+  It is deliberately shorter than the wizard: it cannot walk anyone through language or Wi-Fi, so it
+  does not pretend to.  Keep it in step with extra-pages/01-AurosOrientation.qml — desktop/README.md
+  GAP-1 records that this pairing is a manual, unchecked duplication.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auros — where things are</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; line-height: 1.55; max-width: 44rem;
+         margin: 0 auto; padding: 2rem 1rem 4rem; font-size: 1.05rem; }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  .sub { opacity: .75; margin-top: 0; }
+  section { border: 1px solid rgba(128,128,128,.4); border-radius: 3px; padding: 1rem 1.15rem; margin: 1rem 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 .4rem; }
+  p { margin: .4rem 0; }
+  .warn { border-left: 4px solid #BE3A12; }
+</style>
+</head>
+<body>
+<h1>This computer runs Auros</h1>
+<p class="sub">It was set up for your organisation. You will not need to type any commands.</p>
+
+<section>
+  <h2>The button at the bottom left is the Start menu</h2>
+  <p>Everything installed on this computer is in there. Start typing to search, the same as on Windows.
+     Tapping the Windows key on the keyboard opens it too.</p>
+</section>
+
+<section>
+  <h2>Your files are in Documents, Pictures, Downloads and Desktop</h2>
+  <p>The same names as before. Open the folder icon on the taskbar, or press the Windows key and E.
+     Double-click to open something &mdash; a single click only selects it.</p>
+</section>
+
+<section>
+  <h2>Install programs from Discover</h2>
+  <p>The shopping-bag icon on the taskbar. Search, then press Install. You never need to find a download
+     on the internet, and you never need a command.</p>
+</section>
+
+<section>
+  <h2>Updates happen by themselves, overnight</h2>
+  <p>Nothing to click and nothing to remember. If an update ever goes wrong, this computer puts the
+     previous version back on its own the next time it starts.</p>
+</section>
+
+<section class="warn">
+  <h2>Your old Windows programs did not come across</h2>
+  <p>Files, bookmarks, printers and Wi-Fi did. Programs did not, and cannot. You install the replacement
+     here instead, usually free, from Discover.</p>
+  <p><strong>Microsoft Office and Adobe programs do not run on this computer.</strong> Use Office on the
+     web in your browser, or keep one Windows machine for it.</p>
+</section>
+</body>
+</html>

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Auros — installed to /usr/libexec/auros/auros-bottles-setup
+# Run by auros-bottles-setup.service (systemd --user oneshot), guarded by a stamp file.
+#
+# DECISIONS.md D16.  The image ships Bottles (the recipe turns it on) and the template under /usr.
+# This is the part that cannot live in the image: the bottle itself, which lives in $HOME.
+#
+# THIS SCRIPT IS A NO-OP ON MOST MACHINES.  The .exe capability is optional and most recipes will not
+# enable it.  When Bottles is not installed the script exits 0 immediately and writes no stamp, so that
+# turning the capability on later in a recipe just works on the next login.
+set -euo pipefail
+
+STAMP_VERSION=v1
+TEMPLATE=/usr/share/auros/windows-apps/windows-apps.conf
+TEMPLATE_README=/usr/share/auros/windows-apps/README.txt
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/auros"
+STAMP="$STATE_DIR/windows-apps.${STAMP_VERSION}.stamp"
+ATTEMPTS="$STATE_DIR/windows-apps.${STAMP_VERSION}.attempts"
+LOG="$STATE_DIR/windows-apps.log"
+APP_ID=com.usebottles.bottles
+MAX_ATTEMPTS=3
+
+mkdir -p "$STATE_DIR"
+exec >>"$LOG" 2>&1
+echo "=== auros-bottles-setup $(date -Is) user=$(id -un) ==="
+
+[[ -e "$STAMP" ]] && { echo "already materialised"; exit 0; }
+
+if ! command -v flatpak >/dev/null 2>&1; then
+    echo "flatpak missing — capability not available"; exit 0
+fi
+if ! flatpak info "$APP_ID" >/dev/null 2>&1; then
+    echo "$APP_ID not installed — capability off for this recipe, exiting without a stamp"
+    exit 0
+fi
+
+# Bounded retries.  Creating a bottle downloads a Wine runner; on school Wi-Fi that legitimately fails.
+# Retrying forever would mean a failing unit on every login for the life of the machine, so we stop
+# after MAX_ATTEMPTS and leave Bottles perfectly usable by hand — the user can still press "Create" in
+# its own interface, which is a GUI path, so D4 is not violated by giving up.
+n=0
+[[ -f "$ATTEMPTS" ]] && n=$(cat "$ATTEMPTS" 2>/dev/null || echo 0)
+if (( n >= MAX_ATTEMPTS )); then
+    echo "gave up after $n attempts; Bottles remains usable directly"
+    exit 0
+fi
+echo $((n + 1)) > "$ATTEMPTS"
+
+read_conf() { # read_conf <section> <key>
+    awk -v s="[$1]" -v k="$2" '
+        $0 == s { inside = 1; next }
+        /^\[/   { inside = 0 }
+        inside && index($0, k "=") == 1 { sub(/^[^=]*=/, ""); print; exit }
+    ' "$TEMPLATE"
+}
+
+BOTTLE_NAME=$(read_conf bottle name)
+BOTTLE_ENV=$(read_conf bottle environment)
+INCOMING=$(read_conf folders incoming)
+BOTTLE_NAME=${BOTTLE_NAME:-Windows}
+BOTTLE_ENV=${BOTTLE_ENV:-application}
+INCOMING=${INCOMING:-Windows Programs}
+echo "template: name=$BOTTLE_NAME env=$BOTTLE_ENV incoming=$INCOMING"
+
+# 1. The drop folder, with the honest README beside it.
+mkdir -p "$HOME/$INCOMING"
+[[ -r "$TEMPLATE_README" ]] && cp -f "$TEMPLATE_README" "$HOME/$INCOMING/README.txt"
+
+# 2. The prefix itself, created by Bottles' own CLI so that Bottles owns its own format.
+#    Generous timeout: this downloads a runner over whatever the school's uplink is.
+if timeout 1800 flatpak run --command=bottles-cli "$APP_ID" \
+        new --bottle-name "$BOTTLE_NAME" --environment "$BOTTLE_ENV"; then
+    echo "bottle created: $BOTTLE_NAME"
+else
+    echo "bottles-cli new FAILED (attempt $((n + 1))/$MAX_ATTEMPTS) — will retry next login"
+    exit 0
+fi
+
+# 3. A launcher the user can recognise.  Bottles exports itself to the start menu as "Bottles", which
+#    means nothing to a school administrator looking for their Windows program.  We cannot rename a
+#    Flatpak's exported entry from inside the image (it is exported into /var at install time, and /var
+#    is not ours), so we add a plainly-named per-user entry here instead, and only once the app is
+#    actually present — so there is never a menu entry that opens nothing.
+APPDIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$APPDIR"
+cat > "$APPDIR/auros-windows-programs.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Windows Programs (Bottles)
+Comment=Run some older Windows programs. Read the notes in your "$INCOMING" folder first.
+Exec=flatpak run $APP_ID
+Icon=$APP_ID
+Terminal=false
+Categories=System;Utility;
+Keywords=windows;exe;bottles;wine;programs;
+DESKTOP
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPDIR" || true
+
+command -v notify-send >/dev/null 2>&1 && notify-send -a Auros \
+    "Windows programs are ready" \
+    "Put a .exe in your \"$INCOMING\" folder, then open \"Windows Programs (Bottles)\" from the Start menu." || true
+
+date -Is > "$STAMP"
+rm -f "$ATTEMPTS"
+echo "stamp written: $STAMP"

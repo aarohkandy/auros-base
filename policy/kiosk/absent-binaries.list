@@ -1,0 +1,29 @@
+# THE ACTUAL POST-CONDITION for policy mode KIOSK.
+#
+# apply-policy fails the build if any of these is still resolvable on the image after the removal
+# pass, and kiosk/assert.sh checks the same list again inside the booted VM. Check S9 checks it a
+# third time against the OCI image. Three independent checks of one list, because this is the single
+# claim in the product that a customer can disprove by pressing a key.
+#
+# Binaries, not packages, because a package can be renamed and a binary cannot. If upstream moves
+# plasmashell into a package called something else tomorrow, the removal fails loudly instead of
+# shipping a kiosk with a desktop inside it.
+#
+# The three S9 names first. Everything after them is ours.
+plasmashell
+gnome-shell
+sddm
+gdm
+lightdm
+startplasma-wayland
+startplasma-x11
+plasma_session
+konsole
+xterm
+gnome-terminal
+dolphin
+nautilus
+plasma-discover
+gnome-software
+systemsettings
+kinfocenter

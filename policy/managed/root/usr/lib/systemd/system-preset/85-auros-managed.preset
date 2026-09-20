@@ -1,0 +1,12 @@
+# systemd presets for policy mode MANAGED.
+#
+# READ THIS BEFORE TRUSTING THIS FILE. A preset is a DECLARATION of what `systemctl preset` should do
+# to a unit that has no enablement state yet. It does not change a unit that is already enabled or
+# already disabled, and it does nothing at all unless something runs `systemctl preset`.
+#
+# So this file on its own is the textbook "configured but not effective" artefact that check B5 fails
+# a mode for. It is shipped because it is the declarative statement of intent and because it is what
+# governs units installed later -- and apply-policy ALSO runs the real `systemctl enable/disable/mask`
+# for every line here, so the state on the built image is the state, not an intention about the state.
+enable bootc-fetch-apply-updates.timer
+disable debug-shell.service

@@ -1,0 +1,13 @@
+# Units that 40-no-new-failed-units.sh will not treat as a regression.
+#
+# One unit name per line. '#' starts a comment. Empty by design: every entry here is a health
+# check we have switched off, so every entry needs a reason next to it and a date.
+#
+# This file lives in /etc precisely so that a site can add a known-bad unit (a printer backend
+# that fails on one model of laptop, say) without us cutting a new image for it. In a bootc
+# image /etc is three-way merged on upgrade, so a machine's local additions here survive an
+# update, and machines that have not touched it keep tracking the image.
+#
+# Do NOT add a unit here to make a red boot go away. A red boot that rolls the machine back is
+# the safety property working. If a unit is failing, fix the unit or delete it from the image --
+# subtraction is the product.
