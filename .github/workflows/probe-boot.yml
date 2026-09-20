@@ -26,10 +26,12 @@ jobs:
           sudo mkdir -p /mnt/containers /mnt/out
           sudo chmod 777 /mnt/out
           sudo mkdir -p /etc/containers
-          echo '[storage]
-driver = "overlay"
-graphroot = "/mnt/containers"
-runroot = "/run/containers/storage"' | sudo tee /etc/containers/storage.conf
+          sudo tee /etc/containers/storage.conf >/dev/null <<'CONF'
+          [storage]
+          driver = "overlay"
+          graphroot = "/mnt/containers"
+          runroot = "/run/containers/storage"
+          CONF
           sudo podman system reset -f >/dev/null 2>&1 || true
           sudo podman info --format '{{.Store.GraphRoot}}' || true
 
