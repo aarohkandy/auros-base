@@ -170,10 +170,27 @@ have_pkg plasma-discover-flatpak || die "plasma-discover-flatpak is not installe
 # Filesystem-level assertion, in the spirit of check S9: the question is not what the package database
 # believes, it is which plugins exist on disk, because a backend .so that survives here gets loaded.
 backend_dirs="/usr/lib64/qt6/plugins/discover /usr/lib/qt6/plugins/discover /usr/lib64/qt5/plugins/discover /usr/lib/qt5/plugins/discover"
-# shellcheck disable=SC2086
-present="$(find $backend_dirs -name '*-backend.so' 2>/dev/null | xargs -r -n1 basename | sed 's/-backend\.so//' | sort -u | paste -sd, -)"
-# shellcheck disable=SC2086
-stray="$(find $backend_dirs -name '*-backend.so' 2>/dev/null | grep -Ev '/(flatpak|fwupd)-backend\.so$' || true)"
+# Search ONLY the directories that exist.
+#
+# This line used to pass all four to `find`. Three do not exist on Fedora 44 x86_64, and `find` exits 1
+# on a missing directory. Under `set -euo pipefail` that exit code propagates through the pipeline, and
+# inside `$( )` assigned to a variable, `set -e` then KILLS THE SCRIPT WITH NO MESSAGE. `2>/dev/null`
+# hides find's error text but not its exit status.
+#
+# It is the dual of D19. pipefail exists so failures are loud; here an EXPECTED absence — an optional
+# directory not being there — killed the build and suppressed the reason, which is the worst of both.
+# The diagnostic added below it never printed, because execution never reached it; the only clue was
+# that the log stopped mid-step with nothing at all.
+existing_dirs=""
+for _d in $backend_dirs; do [ -d "$_d" ] && existing_dirs="$existing_dirs $_d"; done
+if [ -n "$existing_dirs" ]; then
+  # shellcheck disable=SC2086
+  present="$(find $existing_dirs -name '*-backend.so' | xargs -r -n1 basename | sed 's/-backend\.so//' | sort -u | paste -sd, -)"
+  # shellcheck disable=SC2086
+  stray="$(find $existing_dirs -name '*-backend.so' | { grep -Ev '/(flatpak|fwupd)-backend\.so$' || true; })"
+else
+  present=""; stray=""
+fi
 [ -z "$stray" ] || die "non-Flatpak Discover backends are still on disk: $(printf '%s ' $stray)— they would be loaded and offered to a user"
 if [ -z "$present" ]; then
   # Print the ground truth WITH the failure rather than making the next build fetch it. Three

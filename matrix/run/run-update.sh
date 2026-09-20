@@ -280,7 +280,7 @@ if wait_for_digest "$DIG_C" "$(scale 1200)"; then SAW_C=1; log "the VM booted in
 if poll_until "$U3_DEADLINE" "rollback to ${PRE_U3:0:20}…" -- bash -c 'grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$AGENT" "$PRE_U3"; then
   # D25: a bootc rollback emits MESSAGE_ID=26f3b1eb24464d12aa5e7b544a6b5468. Finding it distinguishes
   # "the machine rolled itself back" from "something else happened to put us on the old digest".
-  RB_EVID=$(grep -ac '26f3b1eb24464d12aa5e7b544a6b5468\|greenboot.*[Rr]ollback\|Health check failed' "$SERIAL" 2>/dev/null || echo 0)
+  RB_EVID=$(grep -ac '26f3b1eb24464d12aa5e7b544a6b5468\|greenboot.*[Rr]ollback\|Health check failed' "$SERIAL" 2>/dev/null || true)
   if [ "$SAW_C" = 1 ] && [ "${RB_EVID:-0}" -ge 1 ]; then
     record U3 pass "booted into the unhealthy image ${DIG_C}, greenboot failed its required.d check, and the machine returned to ${PRE_U3} and reached a prompt without anyone touching it (${RB_EVID} rollback/health-failure line(s) on the console)"
   elif [ "$SAW_C" = 1 ]; then
@@ -344,11 +344,11 @@ sign_digest "$DIG_D" || warn "could not sign D for the U5 phase"
 stop_registry
 log "registry killed; the machine must now do nothing, gracefully"
 U5_DEADLINE=$(scale 600)
-poll_until "$U5_DEADLINE" "two failed fetch cycles" -- bash -c 'c=$(grep -ac "bootc-fetch-apply-updates" "$1" 2>/dev/null || echo 0); [ "${c:-0}" -ge 2 ]' _ "$SERIAL" || true
+poll_until "$U5_DEADLINE" "two failed fetch cycles" -- bash -c 'c=$(grep -ac "bootc-fetch-apply-updates" "$1" 2>/dev/null || true); [ "${c:-0}" -ge 2 ]' _ "$SERIAL" || true
 MID_U5=$(last_status_field "$AGENT" digest)
 start_registry || warn "could not restart the registry for U5's retry half"
 if wait_for_digest "$DIG_D" "$(scale 1200)"; then RETRIED=1; else RETRIED=0; fi
-POST_SYS=$(grep -ac 'Failed to start\|emergency mode\|Freezing execution' "$SERIAL" 2>/dev/null || echo 0)
+POST_SYS=$(grep -ac 'Failed to start\|emergency mode\|Freezing execution' "$SERIAL" 2>/dev/null || true)
 if [ "$MID_U5" != "$PRE_U5" ]; then
   record U5 fail "the booted digest changed to ${MID_U5} while the registry was unreachable"
 elif [ "$RETRIED" != 1 ]; then

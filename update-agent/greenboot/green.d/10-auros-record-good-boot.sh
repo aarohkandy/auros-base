@@ -92,5 +92,5 @@ except Exception:
 ' > "${STATE_DIR}/last-green-digest" 2>/dev/null || true
 fi
 
-echo "recorded green-boot baseline (promoted=${promoted}): $(grep -c . "${BASELINE}" 2>/dev/null || echo 0) failed unit(s), digest $(cat "${STATE_DIR}/last-green-digest" 2>/dev/null || echo unknown)"
+echo "recorded green-boot baseline (promoted=${promoted}): $(grep -c . "${BASELINE}" 2>/dev/null || true) failed unit(s), digest $(cat "${STATE_DIR}/last-green-digest" 2>/dev/null || echo unknown)"
 exit 0

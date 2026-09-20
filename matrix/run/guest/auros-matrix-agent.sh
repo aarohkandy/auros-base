@@ -72,10 +72,10 @@ booted_digest() {
 deployment_count() {
   local n=0
   if command -v ostree >/dev/null 2>&1; then
-    n=$(ostree admin status 2>/dev/null | grep -cE '^[*[:space:]] [A-Za-z]' || echo 0)
+    n=$(ostree admin status 2>/dev/null | grep -cE '^[*[:space:]] [A-Za-z]' || true)
   fi
   if [ "${n:-0}" -eq 0 ]; then
-    n=$(bootc status 2>/dev/null | grep -cE '^[[:space:]]*(booted|staged|rollback):' || echo 0)
+    n=$(bootc status 2>/dev/null | grep -cE '^[[:space:]]*(booted|staged|rollback):' || true)
   fi
   printf '%s' "${n:-0}"
 }
@@ -179,7 +179,7 @@ fi
 tick
 PW=$(asuser systemctl --user is-active pipewire 2>/dev/null || echo inactive)
 WP=$(asuser systemctl --user is-active wireplumber 2>/dev/null || echo inactive)
-SINKS=$(asuser wpctl status 2>/dev/null | awk '/Sinks:/{f=1;next}/^ *$/{f=0}f' | grep -cE '[0-9]+\.' || echo 0)
+SINKS=$(asuser wpctl status 2>/dev/null | awk '/Sinks:/{f=1;next}/^ *$/{f=0}f' | grep -cE '[0-9]+\.' || true)
 if [ "$PW" = active ] && [ "$WP" = active ] && [ "${SINKS:-0}" -ge 1 ]; then
   emit B7 pass "pipewire+wireplumber active for ${TEST_USER}; wpctl enumerates ${SINKS} sink(s)"
 else
@@ -192,8 +192,8 @@ UID_T=$(id -u "$TEST_USER" 2>/dev/null || echo 1000)
 WL=$(ls /run/user/"$UID_T"/wayland-* 2>/dev/null | head -1)
 SESS=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$TEST_USER" '$3==u{print $1; exit}')
 STYPE=$( [ -n "$SESS" ] && loginctl show-session "$SESS" -p Type --value 2>/dev/null || echo '')
-CRASH=$(journalctl -b --no-pager 2>/dev/null | grep -icE 'kwin_wayland.*(crash|segfault|core-dump)|plasmashell.*(segfault|core-dump)' || echo 0)
-DRM=$(ls /sys/class/drm/ 2>/dev/null | grep -c '^card' || echo 0)
+CRASH=$(journalctl -b --no-pager 2>/dev/null | grep -icE 'kwin_wayland.*(crash|segfault|core-dump)|plasmashell.*(segfault|core-dump)' || true)
+DRM=$(ls /sys/class/drm/ 2>/dev/null | grep -c '^card' || true)
 if [ "$POLICY_MODE" = kiosk ]; then
   if [ "${DRM:-0}" -ge 1 ] && [ "${CRASH:-0}" -eq 0 ]; then emit B8 pass "policy=kiosk: no desktop session by design; virtio-gpu present (${DRM} card node(s)); no compositor crash in the journal"
   else emit B8 fail "policy=kiosk: drm cards=${DRM} compositor crashes=${CRASH}"; fi
@@ -208,7 +208,7 @@ tick
 if ! command -v flatpak >/dev/null 2>&1; then
   emit B9 fail "flatpak is not installed in the image; userspace apps are supposed to come from Flathub (spec §3)"
 else
-  REMOTE=$(flatpak remotes --columns=name 2>/dev/null | grep -c '^flathub$' || echo 0)
+  REMOTE=$(flatpak remotes --columns=name 2>/dev/null | grep -c '^flathub$' || true)
   BAD=''
   for ref in $FLATPAK_REFS; do
     if ! flatpak install -y --noninteractive flathub "$ref" >/tmp/fp.log 2>&1; then BAD="$BAD ${ref}(install)"; continue; fi
@@ -299,8 +299,8 @@ fi
 
 # ── B11 — Journal is clean. Last, so it catches damage done by everything above. ─────────────────
 tick
-AVC=$(journalctl -b --no-pager 2>/dev/null | grep -cE 'avc: *denied' || echo 0)
-OOPS=$(journalctl -b -k --no-pager 2>/dev/null | grep -cE 'Oops:|kernel BUG at|general protection fault|Call Trace:' || echo 0)
+AVC=$(journalctl -b --no-pager 2>/dev/null | grep -cE 'avc: *denied' || true)
+OOPS=$(journalctl -b -k --no-pager 2>/dev/null | grep -cE 'Oops:|kernel BUG at|general protection fault|Call Trace:' || true)
 TAINT=$(cat /proc/sys/kernel/tainted 2>/dev/null || echo 0)
 FAILED_U=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
 NFAIL=$(printf '%s' "$FAILED_U" | wc -w)

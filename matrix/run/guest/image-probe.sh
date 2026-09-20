@@ -79,7 +79,7 @@ done
 emit DISPLAY_MANAGER_BINARIES "${DMS# }"
 emit DISPLAY_MANAGER_UNIT "$(exists /etc/systemd/system/display-manager.service)"
 emit AUROS_POLICY_DIRS "$(ls -1 /usr/share/auros/policy 2>/dev/null | tr '\n' ',')"
-emit AUROS_POLICY_UNITS "$(ls -1 /usr/lib/systemd/system/ 2>/dev/null | grep -c '^auros-policy-' || echo 0)"
+emit AUROS_POLICY_UNITS "$(ls -1 /usr/lib/systemd/system/ 2>/dev/null | grep -c '^auros-policy-' || true)"
 for m in open managed locked kiosk; do
   emit "POLICY_UNIT_${m}" "$(unit_present "auros-policy-${m}.service")"
 done

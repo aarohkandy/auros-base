@@ -73,7 +73,7 @@ current_failed() {
 }
 
 now="$(current_failed)"
-echo "failed units now: $(echo "${now}" | grep -c . 2>/dev/null || echo 0)"
+echo "failed units now: $(echo "${now}" | grep -c . 2>/dev/null || true)"
 [[ -n "${now}" ]] && echo "${now}" | sed 's/^/  now-failed: /'
 
 # Offer THIS snapshot, taken at THIS point in the boot, as the next baseline. green.d promotes it
@@ -101,7 +101,7 @@ fi
 # grep -v '^#' so a baseline written by any version of green.d that promoted the candidate file
 # verbatim cannot smuggle its `#boot-id` header in as if it were the name of a failed unit.
 before="$(grep -v '^[[:space:]]*#' "${BASELINE}" | grep -v '^$' | sort -u || true)"
-echo "failed units at the last green boot: $(echo "${before}" | grep -c . 2>/dev/null || echo 0)"
+echo "failed units at the last green boot: $(echo "${before}" | grep -c . 2>/dev/null || true)"
 
 new="$(comm -13 <(printf '%s\n' "${before}") <(printf '%s\n' "${now}") || true)"
 
