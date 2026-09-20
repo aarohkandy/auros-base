@@ -1,116 +1,127 @@
 # PROBE 2 — the Gate 1 exit path, end to end, on a free runner.
 #   derived image -> bootc-image-builder -> qcow2 -> QEMU boot -> does it reach a login prompt?
-# Probe 1 measured disk and pull cost. This one answers the question those numbers exist to serve.
-# If this passes, Gate 1 is feasible on free infrastructure. If it fails, we learn how now rather than
-# after building a week of tooling on top of the assumption.
+#
+# Revision 2. The first attempt failed for two reasons, both worth recording:
+#   1. Moving podman's graphroot to /mnt broke bootc-image-builder: it mounts the host store at
+#      /var/lib/containers/storage, and podman inside the container then found a libpod DB whose
+#      recorded static dir was /mnt/containers/libpod -> "database configuration mismatch". Probe 1
+#      measured 104 GB free on / anyway, and on this runner /mnt is not even a separate volume, so the
+#      move bought nothing and cost the build.
+#   2. The build step piped through `tail -40`, so the pipeline's exit status was tail's. A FAILING
+#      bootc-image-builder was scored as a passing step. `set -o pipefail` everywhere from now on —
+#      this is precisely the class of error the check matrix exists to prevent, and it appeared in our
+#      own probe within an hour of writing it.
 name: probe-boot
 on:
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
 jobs:
   boot:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
-      - name: Reclaim disk first — the qcow2 is the constraint
+      - name: Reclaim disk
         run: |
-          df -h / /mnt
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache /usr/share/swift 2>/dev/null || true
-          sudo docker system prune -af --volumes 2>/dev/null || true
-          echo "--- after reclaim ---"; df -h / /mnt
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          echo "--- after reclaim ---"; df -h /
 
-      - name: Put container storage on the big volume
+      - name: Enable KVM and install QEMU
         run: |
-          # /mnt is typically far larger than / on hosted runners. Both the image store and the qcow2
-          # output go there, because either one alone can exhaust the root filesystem.
-          sudo mkdir -p /mnt/containers /mnt/out
-          sudo chmod 777 /mnt/out
-          sudo mkdir -p /etc/containers
-          sudo tee /etc/containers/storage.conf >/dev/null <<'CONF'
-          [storage]
-          driver = "overlay"
-          graphroot = "/mnt/containers"
-          runroot = "/run/containers/storage"
-          CONF
-          sudo podman system reset -f >/dev/null 2>&1 || true
-          sudo podman info --format '{{.Store.GraphRoot}}' || true
-
-      - name: Enable KVM for the runner user
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm || true
           ls -l /dev/kvm || echo "NO /dev/kvm"
-          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf
           qemu-system-x86_64 --version | head -1
 
       - name: Build a minimal derived image
         run: |
           cat > Containerfile <<'EOF'
           FROM ghcr.io/ublue-os/aurora:stable
-          # A single marker file. This probe is about whether the pipeline works, not about hardening.
           RUN echo "auros-probe" > /etc/auros-probe && \
-              ostree container commit || true
+              ostree container commit
           EOF
           time sudo podman build -t localhost/auros-probe:latest -f Containerfile .
           sudo podman images
-          df -h / /mnt
+          df -h /
 
-      - name: bootc container lint on the derived image
+      - name: bootc container lint
         continue-on-error: true
-        run: sudo podman run --rm localhost/auros-probe:latest bootc container lint 2>&1 | tail -30
+        run: sudo podman run --rm localhost/auros-probe:latest bootc container lint
 
       - name: bootc-image-builder -> qcow2
         run: |
+          # A user we can actually log in as, so the boot check can prove more than "it reached a prompt".
           cat > config.toml <<'EOF'
           [[customizations.user]]
           name = "probe"
           password = "probe"
           groups = ["wheel"]
           EOF
-          set -x
+          mkdir -p output
+          # The builder image must be pulled first — it no longer pulls for itself.
+          sudo podman pull quay.io/centos-bootc/bootc-image-builder:latest
+          # Host store stays at its default location: moving it is what broke revision 1.
           time sudo podman run --rm --privileged \
             --security-opt label=type:unconfined_t \
-            -v /mnt/out:/output \
-            -v /mnt/containers:/var/lib/containers/storage \
-            -v "$PWD/config.toml:/config.toml:ro" \
+            -v "$PWD/output":/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v "$PWD/config.toml":/config.toml:ro \
             quay.io/centos-bootc/bootc-image-builder:latest \
-            --type qcow2 --rootfs ext4 --local \
-            localhost/auros-probe:latest 2>&1 | tail -40
-          sudo find /mnt/out -name '*.qcow2' -exec ls -lh {} \;
-          df -h / /mnt
+            --type qcow2 --rootfs ext4 \
+            localhost/auros-probe:latest
+          echo "--- what was produced ---"
+          sudo find output -type f -exec ls -lh {} \;
+          df -h /
 
-      - name: Boot the qcow2 in QEMU and watch the serial console
+      - name: Boot the qcow2 and watch the serial console
         id: boot
         run: |
-          QCOW=$(sudo find /mnt/out -name '*.qcow2' | head -1)
+          QCOW=$(sudo find "$PWD/output" -name '*.qcow2' | head -1)
+          if [ -z "$QCOW" ]; then echo "NO QCOW PRODUCED — stopping"; exit 1; fi
           echo "booting $QCOW"
           sudo chmod 666 "$QCOW"
           ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
           echo "acceleration: $ACCEL"
-          timeout 900 qemu-system-x86_64 \
+          # UEFI needs writable NVRAM; without it the firmware cannot record a boot entry.
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/vars.fd 2>/dev/null || cp /usr/share/OVMF/OVMF_VARS.fd /tmp/vars.fd
+          CODE=/usr/share/OVMF/OVMF_CODE_4M.fd; [ -f "$CODE" ] || CODE=/usr/share/OVMF/OVMF_CODE.fd
+          set +e
+          sudo qemu-system-x86_64 \
             -machine q35,accel=$ACCEL -cpu max -smp 4 -m 4096 \
+            -drive if=pflash,format=raw,unit=0,readonly=on,file="$CODE" \
+            -drive if=pflash,format=raw,unit=1,file=/tmp/vars.fd \
             -drive file="$QCOW",format=qcow2,if=virtio \
-            -bios /usr/share/ovmf/OVMF.fd \
             -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
             -display none -serial file:/tmp/serial.log -monitor none &
           QPID=$!
-          # Poll the serial log for a login prompt rather than sleeping a fixed time.
           FOUND=0
-          for i in $(seq 1 150); do
-            sleep 6
-            if grep -qiE "login:|Welcome to|systemd\[1\]: Startup finished|Reached target Graphical" /tmp/serial.log 2>/dev/null; then FOUND=1; break; fi
-            if ! kill -0 $QPID 2>/dev/null; then echo "qemu exited early"; break; fi
+          for i in $(seq 1 120); do
+            sleep 10
+            if sudo grep -qiE "login:|Reached target Graphical|Startup finished|sddm" /tmp/serial.log 2>/dev/null; then FOUND=1; break; fi
+            if ! sudo kill -0 $QPID 2>/dev/null; then echo "qemu exited early after ${i} polls"; break; fi
           done
-          echo "elapsed polls: $i  found=$FOUND"
+          echo "polls=$i found=$FOUND"
           sudo kill $QPID 2>/dev/null || true
-          echo "--- last 120 lines of serial ---"
-          tail -120 /tmp/serial.log || echo "(no serial output at all)"
+          set -e
+          echo "--- serial log, last 150 lines ---"
+          sudo tail -150 /tmp/serial.log 2>/dev/null || echo "(no serial output at all)"
+          sudo chmod 644 /tmp/serial.log 2>/dev/null || true
           echo "found=$FOUND" >> $GITHUB_OUTPUT
-          echo "## boot probe: found login/startup marker = $FOUND (accel=$ACCEL)" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## boot probe"
+            echo "- acceleration: \`$ACCEL\`"
+            echo "- polls (10s each): $i"
+            echo "- login/startup marker observed: **$FOUND**"
+          } >> $GITHUB_STEP_SUMMARY
 
-      - name: Serial log artifact
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: serial-log
           path: /tmp/serial.log
@@ -119,10 +130,9 @@ jobs:
       - name: Verdict
         if: always()
         run: |
-          echo "### disk at end" >> $GITHUB_STEP_SUMMARY
-          df -h / /mnt | tee -a $GITHUB_STEP_SUMMARY
+          df -h / >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.boot.outputs.found }}" = "1" ]; then
-            echo "GATE 1 PATH IS FEASIBLE ON FREE CI: image -> qcow2 -> boot -> login prompt." >> $GITHUB_STEP_SUMMARY
+            echo "**GATE 1 PATH IS FEASIBLE ON FREE CI:** image -> qcow2 -> boot -> login prompt." >> $GITHUB_STEP_SUMMARY
           else
             echo "Boot marker NOT observed. Read the serial log artifact before concluding anything." >> $GITHUB_STEP_SUMMARY
           fi

@@ -1,0 +1,11 @@
+# The pinned upstream digest. Resolved by CI, never edited by hand.
+# Check S1 fails the build if the Containerfile FROM does not resolve to exactly this.
+# A tag is a moving target: two builds a day apart would be different operating systems
+# wearing the same name, and "same recipe in, same image out" would stop being true.
+UPSTREAM_IMAGE=ghcr.io/ublue-os/aurora
+UPSTREAM_TAG=stable
+UPSTREAM_DIGEST=sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a43dc28d0d2f1
+UPSTREAM_RESOLVED_AT=2026-09-20T21:25:07Z
+UPSTREAM_CREATED=2026-09-15T20:33:50Z
+UPSTREAM_ARCH=linux/amd64
+UPSTREAM_PULL_SIZE_BYTES=3758096384
