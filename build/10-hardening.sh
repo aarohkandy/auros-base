@@ -52,9 +52,23 @@ did "kernel argument selinux=1 pinned via /usr/lib/bootc/kargs.d (enforcing=1 de
 _auros_effective_kargs() {
   # `kargs = ["a", "b"]` in kargs.d/*.toml, plus any options= line in a bootloader config, stripped of
   # comments first so prose can never be mistaken for configuration.
+  #
+  # ORDER OF OPERATIONS, and it is the whole correctness argument of this function:
+  #   1. strip comments LINE BY LINE, while the lines still exist;
+  #   2. join the file onto one line, so an array written across several lines is still seen. TOML
+  #      permits `kargs = [\n  "selinux=0",\n]` and the previous per-line sed could not see it at all
+  #      — an argument spread over two lines was invisible to this check, which is the same
+  #      permanently-green failure as `tr -d '[:space:]'` wearing different clothes;
+  #   3. split on commas, which puts each argument back on its OWN line;
+  #   4. and only then let the caller strip spaces.
+  # Joining before the split is safe; collapsing whitespace after it is the bug that made this check
+  # pass on every possible input for an hour. Do not reorder these.
   for f in /usr/lib/bootc/kargs.d/*.toml; do
     [ -e "$f" ] || continue
-    sed 's/#.*$//' "$f" | sed -n 's/.*kargs[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' | tr ',' '\n' | tr -d '"'"'"' []'
+    sed 's/#.*$//' "$f" | tr '\n' ' ' \
+      | grep -oE 'kargs[[:space:]]*=[[:space:]]*\[[^]]*\]' \
+      | sed 's/.*\[//; s/\]//' | tr ',' '\n' | tr -d '"'"'"' []' \
+      || true   # a file with no kargs key is legitimate; grep's exit 1 must not abort the loop
   done
   if [ -d /usr/lib/ostree-boot ]; then
     grep -RIhs '^[[:space:]]*options[[:space:]]' /usr/lib/ostree-boot 2>/dev/null | sed 's/^[[:space:]]*options[[:space:]]*//' | tr ' ' '\n'

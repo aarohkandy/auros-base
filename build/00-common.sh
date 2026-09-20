@@ -280,6 +280,40 @@ auros_preflight() {
     die "digest mismatch: Containerfile says $UPSTREAM_DIGEST, base.lock says $lock_digest — check S1 would fail this image"
   fi
   did "base digest matches base.lock: $lock_digest"
+
+  # ── The image-NAME assertion (the half the digest check does not cover) ───────────────────────
+  # The digest above proves WHAT bytes we built on. It does not prove that the FROM line names a
+  # repository anybody decided we may build on — UPSTREAM_IMAGE is a free-form build argument, and it
+  # is the string this function is about to bake into /usr/lib/auros/release as the image's permanent
+  # record of its own provenance. An unchecked provenance record is a provenance record that can be
+  # wrong, and it is the one a customer reads.
+  #
+  # D21 makes exactly TWO names legitimate, and the second is not obvious:
+  #   * the upstream image base.lock pins, and
+  #   * OUR MIRROR of that same digest. Upstream garbage-collects the blob we pin after ~90 days, so
+  #     the mirror is what keeps the pin pullable. `skopeo copy --all` preserves the manifest digest,
+  #     so the mirror is the same bytes under a different name — which is why accepting it is safe
+  #     rather than a loophole.
+  # Anything else is a build on a base nobody chose, and spec §3 says there is exactly one.
+  #
+  # tools/resolve-upstream.sh runs the authoritative version of this from OUTSIDE, against the
+  # resolved parent (check S1). This is the same rule applied from inside, where it fails in the
+  # build log next to its cause. The mirror name is not hardcoded here: D1 says the namespace lives
+  # in exactly one file, so it comes from AUROS_MIRROR_IMAGE or from MIRROR_IMAGE= in base.lock.
+  local upstream_image mirror_image
+  upstream_image="${UPSTREAM_IMAGE:-$lock_image}"
+  mirror_image="${AUROS_MIRROR_IMAGE:-$(grep -E '^MIRROR_IMAGE=' "$lock" | head -1 | cut -d= -f2- || true)}"
+  if [ -z "$upstream_image" ]; then
+    die "neither UPSTREAM_IMAGE nor base.lock's UPSTREAM_IMAGE names a base image — this build cannot say what it derives from"
+  elif [ "$upstream_image" = "$lock_image" ]; then
+    did "base image matches base.lock: $upstream_image"
+  elif [ -n "$mirror_image" ] && [ "$upstream_image" = "$mirror_image" ]; then
+    did "base image is our D21 mirror of the pinned digest: $upstream_image"
+  elif [ -z "$mirror_image" ] && printf '%s' "$upstream_image" | grep -qE '/auros-upstream-mirror$'; then
+    warn "base image '$upstream_image' accepted on the D21 NAMING CONVENTION alone — no MIRROR_IMAGE in base.lock and no AUROS_MIRROR_IMAGE, so nothing here verified which mirror this is"
+  else
+    die "base image mismatch: this build declares UPSTREAM_IMAGE=$upstream_image, base.lock pins ${lock_image:-<none>}, and the D21 mirror is ${mirror_image:-<unset>} — spec §3: there is exactly one base and it derives from exactly one upstream"
+  fi
   did "base image: ${UPSTREAM_IMAGE:-$lock_image}"
 
   # ── The image's record of itself ───────────────────────────────────────────────────────────────

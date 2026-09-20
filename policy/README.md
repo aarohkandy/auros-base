@@ -129,10 +129,73 @@ scripts follow, without exception:
 
 For `locked`, as an unprivileged user, that means actually running: `sudo`, `pkexec`, `su`,
 `systemd-run --scope`, `machinectl shell`, `rpm-ostree install`, `flatpak install --system`,
-`nmcli networking off`, `nmcli connection add`, `systemctl stop/disable/mask` the update timer, and
-writes to the policy files themselves. Each one is observed to fail, and the update timer is then
-asked whether it is still running — because three attempts failing is not the same as the timer
-surviving.
+`nmcli networking off`, `nmcli connection add`, `systemctl stop/disable/mask` the update timer,
+asking a KDE application to run a script, and writes to the policy files themselves. Each one is
+observed to fail, and the update timer is then asked whether it is still running — because three
+attempts failing is not the same as the timer surviving.
+
+### Not every attempt is evidence, and the ones that are not say so
+
+`aurosprobe` is a sysusers system account: it belongs to no privileged group and has no logind
+session on any image in any mode. On a stock **`open`** bootc host that subject already cannot
+`sudo`, cannot `su`, cannot `systemd-run --scope`, cannot `machinectl shell`, and cannot write to
+`/etc/sudoers.d`, `/etc/polkit-1/rules.d`, `/usr/lib/auros/policy-mode` or `/etc/xdg/kdeglobals` —
+the first four because it is in no sudo group, the last four because `/etc` is root-owned and `/usr`
+is read-only. **Their failure under `locked` is therefore consistent with the mode but does not
+prove it.** An audit was right to call roughly half of a green `RESULT: pass` line padding.
+
+They are kept — they would catch a sudoers drop-in that accidentally granted `ALL`, or a root
+password that got set — but they are now labelled, and the distinction is enforced rather than
+remembered:
+
+| | Attempts | Why |
+|---|---|---|
+| **Primary** | the `pkcheck` answers, and the KDE KAuthorized doors | These differ between `open` and `locked` for this exact subject: `open` answers **3** ("an administrator could authorise this") where `locked` answers **1**, and a KDE application that runs a script on `open` refuses to on `locked` |
+| **Corroborating** | `sudo`, `su`, `pkexec`, `systemd-run`, `machinectl`, `nmcli`, `systemctl stop/disable/mask`, the four policy-file writes | Fail on `open` too. `a_finish` prints the list under **EVIDENCE CLASSIFICATION** at the end of every run |
+
+Two polkit actions sit between the two rows and are marked `session-dependent` in `a_deny`:
+`org.freedesktop.NetworkManager.network-control` and `…enable-disable-network` carry
+`allow_active=yes` in NetworkManager's own policy, so whether a *sessionless* probe is answered 1 or
+3 on an **open** image depends on the base's defaults rather than on ours — and nobody here has
+measured it, because D5 says this machine cannot boot one. Guessing in either direction would be
+wrong: guessing "discriminating" reds the base image on an assumption, guessing "not" throws away
+evidence we may have. So they are counted as corroborating in every mode, and the negative control
+prints **PROMOTE** if it observes 0 or 3 for one of them — that is the measurement, and D24 says the
+measurement wins. Tighten the classification in the commit that records it.
+
+**`open/assert.sh` now runs the same suites at level `control`** and makes the claim testable rather
+than asserted in prose. `a_pk_not_hard_denied` **fails** if an action `locked` denies is already
+refused outright (pkcheck 1) on an image carrying none of our rules — because a denial we did not
+cause is not evidence anywhere. `a_suite_policy_immutable` is run there as well, and its four
+attempts are reported for what they are: a **floor property of the base image**, true in every mode.
+
+### The KDE half of `locked`, which had nothing attempting it
+
+D3 chose KDE because "the KDE Kiosk framework is the only lockdown mechanism strong enough to make
+our `locked` and `kiosk` policy modes provable rather than merely configured", and
+`locked/description.md` tells the customer that Dolphin's *Open Terminal Here*, Kate's terminal panel
+and the run-command box are switched off. Until `a_suite_kde_kiosk` existed, **nothing on the machine
+attempted any of it** — the claim rested on a `.ini` file merged into `/etc/xdg/kdeglobals` and
+believed. That is exactly B5's `fails_on: configured-but-not-effective`, on the one policy artefact a
+*later build step* overwrites wholesale (see *The kdeglobals ordering hazard*).
+
+The attempt does not read an exit code, because a denied Konsole raises a `KMessageBox` whose exit
+code is not a contract and whose modal dialog under an offscreen platform is a hang waiting to be
+scored as flakiness. It asks the application to run a script that touches a marker file, waits, and
+looks for the marker:
+
+```
+marker present  => the door is OPEN, a shell ran
+marker absent   => the door is SHUT, nothing ran
+```
+
+Two independent doors through the same `KAuthorized("shell_access")` gate are attempted: `konsole -e`
+and `kioclient exec` (KIO's `OpenUrlJob` consults the same gate before executing a local binary).
+`managed` asserts the doors **open** — that is what stops `managed` and `locked` quietly converging
+— and `open` asserts them open as the control. If they cannot be opened on an unrestricted image,
+`open/assert.sh` goes red and says that every KAuthorized denial in the matrix is an artefact.
+
+`policy/tests/assert-lib.test.sh` drives both directions against stubs.
 
 ### The false-green this design exists to prevent
 
@@ -178,7 +241,33 @@ manager, and no text console: `plasmashell`, the display managers and the termin
 
 The session is `auros-kiosk.service` → **cage** (a Wayland kiosk compositor) → the one application
 named in `/etc/auros/kiosk.conf`. `cage` is deliberately started **without `-s`**, which is the flag
-that enables VT switching; without it there is nowhere for `Ctrl+Alt+F2` to go.
+that enables VT switching.
+
+**What is asserted about `Ctrl+Alt+F2`, and what is not.** The assertion used to run `chvt 2` and
+infer from its failure that `-s` had been omitted. Both halves were wrong. `chvt` issues
+`VT_ACTIVATE` on `/dev/tty0`, which needs `CAP_SYS_TTY_CONFIG` or ownership of the tty, and
+`aurosprobe` has neither — so it failed on every machine in every mode including a stock Aurora
+desktop, and D19 says **a step that cannot fail is not a check**. The inference was also wrong in
+mechanism: `-s` binds `Ctrl+Alt+Fn` *inside cage's own wlroots session*, which an unprivileged `chvt`
+from an unrelated process never reaches.
+
+What is asserted instead is the property that actually holds, and it is asserted in two places:
+
+* **every text console is off** — `getty@`, `getty@ttyN`, `autovt@`, `serial-getty@`,
+  `console-getty` and `debug-shell` are masked (unit state) **and** none of them is running
+  (observed, because a getty that was already running when the mask was applied is still on a VT).
+  So a VT switch by any route lands on a blank console, never on a text prompt.
+* **the compositor's own argv** — `apply-policy` records the VT posture at
+  `/usr/lib/auros/policy/kiosk-vt-switch`, and `kiosk/assert.sh` reads the *running* compositor's
+  `/proc/<pid>/cmdline` and fails if `-s` is there. The record alone would be a configuration file,
+  which is what B5 fails; the argv is the observation.
+
+**The weston fallback is now opt-in, and this is why.** `libweston`'s DRM backend binds VT switching
+**unconditionally** — there is no flag to omit, so the cage reasoning does not transfer. The
+customer-facing promise still holds on that path, because every getty is masked, but it holds by one
+mechanism instead of two. `apply-policy` therefore **refuses to build** a weston kiosk unless
+`AUROS_KIOSK_ALLOW_WESTON=1` is set deliberately; when it is, the limit is recorded in the state
+file, reported by `kiosk/assert.sh` at runtime, and stated to the customer in `kiosk/description.md`.
 
 **We deliberately do not use greetd.** greetd is a login/display manager by function, and check S9
 asserts that no display-manager binary exists on a kiosk image. We would rather have no such binary
@@ -323,11 +412,75 @@ Recorded rather than assumed silently, because these files are owned by other ta
 | Assumption | Owner | If it is wrong |
 |---|---|---|
 | The Containerfile COPYs `policy/` to `/tmp/auros-build/policy` before running `build/*.sh` | Containerfile | `20-policy.sh` falls back to `$SELF/../policy`, and fails loudly naming both paths if neither exists |
-| The update timers are `bootc-fetch-apply-updates.timer` **and** `uupd.timer` | A4 (update agent) | Confirmed against `build/30-update-agent.sh`: Aurora ships `uupd.timer` as well as bootc's own timer. The assertions attempt to stop **every** active timer among four candidates, not the first — a mode that blocks one and not the other lets a user half-disable updates. None active is a **fail**, never a skip |
+| The update timers are `bootc-fetch-apply-updates.timer` **and** `uupd.timer` | A4 (update agent) | Confirmed against `build/30-update-agent.sh`: Aurora ships `uupd.timer` as well as bootc's own timer. The assertions attempt to stop **every** active timer among four candidates, not the first — a mode that blocks one and not the other lets a user half-disable updates. None active is a **fail**, never a skip. The four names live in **one** array, `A_UPDATE_TIMERS` in `lib/assert-lib.sh`; `open/assert.sh` used to keep a second copy that omitted `uupd.timer` — the unit D22 names as the real driver — which would have reported "no update timer is active" on a machine `uupd` was patching perfectly well |
 | Something puts the school's IT account into the `aurosadmin` group | first-boot setup | `apply-policy` prints a loud multi-line warning at build time; `AUROS_ADMIN_USERS="name"` sets it at build time instead |
 | A GRUB superuser password is set | A2 (hardening) | Physical access defeats every mode here; recorded as a note in `locked/assert.sh` and in *Honest limits* above |
 | `/etc/xdg/kdeglobals` is also written by the Windows-familiarity layer | A10 / `40-windows-feel.sh` | **Confirmed, and it is an ordering hazard rather than an assumption** — see *The kdeglobals ordering hazard* below |
 | Check **B1** ("reaches a login prompt") has a kiosk clause | matrix | **Kiosk cannot pass B1 as written** — there is no login prompt, by design. B1 needs `kiosk ⇒ the kiosk session is active and the application process is running`. `kiosk/assert.sh` already asserts exactly that. Flagged, not edited: `checks.yaml` is not this task's file |
+| Check **B12** ("zero-terminal audit") has a per-mode clause | matrix + `tools/gate.mjs` | **`locked` and `kiosk` cannot pass B12 as written, and the publish gate requires every check for every digest** — see the section below. This directory has done its half: every mode declares its B12 criteria in `<mode>/mode.env`, `apply-policy` writes the active mode's declaration to `/usr/lib/auros/policy/claims.env`, and `assert-zero-terminal` (the B12 implementation) evaluates against it. `checks.yaml` and `gate.mjs` still need the clause spelled out below. Flagged, not edited: neither file is this task's |
+
+### The publish gate makes three of the four modes unshippable, and this is the exact clause it needs
+
+This is the one cross-layer item that is not a note. `tools/gate.mjs` requires **all** of
+S1–S10, B1–B12, U1–U5, R1 for every digest, with no per-mode clause and no exemption — the file
+contains no occurrence of `kiosk`, `locked`, `managed` or `policy`. Meanwhile:
+
+* `locked` denies the whole `org.freedesktop.NetworkManager.`, `org.freedesktop.Flatpak.`,
+  `org.freedesktop.packagekit.` and `org.freedesktop.locale1.` prefixes
+  (`00-auros-locked.rules`) and sets `kcm_networkmanagement=false` and `kcm_regionandlang=false`
+  (`locked/kdeglobals/20-control-module-restrictions.ini`). **Three of B12's four GUI tasks are
+  unreachable by construction**, and `locked/description.md` tells the customer so.
+* `kiosk` additionally has no login prompt (B1) and no desktop at all.
+
+So the gate silently makes `open` the only shippable mode — which means the kiosk fleet and the
+locked exam-room cart, the subtraction product we sell, have **no path to a customer**. A recipe
+that cannot be published is worse than one that fails.
+
+**What this directory changed, which is all it can change:** the criteria are now declarative and
+per-mode, in the same place the mode itself is declared.
+
+| Mode | `AUROS_MODE_B1` | install an app | Wi-Fi | printer | language |
+|---|---|---|---|---|---|
+| `open` | `login-prompt` | `seat` | `seat` | `seat` | `seat` |
+| `managed` | `login-prompt` | `admin` | `admin` | `seat` | `seat` |
+| `locked` | `login-prompt` | **`none`** | **`none`** | `seat` | **`none`** |
+| `kiosk` | **`kiosk-session`** | `n/a` | `n/a` | `n/a` | `n/a` |
+
+`seat` = any user at the machine, through the GUI. `admin` = the GUI offers it and asks for the
+administrator password (**a password is not a terminal**; D4 forbids needing a command line, not
+needing a credential). `none` = B12 asserts the **opposite** — the GUI must not offer it, the KDE
+Control Module must refuse to open, and `pkcheck` must answer 1. `n/a` = there is no desktop, and
+the kiosk criterion is asserted instead.
+
+Note that `none` is not a skip. It is a check that can go red **in both directions**: red if the
+restriction leaks and the machine offers a door it then slams, red if the restriction quietly stops
+being applied. It is also the only runtime check that would notice `build/40-windows-feel.sh`
+overwriting `/etc/xdg/kdeglobals` after `apply-policy` merged the restrictions into it.
+`desktop/tests/b12-modes.test.sh` proves both directions.
+
+**What the matrix and the gate still owe, stated so it can be pasted in:**
+
+```yaml
+# checks.yaml, B1
+criterion: >
+  policy=open|managed|locked  => display manager active / greeter detected within 120 s
+  policy=kiosk                => auros-kiosk.service active and the recorded compositor running
+                                 as auroskiosk, within 120 s of power-on
+
+# checks.yaml, B12
+criterion: >
+  each of installing an application, connecting to Wi-Fi, adding a printer and changing the
+  language is evaluated against the recipe's policy mode as declared in
+  /usr/lib/auros/policy/claims.env: seat|admin => reachable and launches; none => NOT offered and
+  refused; n/a => the kiosk criterion is asserted instead. A missing claims file is a FAIL, never
+  a fall-back to `open`.
+```
+
+```js
+// tools/gate.mjs — the gate must read the mode off the recipe and judge B1/B12 against it,
+// rather than requiring open's criteria of every digest. Bump MATRIX_VERSION in the same change:
+// a pass recorded under the old, mode-blind matrix is not evidence of a pass under this one.
+```
 
 ---
 
@@ -340,6 +493,8 @@ policy/
 ├── lib/policy-lib.sh         build-time helpers: removal ladder, traps, merges, manifests
 ├── lib/assert-lib.sh         runtime helpers: attempt primitives, controls, shared suites
 ├── common/root/              shipped in EVERY mode: the polkit canaries, aurosadmin, aurosprobe
+├── tests/assert-lib.test.sh  the assertions go BOTH red and green, against stubs (D19)
+├── tests/policy-lib.test.sh  install_weak_deps lands in the [main] SECTION, not at EOF
 ├── open/                     description.md · mode.env · assert.sh
 ├── managed/                  + root/ · kdeglobals/
 ├── locked/                   + root/ · kdeglobals/
@@ -347,7 +502,23 @@ policy/
                                 · keep.list · remove-groups.list
 ```
 
+`<mode>/mode.env` carries the mode's title and one-liner **and its B1/B12 criteria** (see the table
+above). `apply-policy` sources it and writes the active mode's declaration to
+`/usr/lib/auros/policy/claims.env`, on the read-only `/usr`, where the runtime checks read it.
+
+The two test files run anywhere `bash` does — no VM, no image, no podman — and neither touches the
+host. Run them directly:
+
+```
+bash auros-base/policy/tests/assert-lib.test.sh
+bash auros-base/policy/tests/policy-lib.test.sh
+bash auros-base/desktop/tests/b12-modes.test.sh
+```
+
 `../build/20-policy.sh` installs all of it into the image and activates the base's own mode, which is
 `open` — not because open is a default worth having, but because the base is tested against the full
-matrix and checks **B1** and **B12** only hold literally in open. `AUROS_POLICY=<mode>` overrides it,
-which is how CI builds a single-mode image to run B5 against.
+matrix and checks **B1** and **B12** hold literally in open. (They are now evaluated per-mode for the
+other three — see *The publish gate makes three of the four modes unshippable* above — but the base
+is still built `open`, because it is the image every recipe inherits and the one the full matrix
+runs against.) `AUROS_POLICY=<mode>` overrides it, which is how CI builds a single-mode image to run
+B5 against.

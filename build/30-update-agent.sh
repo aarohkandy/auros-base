@@ -272,9 +272,24 @@ step "B1. signature enforcement -- D8"
 # succeeds while verifying nothing. All four pieces below must be true and EACH ONE ALONE LOOKS
 # LIKE SUCCESS.
 
+# A PRODUCTION key if we have one; otherwise the DEVELOPMENT key, which is enough to build and boot
+# but is refused at publish time (signing/keys/DEVELOPMENT-KEY.md).
+#
+# The distinction matters because the two questions are different. "Can this image be built and
+# exercised?" needs a key that EXISTS, so the policy references something real and the signature
+# machinery can be tested end to end. "Can this image be trusted by a school?" needs a key whose
+# CUSTODY someone is accountable for. Conflating them either blocks all testing until a human mints a
+# credential, or ships a throwaway key to a customer. Neither is acceptable, so the build tells them
+# apart and records which one it used.
 KEY_SRC="$SIGN/keys/auros.pub"
+AUROS_KEY_KIND=production
+if [ ! -s "$KEY_SRC" ] && [ -s "$SIGN/keys/auros-development.pub" ]; then
+  KEY_SRC="$SIGN/keys/auros-development.pub"
+  AUROS_KEY_KIND=development
+  warn "using the DEVELOPMENT signing key. This image can be built, booted and matrix-tested; it CANNOT be published to a customer-facing tag. See signing/keys/DEVELOPMENT-KEY.md."
+fi
 [ -s "$KEY_SRC" ] || die \
-"signing/keys/auros.pub is missing or empty. This build is REFUSED rather than completed.
+"no signing key: neither signing/keys/auros.pub nor signing/keys/auros-development.pub. This build is REFUSED rather than completed.
 
    An image built without the key would carry a policy referencing /usr/lib/pki/containers/auros.pub,
    find nothing there, and refuse every update for the rest of that machine's life -- in a school,
@@ -284,6 +299,12 @@ KEY_SRC="$SIGN/keys/auros.pub"
    Generating the key pair is a human action -- it mints a long-lived organisational credential.
    See auros-base/signing/keys/README.md, and signing/RISKS.md R3."
 grep -q 'BEGIN PUBLIC KEY' "$KEY_SRC" || die "$KEY_SRC is not a PEM public key"
+# Written into the image itself rather than exported as a build variable. The publish step reads it
+# back OUT of the built image, so a workflow cannot claim "production" for an image built with the
+# development key — the answer travels with the artifact, not alongside it.
+printf '%s\n' "$AUROS_KEY_KIND" > /usr/lib/auros/signing-key-kind
+chmod 0644 /usr/lib/auros/signing-key-kind
+did "signing key kind recorded in the image: $AUROS_KEY_KIND"
 if grep -q 'BEGIN .*PRIVATE KEY' "$KEY_SRC"; then
   die "$KEY_SRC contains a PRIVATE key. Refusing to bake a signing key into an image that ships to customers."
 fi

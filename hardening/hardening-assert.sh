@@ -15,6 +15,17 @@
 # reference — task A4 owns that directory.
 set -uo pipefail
 
+# ── THE ONE TEST SEAM ───────────────────────────────────────────────────────────────────────────
+# Every absolute path below is taken relative to ${AUROS_TEST_ROOT}, which is unset on a real machine
+# -- ${R} is then empty and the paths are exactly the paths. tests/10-hardening.test.sh sets it to a
+# scratch tree with stub binaries on PATH, which is how each branch here is shown to be REACHABLE,
+# including the ones that go red. Same seam, same reasoning and same spelling as
+# update-agent/greenboot/check/required.d/40-no-new-failed-units.sh.
+#
+# This assertion is the runtime half of an image-wide safety claim, and until it was exercised nobody
+# had ever seen it say FAIL. A claim nobody has watched fail is a claim, not a check (D19).
+R="${AUROS_TEST_ROOT:-}"
+
 FAIL=0
 pass() { printf 'auros-hardening-assert: PASS  %s\n' "$*"; }
 fail() { printf 'auros-hardening-assert: FAIL  %s\n' "$*"; FAIL=1; }
@@ -23,9 +34,9 @@ fail() { printf 'auros-hardening-assert: FAIL  %s\n' "$*"; FAIL=1; }
 # /sys/fs/selinux/enforce is read directly rather than via getenforce, because libselinux-utils is
 # not guaranteed to survive a recipe's prune list and an assertion that disappears with a tool is not
 # an assertion.
-if [ ! -e /sys/fs/selinux/enforce ]; then
-  fail "SELinux is not enabled at all (/sys/fs/selinux/enforce absent) — the kernel booted without it"
-elif [ "$(cat /sys/fs/selinux/enforce 2>/dev/null)" = "1" ]; then
+if [ ! -e "${R}/sys/fs/selinux/enforce" ]; then
+  fail "SELinux is not enabled at all (${R}/sys/fs/selinux/enforce absent) — the kernel booted without it"
+elif [ "$(cat "${R}/sys/fs/selinux/enforce" 2>/dev/null)" = "1" ]; then
   pass "SELinux enforcing"
 else
   fail "SELinux is permissive — expected enforcing"
@@ -80,8 +91,8 @@ else
 fi
 
 # ── sudo: no passwordless escalation anywhere in the effective configuration ─────────────────────
-if grep -rlsE '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -q .; then
-  fail "NOPASSWD rule in force: $(grep -rlsE '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | tr '\n' ' ')"
+if grep -rlsE '^[^#]*NOPASSWD' "${R}/etc/sudoers" "${R}/etc/sudoers.d" 2>/dev/null | grep -q .; then
+  fail "NOPASSWD rule in force: $(grep -rlsE '^[^#]*NOPASSWD' "${R}/etc/sudoers" "${R}/etc/sudoers.d" 2>/dev/null | tr '\n' ' ')"
 else
   pass "no NOPASSWD sudo rule"
 fi

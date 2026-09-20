@@ -317,7 +317,7 @@ chmod 0444 "$AUROS_MODE_STAMP"
     printf 'AUROS_MODE_B12_DESKTOP=%s\n'       "${AUROS_MODE_B12_DESKTOP:-yes}"
 } > "$AUROS_POLICY_STATE/claims.env"
 chmod 0444 "$AUROS_POLICY_STATE/claims.env"
-log "claims recorded at $AUROS_POLICY_STATE/claims.env (B1=$AUROS_MODE_B1, B12 install=$AUROS_MODE_B12_INSTALL_APP wifi=$AUROS_MODE_B12_WIFI printer=$AUROS_MODE_B12_PRINTER language=$AUROS_MODE_B12_LANGUAGE)"
+log "claims recorded at $AUROS_POLICY_STATE/claims.env (B1=${AUROS_MODE_B1:-login-prompt}, B12 install=${AUROS_MODE_B12_INSTALL_APP:-seat} wifi=${AUROS_MODE_B12_WIFI:-seat} printer=${AUROS_MODE_B12_PRINTER:-seat} language=${AUROS_MODE_B12_LANGUAGE:-seat})"
 
 # ── the report ───────────────────────────────────────────────────────────────────────────────────
 {

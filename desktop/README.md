@@ -32,7 +32,8 @@ desktop/
 ├── welcome/                        first-run flow (plasma-welcome + our pages + the oneshot)
 ├── compat/                         the .exe capability, D16-shaped
 ├── skel/                           (created by the build script, not stored here)
-├── assert-zero-terminal.sh         check B12
+├── assert-zero-terminal.sh         check B12 (mode-aware; reads /usr/lib/auros/policy/claims.env)
+├── tests/b12-modes.test.sh         proves B12 goes red per mode, against stubs (D19)
 └── EXE-COMPATIBILITY.md            the honest compatibility statement
 ```
 
@@ -99,6 +100,55 @@ immediately.
 It additionally checks the things D4 asked for that B12's wording does not name: double-click as the
 user's session actually resolves it, a taskbar containing a start menu and task buttons, the Windows
 folder names present and `Templates`/`Public` absent, and the first-run flow being installed and enabled.
+
+### B12 is evaluated against the recipe's policy MODE, not against `open`
+
+B12's four tasks are written in `checks.yaml` against what an `open` image does, because the base is
+an open image. Three of the four policy modes deliberately do something else, and evaluating them
+against `open`'s list is not a strict test — it is an **unshippable recipe**:
+
+| mode | install an app | Wi-Fi | printer | language |
+|---|---|---|---|---|
+| `open` | `seat` | `seat` | `seat` | `seat` |
+| `managed` | `admin` | `admin` | `seat` | `seat` |
+| `locked` | **`none`** | **`none`** | `seat` | **`none`** |
+| `kiosk` | `n/a` | `n/a` | `n/a` | `n/a` |
+
+* **`seat`** — any user at the machine, through the GUI. Asserted as before: the entry or KCM exists
+  *and* launches.
+* **`admin`** — the GUI offers it and asks for the administrator password. Asserted identically, and
+  `pkcheck` must answer 0 or 3. **A password is not a terminal**: D4 forbids needing a command line,
+  not needing a credential.
+* **`none`** — `locked` removes it from the seat on purpose and tells the customer so. B12 asserts the
+  **opposite**: the KDE Control Module must refuse to open, and `pkcheck` must answer **1**. This is
+  not a skip — it goes red if the restriction leaks (the machine offers a door it then slams) and red
+  if the restriction quietly stops being applied. It is the only runtime check that would notice
+  `build/40-windows-feel.sh` rewriting `/etc/xdg/kdeglobals` after `20-policy.sh` merged the KDE
+  Kiosk groups into it, which is a real ordering hazard that `20-policy.sh` warns about at build time
+  and nothing else observes at run time.
+* **`n/a`** — kiosk has no session. The kiosk criterion is asserted instead: `auros-kiosk.service` is
+  active, an application is configured, and no desktop shell, display manager or terminal emulator
+  survived the removal pass.
+
+The criteria come from `/usr/lib/auros/policy/claims.env`, which `apply-policy` writes at build time
+from `policy/<mode>/mode.env`. **A missing or unreadable claims file is exit 2, never a fall-back to
+`open`** — silently auditing a locked image against open's list is how three of the four modes became
+unpublishable in the first place, and silently auditing an open image against locked's list would be
+worse, because it would report a pass for a machine offering none of what we sold.
+
+`--mode <name>` overrides the stamp, for testing and for asserting that an image is *not* some other
+mode.
+
+### Proving that B12 can still go red
+
+`tests/b12-modes.test.sh` drives the real script against stubbed `systemctl`, `kcmshell6`, `pkcheck`
+and `flatpak`, and asserts both directions for each mode — including the two regressions that matter:
+a `locked` image whose network settings page opens anyway, and a `kiosk` image where `konsole`
+survived. It runs anywhere `bash` does and touches nothing on the host:
+
+```
+bash auros-base/desktop/tests/b12-modes.test.sh
+```
 
 ---
 

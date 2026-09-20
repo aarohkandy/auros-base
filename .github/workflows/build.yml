@@ -987,6 +987,37 @@ jobs:
             *) echo "::error::the gate exited ${rc} on a well-formed invocation — it could not decide, so it has not passed anything. Check that this workflow and tools/gate.mjs agree on the command line."; exit 1 ;;
           esac
 
+      - name: A development-key image may never reach a customer-facing tag
+        run: |
+          # The build accepts a DEVELOPMENT key so that Gate 1 — "builds in CI and boots in a VM" —
+          # is not blocked on a human minting a long-lived organisational credential. That is the
+          # right trade for testing and the wrong one for shipping, so the two are separated HERE,
+          # at the only step that makes an image reachable by a machine.
+          #
+          # The answer is read back OUT OF THE BUILT IMAGE, not from a workflow variable. A variable
+          # can be set by whoever edits the workflow; a file inside the artifact travels with the
+          # thing being judged. Same reasoning as the gate recomputing its verdict instead of reading
+          # the harness's `verdict` field.
+          KIND=$(sudo podman run --rm --entrypoint= "$STAGE_REF" cat /usr/lib/auros/signing-key-kind 2>/dev/null | tr -d '[:space:]' || true)
+          case "$KIND" in
+            production) echo "signing key kind: production — publish permitted" ;;
+            development)
+              cat <<'MSG'
+          ::error::REFUSING TO PUBLISH. This image was built with the DEVELOPMENT signing key.
+
+          It built, it booted and it passed the check matrix — that is what the development key is
+          for. It must not become an image a machine will trust, because the private half is a
+          throwaway whose custody nobody is accountable for.
+
+          To publish: generate a production key pair, commit the public half as
+          signing/keys/auros.pub, and put the private half in the signing secret. See
+          signing/keys/DEVELOPMENT-KEY.md and signing/RISKS.md R3. That is a human action.
+          MSG
+              exit 1 ;;
+            "") echo "::error::the image carries no /usr/lib/auros/signing-key-kind. Either it was not built by build/30-update-agent.sh, or that step was skipped. An image that cannot say which key signed it is not one to publish."; exit 1 ;;
+            *) echo "::error::unrecognised signing key kind '$KIND'. Failing closed."; exit 1 ;;
+          esac
+
       - name: THE GATE
         env:
           IMAGE: ${{ needs.plan.outputs.image }}

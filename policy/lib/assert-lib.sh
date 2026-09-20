@@ -245,12 +245,52 @@ a_expect_mode() {
 #                             must not be a hard refusal, and the non-polkit attempts are run purely
 #                             to record whether they are capable of succeeding at all.
 
+# a_deny <level> <id> <action> [evidence]
+#
+# `evidence` classifies the polkit answer, and it exists because not every polkit default is the
+# same shape:
+#
+#   primary            (the default) The action's upstream default is auth_admin/auth_admin_keep for
+#                      allow_any, so a SESSIONLESS subject is answered 3 on an unlocked image and 1
+#                      on a locked one. open/assert.sh FAILS if such an action answers 1 there,
+#                      because that would mean the matching refusal under locked was never our doing.
+#
+#   session-dependent  The action's upstream default is allow_active=yes with a stricter allow_any,
+#                      so the answer for a sessionless subject depends on the base's own policy
+#                      rather than on ours, and could be 1 on an open image too. Counting such an
+#                      answer as proof of `locked` would be exactly the padding this file's THIRD
+#                      RULE is about -- so it is recorded as corroborating in every mode, and the
+#                      negative control REPORTS it rather than failing the base image on a guess
+#                      about an upstream default that none of us has measured on this base.
+#
+#                      When the control observes 0 or 3 for one of these on the open image, it says
+#                      PROMOTE: that is a measurement showing the action does discriminate, and the
+#                      classification should be tightened to `primary` in the same commit that
+#                      records the measurement (D24 -- the measurement wins).
 a_deny() {
-    case "$1" in
-        hard)    a_pk_hard_deny       "$2" "$3" ;;
-        admin)   a_pk_admin_only      "$2" "$3" ;;
-        control) a_pk_not_hard_denied "$2" "$3" ;;
-        *)       a_bad "$2" "a_deny was called with unknown level '$1' -- refusing to guess which promise to assert" ;;
+    local level="$1" id="$2" action="$3" evidence="${4:-primary}"
+    if [ "$evidence" = session-dependent ] && [ "$level" != control ]; then
+        A_CORROBORATING+=("$id")
+    fi
+    case "$level" in
+        hard)    a_pk_hard_deny       "$id" "$action" ;;
+        admin)   a_pk_admin_only      "$id" "$action" ;;
+        control)
+            if [ "$evidence" = session-dependent ]; then a_pk_control_record "$id" "$action"
+            else a_pk_not_hard_denied "$id" "$action"; fi ;;
+        *)       a_bad "$id" "a_deny was called with unknown level '$level' -- refusing to guess which promise to assert" ;;
+    esac
+}
+
+# The negative control for a session-dependent action: observe, classify, never fail the base on it.
+a_pk_control_record() {
+    local id="$1" action="$2" rc; rc="$(a_pk "$action")"
+    case "$rc" in
+        1) A_CONTROL_NON_DISCRIMINATING+=("$id")
+           a_note "control.$id" "$action -- refused outright (pkcheck 1) on this unlocked image too. CORROBORATING ONLY: a refusal of it under locked/kiosk is the base's own default for a sessionless subject, not our rule." ;;
+        0|3) A_CONTROL_DISCRIMINATING+=("$id")
+           a_note "control.$id" "$action -- answerable here (pkcheck $rc). PROMOTE: this action DOES discriminate on this base, so change its a_deny evidence argument from session-dependent to primary and record the measurement." ;;
+        *) a_bad "control.$id" "$action -- pkcheck returned $rc (error) on the negative control. An error is not an answer." ;;
     esac
 }
 
@@ -290,11 +330,20 @@ a_suite_no_software() {
     a_deny "$level" "pkg.rpmostree-policy" org.projectatomic.rpmostree1.install-uninstall-packages
     a_deny "$level" "pkg.packagekit"       org.freedesktop.packagekit.package-install
     a_deny "$level" "pkg.flatpak-system"   org.freedesktop.Flatpak.app-install
-    if command -v rpm-ostree >/dev/null 2>&1; then
-        a_try "$level" "pkg.rpmostree" "rpm-ostree install nano" -- rpm-ostree install --idempotent nano
-    fi
-    if command -v flatpak >/dev/null 2>&1; then
-        a_try "$level" "pkg.flatpak" "flatpak install --system from flathub" -- flatpak install --system -y --noninteractive flathub org.gnome.Calculator
+    # NOT attempted at level `control`. These two would CHANGE the open image if they succeeded, and
+    # the open image is the base that the rest of the matrix -- S3, S6, S10, U1 -- is measuring at
+    # the same time. An attempt that alters the thing under test is not a control, it is a
+    # contaminant. The polkit answers above are the discriminating half in any case, and these two
+    # are corroborating everywhere else.
+    if [ "$level" != control ]; then
+        if command -v rpm-ostree >/dev/null 2>&1; then
+            a_corroborate "pkg.rpmostree" "rpm-ostree install nano" -- rpm-ostree install --idempotent nano
+        fi
+        if command -v flatpak >/dev/null 2>&1; then
+            a_corroborate "pkg.flatpak" "flatpak install --system from flathub" -- flatpak install --system -y --noninteractive flathub org.gnome.Calculator
+        fi
+    else
+        a_note "pkg.attempts" "not attempted on the open control: a successful rpm-ostree or flatpak install would modify the very image S3/S6/S10/U1 are measuring. The polkit answers above carry the evidence."
     fi
     # HONEST LIMIT, deliberately NOT asserted as a pass:
     #   `flatpak install --user` needs no polkit authorisation, and flatpak has no supported
@@ -309,12 +358,22 @@ a_suite_no_software() {
 a_suite_no_network_change() {
     local level="$1"
     printf '\n-- try to change the network -----------------------------------------------------------\n'
+    # settings.modify.system is auth_admin_keep for allow_any upstream, so it discriminates for a
+    # sessionless subject and is primary. The other two carry allow_active=yes in NetworkManager's
+    # own policy, so whether a sessionless probe is answered 1 or 3 on an OPEN image depends on the
+    # base's defaults and not on us. Nobody here has measured that on this base -- D5: this machine
+    # cannot boot one -- so they are classified session-dependent rather than guessed at, and the
+    # control prints PROMOTE if the measurement turns out to support tightening them.
     a_deny "$level" "net.modify-system" org.freedesktop.NetworkManager.settings.modify.system
-    a_deny "$level" "net.control"       org.freedesktop.NetworkManager.network-control
-    a_deny "$level" "net.enable"        org.freedesktop.NetworkManager.enable-disable-network
-    if command -v nmcli >/dev/null 2>&1; then
-        a_try "$level" "net.off" "nmcli networking off" -- nmcli networking off
-        a_try "$level" "net.add" "nmcli connection add type dummy" -- nmcli connection add type dummy ifname auros-probe0 con-name auros-probe
+    a_deny "$level" "net.control"       org.freedesktop.NetworkManager.network-control       session-dependent
+    a_deny "$level" "net.enable"        org.freedesktop.NetworkManager.enable-disable-network session-dependent
+    # Same reasoning as the package attempts: `nmcli networking off` succeeding on the open control
+    # would take the network away from a VM that U1/U5 are about to use.
+    if [ "$level" != control ] && command -v nmcli >/dev/null 2>&1; then
+        a_corroborate "net.off" "nmcli networking off" -- nmcli networking off
+        a_corroborate "net.add" "nmcli connection add type dummy" -- nmcli connection add type dummy ifname auros-probe0 con-name auros-probe
+    elif [ "$level" = control ]; then
+        a_note "net.attempts" "not attempted on the open control: taking the network off a VM that U1/U5 are about to use would contaminate the run. The polkit answers above carry the evidence."
     fi
 }
 
@@ -516,8 +575,8 @@ a_suite_kde_kiosk() {
         # "the binary refused", and absent-binaries.list already gates the build on it.
         [ -n "$konsole" ]   && a_bad "kde.konsole.absent"   "konsole is still on a kiosk image at $(command -v "$konsole")" \
                             || a_ok  "kde.konsole.absent"   "no konsole on this image"
-        [ -n "$kioclient" ] && a_note "kde.kioclient"       "$kioclient is present; the door is attempted below anyway" \
-                            || a_ok  "kde.kioclient.absent" "no kioclient on this image"
+        [ -n "$kioclient" ] && a_note "kde.kioclient.present" "$kioclient survived the removal pass (it comes from kde-cli-tools, which the dependency closure keeps -- D12). The door is attempted below anyway, so if KAuthorized is not shutting it this goes red." \
+                            || a_ok  "kde.kioclient.absent"  "no kioclient on this image"
     fi
 
     if [ -n "$konsole" ] || [ "$expect" = open ]; then

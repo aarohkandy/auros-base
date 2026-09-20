@@ -123,6 +123,17 @@ echo "── a_deny refuses to guess ──────────────�
 reset; a_deny nonsense x org.example.action >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "an unknown level is a FAIL, not a silent default" || no "an unknown level is a FAIL" "$(last)"
 
+echo "── evidence classification: session-dependent actions never red the base on a guess ────────"
+reset; PK_RC=1 a_deny control net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "a session-dependent action answering 1 on open is RECORDED, not a base failure" || no "session-dependent answering 1 is recorded" "$(last)"
+[ "${#A_CONTROL_NON_DISCRIMINATING[@]}" = 1 ] && ok "  ...and lands in the non-discriminating list" || no "  ...and lands in the non-discriminating list"
+reset; PK_RC=3 a_deny control net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
+printf '%s' "$(last)" | grep -q 'PROMOTE' && ok "  ...and says PROMOTE when the measurement shows it DOES discriminate" || no "  ...says PROMOTE" "$(last)"
+reset; PK_RC=1 a_deny control root.pkexec-policy org.freedesktop.policykit.exec >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "a PRIMARY action answering 1 on open still FAILS the control" || no "a primary action answering 1 still fails" "$(last)"
+reset; PK_RC=1 a_deny hard net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
+[ "${#A_CORROBORATING[@]}" = 1 ] && ok "under locked it is counted as corroborating, not primary" || no "under locked it is corroborating"
+
 echo "── the update timer list is shared, and includes uupd (D22) ───────────────────────────────"
 printf '%s\n' "${A_UPDATE_TIMERS[@]}" | grep -qx 'uupd.timer' \
     && ok "A_UPDATE_TIMERS includes uupd.timer" || no "A_UPDATE_TIMERS includes uupd.timer"

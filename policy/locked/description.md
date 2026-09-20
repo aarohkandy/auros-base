@@ -20,7 +20,9 @@ look. It does not feel like a locked machine to somebody who is using it to do t
 - Get root, by any route: `sudo`, `pkexec`, `su`, `machinectl`, `systemd-run`.
 - Change the time, the hostname, the language, or the accounts on the machine.
 - Reach a terminal from inside a KDE application -- Dolphin's "Open Terminal Here", Kate's terminal
-  panel, and the run-command box are all switched off.
+  panel, and the run-command box are all switched off. We check this by actually trying it on every
+  build: the test machine asks a KDE application to run a command and fails the build if anything
+  runs. It is not a setting we tick and hope for.
 
 In `managed` these things ask for a password. In `locked` the answer is no, and there is no password
 that changes it. The IT account can still authenticate for a few specific things, but the ordinary
@@ -39,6 +41,11 @@ anything on the list above -- no root, no system change, no stopping updates. A 
 into their own home folder has no privileges and disappears when the profile is reset.
 
 If "no shell at all" is the requirement, that is `kiosk`, and it is a different machine.
+
+**The KDE restriction covers KDE applications, not the whole machine.** It is a toolkit-level
+control, not a kernel one, and it does not delete `/usr/bin/bash`. A student who reaches a shell by
+some other route still cannot do anything on the list above -- that is what the rest of the mode is
+for -- but "no shell at all" is `kiosk`, not this.
 
 **It also assumes physical security of the boot process.** Anyone who can restart the laptop and edit
 the boot menu can get root on any Linux machine, ours included, unless the boot menu itself has a
