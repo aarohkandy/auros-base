@@ -1,0 +1,102 @@
+/* ---------------------------------------------------------------------------------------------
+ * Auros policy mode: LOCKED
+ *
+ * At the seat, the answer is no. Not "no unless you have the password" -- no. Changes to a locked
+ * machine arrive as a new image, not as a decision taken in front of it.
+ *
+ * Filename: 00- in /etc/polkit-1/rules.d. polkit evaluates rule files in lexical order and the first
+ * rule that returns a value wins, with /etc taking precedence over /usr/share. 00- in /etc is the
+ * earliest position available to us, so nothing an upstream package ships can pre-empt this file.
+ *
+ * ostree note: this lives in /etc, which ostree 3-way-merges on upgrade. A file we shipped and nobody
+ * edited locally is replaced (or removed) to match the new image, so switching a fleet from locked to
+ * open by shipping a new image really does release the locks. A file an administrator edited by hand
+ * survives the upgrade -- that is ostree's contract, not ours, and it is the right behaviour.
+ * ------------------------------------------------------------------------------------------------ */
+
+/* The administrative identity for this machine. See /usr/lib/sysusers.d/auros-policy.conf. */
+polkit.addAdminRule(function(action, subject) {
+    return ["unix-group:aurosadmin"];
+});
+
+var AUROS_ADMIN_GROUP = "aurosadmin";
+
+/* Exact action ids that are refused outright. */
+var DENY_EXACT = [
+    /* pkexec IS a root shell with extra steps. */
+    "org.freedesktop.policykit.exec",
+    "org.freedesktop.policykit.temporaryauthorization.revoke",
+    /* The canary. Its default is allow_any=yes, so a denial here can only have come from this file.
+     * This is what lets the assertion script prove the rules are live. */
+    "org.auros.policy.control-deny"
+];
+
+/* Action id prefixes that are refused outright. */
+var DENY_PREFIX = [
+    /* Changing what software is on the machine. */
+    "org.projectatomic.rpmostree1.",
+    "org.freedesktop.packagekit.",
+    "org.freedesktop.Flatpak.",
+    "org.freedesktop.bootc.",
+    /* Starting, stopping, masking or disabling units -- including the update timer. A machine that
+     * can stop updating itself is the abandoned laptop we sell against. */
+    "org.freedesktop.systemd1.",
+    /* Network configuration. CONSEQUENCE, stated plainly: a locked machine cannot join a new Wi-Fi
+     * network without an administrator. That is the trade, and it is why `managed` exists. */
+    "org.freedesktop.NetworkManager.",
+    "org.fedoraproject.FirewallD1.",
+    /* Identity, time, hostname, locale: fleet-level facts, not seat-level ones. */
+    "org.freedesktop.accounts.",
+    "org.freedesktop.timedate1.",
+    "org.freedesktop.hostname1.",
+    "org.freedesktop.locale1.",
+    /* Container and VM escape hatches to a root shell. */
+    "org.freedesktop.machine1.",
+    "io.podman."
+];
+
+/* Storage: deny the dangerous subset only. Plain removable-media mounting stays allowed, because a
+ * student with a USB stick full of homework is not the threat model and blocking it makes the machine
+ * feel broken rather than safe. A recipe that wants USB blocked should say so explicitly. */
+var DENY_STORAGE = [
+    "org.freedesktop.udisks2.filesystem-mount-system",
+    "org.freedesktop.udisks2.filesystem-fstab",
+    "org.freedesktop.udisks2.modify-device",
+    "org.freedesktop.udisks2.open-device"
+];
+
+/* NOT denied, deliberately:
+ *   org.freedesktop.login1.*   -- shutting the lid and pressing the power button must keep working.
+ *   org.freedesktop.color-manager.*, cups printing -- ordinary use.
+ *   org.freedesktop.upower.*   -- battery.
+ */
+
+function aurosGuarded(id) {
+    var i;
+    for (i = 0; i < DENY_EXACT.length; i++) {
+        if (id === DENY_EXACT[i]) { return true; }
+    }
+    for (i = 0; i < DENY_STORAGE.length; i++) {
+        if (id === DENY_STORAGE[i]) { return true; }
+    }
+    for (i = 0; i < DENY_PREFIX.length; i++) {
+        if (id.indexOf(DENY_PREFIX[i]) === 0) { return true; }
+    }
+    return false;
+}
+
+polkit.addRule(function(action, subject) {
+    if (!aurosGuarded(action.id)) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    /* root already has everything; returning NO here would break repair and CI, not improve safety. */
+    if (subject.user === "root") {
+        return polkit.Result.YES;
+    }
+    /* The IT account still gets in, but has to say so with a password every time. */
+    if (subject.isInGroup(AUROS_ADMIN_GROUP)) {
+        return polkit.Result.AUTH_ADMIN;
+    }
+    polkit.log("auros/locked: denied " + action.id + " to " + subject.user);
+    return polkit.Result.NO;
+});

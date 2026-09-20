@@ -1,0 +1,16 @@
+[Desktop Entry]
+# Auros — installed to /usr/share/plasma/plasma-welcome/intro-customization.desktop
+#
+# plasma-welcome (KDE's own onboarding wizard) reads this file to replace the first paragraph, image and
+# caption of its Welcome page.  Keys are Name (the paragraph), Icon, Comment (the image caption) and URL.
+# Documented in KDE/plasma-welcome's README under "Distro customization".
+#
+# We use KDE's wizard rather than writing one.  It already handles language, the network, online
+# accounts and finding applications, it is translated into far more languages than we could manage, and
+# it is maintained by the people who maintain the desktop it introduces.  Our contribution is this intro
+# text plus the two extra pages in extra-pages/ — the orientation, and the honest page about Windows
+# programs.  Building a wizard of our own would have been a second thing to keep working.
+Name=This computer runs Auros. It was set up for your organisation, with the programs you asked for and nothing else. The next few screens cover the language, the network, and where to find things. It takes about two minutes and you will not need to type any commands — not now, and not later.
+Comment=Auros — a maintained Linux desktop for hardware Windows left behind
+Icon=computer-laptop
+URL=https://github.com/aarohkandy/auros

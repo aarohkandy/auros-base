@@ -1,0 +1,26 @@
+[Unit]
+# AUROS — automatic updates for the userspace we own.
+#
+# On a bootc host the operating system is not updated by a package manager: the image is replaced
+# wholesale by bootc (task A4's timer). Shipping dnf-automatic here would be a lie, because the
+# root filesystem it wants to write to is read-only and composed.
+#
+# What IS left to keep patched automatically is the Flatpak set, which is where every application
+# lives (spec §3: "userspace apps come from Flathub, not the image"). This unit patches the SYSTEM
+# installation only — per-user installs belong to the user.
+Description=Auros: update system Flatpaks
+Documentation=https://github.com/aarohkandy/auros-base
+ConditionPathExists=/usr/bin/flatpak
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# --noninteractive so a failure is a failure rather than a prompt nobody is there to answer.
+# The exit status is NOT swallowed: a persistently failing update shows up as a failed unit, which is
+# what check B11 is looking for. A laptop that happened to be offline at the scheduled moment fails
+# once and is retried by the timer's Persistent=true on the next window, so the failed state clears
+# itself; a genuinely broken remote stays red, which is the outcome we want.
+ExecStart=/usr/bin/flatpak update --system --assumeyes --noninteractive
+Nice=10
+IOSchedulingClass=idle

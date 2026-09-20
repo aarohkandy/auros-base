@@ -1,0 +1,10 @@
+# Auros — Plasma shell defaults.  Installed to /etc/xdg/plasmarc.
+
+[Theme]
+name=breeze
+
+[Defaults]
+# Folder View as the desktop containment, i.e. the desktop shows the contents of ~/Desktop the way
+# Windows does.  VERIFY-1 in desktop/README.md: this key is the least certain thing in this layer.
+# Nothing depends on it — every entry it would surface also exists in the start menu.
+defaultContainmentPlugin=org.kde.desktopcontainment

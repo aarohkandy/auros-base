@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+
+<!--
+  Auros policy canaries.
+
+  These two actions do nothing. They exist so that a runtime assertion can tell the difference between
+  "our policy denied this" and "polkit denied this anyway because the probe process has no active
+  logind session".
+
+  That distinction is the whole of check B5. Without it, a `locked` assertion would pass on a machine
+  where our rules were never loaded, because most real actions default to auth_admin for an inactive
+  subject. We would then tell a school their machines are locked down on the strength of a denial we
+  did not cause.
+
+    org.auros.policy.control-allow   allow_any=yes, and NO mode rule ever touches it.
+                                     pkcheck must return 0 in EVERY mode. If it does not, the probe
+                                     subject cannot be authorised for anything and every other denial
+                                     in the run is meaningless -> the assertion aborts.
+
+    org.auros.policy.control-deny    allow_any=yes by default. managed/locked/kiosk rules override it.
+                                     pkcheck returning non-zero here is positive proof that our rule
+                                     file is installed, parsed and evaluated for this subject.
+-->
+<policyconfig>
+
+  <vendor>Auros</vendor>
+  <vendor_url>https://github.com/aarohkandy/auros-base</vendor_url>
+
+  <action id="org.auros.policy.control-allow">
+    <description>Auros policy positive control</description>
+    <message>Auros policy positive control (no privilege is granted by this action)</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.auros.policy.control-deny">
+    <description>Auros policy canary</description>
+    <message>Auros policy canary (no privilege is granted by this action)</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

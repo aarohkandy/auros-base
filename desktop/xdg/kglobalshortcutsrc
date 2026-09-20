@@ -1,0 +1,28 @@
+# Auros — Windows keyboard shortcuts.  Installed to /etc/xdg/kglobalshortcutsrc AND copied to
+# /etc/skel/.config/kglobalshortcutsrc.
+#
+# The skel copy is the exception to the "/etc/xdg only" rule stated in kdeglobals.  kglobalaccel writes
+# this file itself on first run and has a history of not merging cascaded defaults the way other KConfig
+# consumers do, so a concrete per-user copy is the belt to /etc/xdg's braces.  Consequence, recorded
+# honestly: the skel copy is frozen at account-creation time, so changing a shortcut in a later image
+# will not reach accounts that already exist.  Shortcuts are the one place where that is acceptable —
+# a user who has learned a key does not want it moved by an overnight update.
+#
+# Value format is: <active shortcut>,<default shortcut>,<human-readable name>
+# "none" in the default field means the action had no upstream default.
+
+[kwin]
+Show Desktop=Meta+D\tCtrl+F12,Ctrl+F12,Show Desktop
+Window Minimize=Meta+Down,Meta+PgDown,Minimize Window
+Window Maximize=Meta+Up,Meta+PgUp,Maximize Window
+
+[ksmserver]
+Lock Session=Meta+L\tCtrl+Alt+L,Meta+L\tCtrl+Alt+L,Lock Session
+
+[org.kde.dolphin.desktop]
+# Meta+E opens the file manager.  On Windows this is Win+E for File Explorer and it is the single most
+# used shortcut that novices actually do know.
+_launch=Meta+E,none,File Manager
+
+[org.kde.krunner.desktop]
+_launch=Meta+R\tAlt+Space\tAlt+F2,Alt+Space\tAlt+F2,Search

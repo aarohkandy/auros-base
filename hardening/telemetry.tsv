@@ -1,0 +1,33 @@
+# AUROS telemetry inventory — hardening/telemetry.tsv
+#
+# The rule this file exists to satisfy: LIST WHAT YOU FOUND, do not assume. build/10-hardening.sh
+# walks this table against the actual image, prints PRESENT or ABSENT for every row, and prints what
+# it did about each PRESENT one. A row that is ABSENT on this base is still printed, because "we
+# looked and it was not there" is information and "we did not look" is not.
+#
+# Two special cases are NOT in this table because they are configuration rather than units, and are
+# handled explicitly in the script so their before/after can be measured and printed:
+#   - DNF "countme" in /etc/yum.repos.d/*.repo
+#   - Plasma User Feedback in /etc/xdg/PlasmaUserFeedback
+#
+# COLUMNS:  kind <TAB> target <TAB> rationale
+#   unit-mask    systemd unit; masked if present. Masking, not disabling: these are all socket- or
+#                dbus- or path-activated, and a disabled activatable unit still starts on activation.
+#   unit-keep    systemd unit that talks to a network service and is DELIBERATELY left enabled.
+#                Printed anyway, because a privacy claim with a quiet exception is a false claim.
+#   pkg-report   package whose presence is worth naming in the build console. Not removed here —
+#                removal is a subtraction decision and belongs to the recipe prune list (spec 6B).
+#   unit-report  unit we neither mask nor endorse, because it belongs to another task owner.
+
+unit-mask	abrtd.service	ABRT daemon. Collects crash data and stages it for upload to Fedora bug tracking.
+unit-mask	abrt-journal-core.service	Harvests core dumps out of the journal into ABRT spool.
+unit-mask	abrt-oops.service	Scrapes kernel oops messages and reports them upstream.
+unit-mask	abrt-xorg.service	Scrapes X server crash logs and reports them upstream.
+unit-mask	abrt-vmcore.service	Processes kernel crash dumps for reporting.
+unit-mask	abrt-pstoreoops.service	Processes firmware-persisted oops records for reporting.
+unit-mask	rpm-ostree-countme.timer	Fedora Count Me census. Sends a bucketed system-age counter with repo metadata fetches. Harmless in intent and still an unrequested outbound report from a school laptop.
+unit-keep	fwupd-refresh.timer	Downloads firmware metadata from the LVFS. This IS an outbound request to a third party and we keep it on purpose: the 2012-2018 machines we sell into have unpatched firmware CVEs, and this is the only route by which a fix reaches them. It fetches metadata only; applying firmware stays a human action in the GUI.
+pkg-report	libreport	ABRT report-composition library. Inert with the ABRT units masked; named so nobody is surprised to find it installed.
+pkg-report	geoclue2	Location service. Resolves position by sending nearby Wi-Fi BSSIDs to a remote geolocation API when an application asks. It is demand-driven, not a background reporter, and Plasma night-colour and automatic-timezone use it. Named rather than removed: removing it is a recipe-level subtraction decision with a visible cost.
+unit-report	uupd.timer	Universal Blue updater. It is an update path, which is protected (spec S10), and the bootc update timer is task A4 owned. Named here so the two update paths are visible in one place; this script does not touch either.
+unit-report	rpm-ostreed-automatic.timer	Second possible update path, same reasoning as uupd.timer. Task A4 owns the decision about which timer drives updates.

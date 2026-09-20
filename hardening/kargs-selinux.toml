@@ -1,0 +1,14 @@
+# AUROS — /usr/lib/bootc/kargs.d/10-auros-selinux.toml
+#
+# bootc reads *.toml from /usr/lib/bootc/kargs.d and applies `kargs` to the bootloader entry it writes.
+# This is how an image (as opposed to an installed machine) sets kernel arguments.
+#
+# WHY `selinux=1` AND NOT `enforcing=1`:
+#   `selinux=1` prevents the dangerous case — SELinux silently switched off at the bootloader, which
+#   /etc/selinux/config cannot defend against because it is read after the kernel has already decided.
+#   `enforcing=1` would additionally override /etc/selinux/config and remove the ONLY recovery path a
+#   technician has when a policy bug makes a machine unusable: `enforcing=0` at the GRUB prompt.
+#   A school has one overworked IT person and no out-of-band console (spec §6A). Taking away the single
+#   documented recovery route is a worse failure mode than a machine that someone deliberately put into
+#   permissive mode, and the runtime assertion below catches the latter within seconds of boot.
+kargs = ["selinux=1"]

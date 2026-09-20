@@ -1,0 +1,9 @@
+# AUROS — /etc/selinux/config
+#
+# Installed by build/10-hardening.sh. Replaces the upstream file wholesale rather than sed-ing it,
+# because a partial edit that leaves a second SELINUX= line behind is silently the weaker of the two.
+#
+# SELINUXTYPE=targeted is the only policy Fedora ships with a working desktop confinement set.
+# `minimum` and `mls` are present in the repos but neither is usable under Plasma.
+SELINUX=enforcing
+SELINUXTYPE=targeted

@@ -1,0 +1,28 @@
+# AUROS protected set — hardening/protected.list
+#
+# "Do NOT remove anything in the protected set (bootc, the update path, greenboot, NetworkManager,
+# systemd)." Check S10 is the gate for this in CI. This file is the build-time half, so that a bad
+# edit fails at the point it happens rather than forty minutes later in the matrix.
+#
+# NOTE / ASSUMPTION: auros-recipes/schema/PROTECTED.md does not exist yet. When it does, IT is
+# authoritative and this file should be regenerated from it rather than maintained in parallel.
+#
+# COLUMNS: severity <TAB> kind <TAB> target
+#   fatal    absent => the build fails here. These are present on the upstream base already, so their
+#            absence can only mean something in THIS build removed them.
+#   pending  absent => reported loudly, build continues. These are installed by build steps owned by
+#            other tasks (A4 update agent, A5 trust material) which may not have landed yet. CI check
+#            S10 is the gate that stops an image missing them from ever being published; making this
+#            script fail on them instead would mean one task's unlanded work blocks every build.
+#
+fatal	cmd	bootc
+fatal	cmd	systemctl
+fatal	path	/usr/lib/systemd/systemd
+fatal	pkg	NetworkManager
+fatal	pkg	selinux-policy-targeted
+fatal	path	/etc/selinux/config
+pending	pkg	greenboot
+pending	path	/usr/lib/bootc/kargs.d
+pending	unit	bootc-fetch-apply-updates.timer
+pending	path	/etc/containers/registries.d
+pending	path	/usr/lib/pki/containers

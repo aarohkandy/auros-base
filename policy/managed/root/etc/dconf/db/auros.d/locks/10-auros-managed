@@ -1,0 +1,5 @@
+# Locks for the Auros system database. Each line is a full key path; the key becomes immutable and a
+# user's own dconf database cannot override it.
+/org/gnome/desktop/lockdown/disable-command-line
+/org/gnome/desktop/lockdown/disable-user-switching
+/org/gnome/desktop/screensaver/lock-enabled

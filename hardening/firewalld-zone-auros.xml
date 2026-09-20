@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AUROS — /usr/lib/firewalld/zones/auros.xml
+
+  Default-deny inbound. target="%%REJECT%%" is the explicit spelling of firewalld's default target;
+  writing it out means the policy survives a future upstream change to what "unset" means.
+
+  Two services are allowed, and each one is allowed because the product promises something that
+  needs it. Nothing is here "just in case":
+
+    dhcpv6-client  IPv6 address configuration. Without it a v6-only or dual-stack school network
+                   leaves the machine with no usable v6 address.
+    mdns           Printer discovery. Check B12 requires that "adding a printer" is reachable from
+                   the GUI without a terminal; CUPS driverless/IPP Everywhere discovery is mDNS.
+                   Blocking 5353 would make B12 a promise we could not keep.
+
+  Notably absent compared with firewalld's stock `public` zone: ssh. sshd is masked in this image,
+  so a hole for it would be a hole to nothing.
+-->
+<zone target="%%REJECT%%">
+  <short>Auros</short>
+  <description>Auros default zone. Inbound is rejected except IPv6 address configuration and mDNS printer discovery.</description>
+  <service name="dhcpv6-client"/>
+  <service name="mdns"/>
+</zone>

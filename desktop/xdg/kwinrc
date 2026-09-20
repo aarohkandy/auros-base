@@ -1,0 +1,30 @@
+# Auros — system-wide KWin defaults.  Installed to /etc/xdg/kwinrc.
+# Window management shaped like Windows: buttons where Windows puts them, Aero-Snap, one desktop,
+# and the Meta key opening the start menu.
+
+[org.kde.kdecoration2]
+# Button letter codes: M=menu S=on-all-desktops H=help I=minimise A=maximise X=close.
+# Breeze ships MS on the left and HIAX on the right.  Windows has the application icon on the left and
+# exactly minimise / maximise / close on the right — no help button, no sticky button.
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
+
+[Windows]
+FocusPolicy=ClickToFocus
+# Aero Snap.  Dragging a window to the top maximises it; to a side, half-screen.  This is one of the
+# handful of Windows behaviours people use without knowing they know it.
+ElectricBorderMaximize=true
+ElectricBorderTiling=true
+ElectricBorderCornerRatio=0.25
+TitlebarDoubleClickCommand=Maximize
+
+[Desktops]
+# Windows 7/10 present one desktop.  Plasma's pager and multi-desktop shortcuts are a reliable way for a
+# novice to lose every open window and conclude the machine is broken.
+Number=1
+Rows=1
+
+[ModifierOnlyShortcuts]
+# Tapping the Windows key opens the start menu.  Without this line the key does nothing, which is the
+# first thing a Windows user notices and the first thing they report as broken.
+Meta=org.kde.plasmashell,/PlasmaShell,org.kde.PlasmaShell,activateLauncherMenu

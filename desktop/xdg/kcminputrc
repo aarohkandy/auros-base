@@ -1,0 +1,9 @@
+# Auros — input defaults.  Installed to /etc/xdg/kcminputrc.
+
+[Keyboard]
+# 0 = turn NumLock on at session start.  School admin work is number entry; Windows laptops generally
+# restore the previous NumLock state and users read "my number keys stopped working" as a fault.
+NumLock=0
+
+[Mouse]
+cursorTheme=breeze_cursors

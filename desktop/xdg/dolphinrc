@@ -1,0 +1,27 @@
+# Auros — Dolphin defaults, arranged like Windows Explorer.  Installed to /etc/xdg/dolphinrc.
+#
+# What "like Explorer" actually means here, concretely:
+#   - a navigation pane down the left (Dolphin: Places) — on by default, left on
+#   - double-click to open — set globally in kdeglobals, not here
+#   - free-space readout at the bottom — Explorer shows this, Dolphin does not by default
+#   - no menu bar — Explorer replaced its menu bar with a ribbon in 2012; Dolphin's hamburger is nearer
+#     to that than a File/Edit/View bar is
+#   - folders open in the same window, not a new tab
+
+[General]
+ShowSpaceInfo=true
+BrowseThroughArchives=false
+RememberOpenedTabs=false
+ShowZoomSlider=false
+ConfirmClosingMultipleTabs=true
+SplitView=false
+ShowFullPath=false
+
+[MainWindow]
+MenuBar=Disabled
+
+[DetailsMode]
+PreviewSize=22
+
+[IconsMode]
+PreviewSize=64

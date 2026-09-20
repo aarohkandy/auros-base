@@ -1,0 +1,46 @@
+// AUROS — /usr/share/polkit-1/rules.d/10-auros-baseline.rules
+//
+// Vendor rules live in /usr/share/polkit-1/rules.d. On a bootc host that matters: /usr is what an
+// image update replaces, while /etc is machine-local and three-way merged. A rule in /etc would be
+// the customer's, not ours, and would not be refreshed by the nightly rebuild.
+//
+// polkit evaluates *.rules from both directories in lexical order across the merged set, so 10- runs
+// early and a later rule can still override it. That is intended: this is the baseline the policy
+// modes tighten. ASSUMPTION (task A3): the modes ship 50-auros-policy-<mode>.rules here.
+//
+// SCOPE: exactly one thing is tightened, and it is tightened for a stated reason. Everything else is
+// left at the distribution default so that the modes have something coherent to layer onto.
+
+polkit.addRule(function (action, subject) {
+    // Installing, removing or replacing system software is an administrator action even from an
+    // active local session. Fedora's PackageKit defaults let a local active user install signed
+    // packages without re-authenticating; on a shared school machine the "local active user" is
+    // whoever sat down last.
+    //
+    // Matched by exact id, not by prefix: a prefix match would also swallow read-only actions such
+    // as metadata refresh, and forcing a password prompt on Discover's background refresh would be
+    // a terminal-shaped problem for a user who is supposed to never meet one (directive D4).
+    var packagekit = [
+        "org.freedesktop.packagekit.package-install",
+        "org.freedesktop.packagekit.package-remove",
+        "org.freedesktop.packagekit.package-reinstall",
+        "org.freedesktop.packagekit.package-eula-accept",
+        "org.freedesktop.packagekit.system-update",
+        "org.freedesktop.packagekit.system-sources-configure",
+        "org.freedesktop.packagekit.repair-system",
+        "org.freedesktop.packagekit.install-untrusted",
+        "org.freedesktop.packagekit.trigger-offline-update"
+    ];
+    if (packagekit.indexOf(action.id) !== -1) {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+
+    // rpm-ostree's D-Bus actions do the same job by a different road. The id set has changed shape
+    // across releases, so this one is matched by prefix on purpose — every action under this prefix
+    // mutates the deployment, there is no read-only member to catch by accident.
+    if (action.id.indexOf("org.projectatomic.rpmostree1.") === 0) {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

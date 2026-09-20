@@ -1,0 +1,13 @@
+# Auros — XDG user folders.  Installed to /etc/xdg/user-dirs.defaults.
+# These are the names xdg-user-dirs creates in a new home directory, and they are the names Dolphin's
+# Places pane and every file dialog will show.  They are deliberately the Windows set and nothing else:
+# Templates and Public do not exist on a Windows machine and a folder nobody asked for is a folder we
+# should not be creating (spec §1.2 — subtraction is the product).
+DESKTOP=Desktop
+DOWNLOAD=Downloads
+DOCUMENTS=Documents
+MUSIC=Music
+PICTURES=Pictures
+VIDEOS=Videos
+TEMPLATES=
+PUBLICSHARE=

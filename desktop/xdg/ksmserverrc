@@ -1,0 +1,8 @@
+# Auros — session defaults.  Installed to /etc/xdg/ksmserverrc.
+
+[General]
+# Start with an empty desktop, as Windows does.  Restoring the previous session means a user who left
+# eleven windows open finds eleven windows reopening on a 4 GB machine, which on the low-ram profile is
+# the difference between "slow" and "unusable".
+loginMode=emptySession
+confirmLogout=true

@@ -1,0 +1,22 @@
+# dconf system database for policy mode KIOSK.
+#
+# SCOPE, so nobody over-reads this file: Plasma does not use dconf. This database governs the
+# GTK/GNOME-based applications that are on the image anyway, and any GTK-based Flatpak the kiosk
+# application happens to be.
+#
+# Kiosk goes further than locked on three keys, and the reason is the room the machine sits in: an
+# unattended terminal in a lobby or a library should not be a printer, should not be a way to write
+# to whatever removable media somebody walks up with, and should have no "log out" to land behind.
+#
+# One group, not two: GKeyFile treats a repeated group header as a parse error, and a dconf database
+# that fails to compile is a database that silently is not there.
+[org/gnome/desktop/lockdown]
+disable-command-line=true
+disable-user-switching=true
+disable-printing=true
+disable-print-setup=true
+disable-save-to-disk=true
+disable-log-out=true
+
+[org/gnome/desktop/screensaver]
+lock-enabled=true

@@ -1,0 +1,74 @@
+/* ---------------------------------------------------------------------------------------------
+ * Auros policy mode: KIOSK
+ *
+ * Kiosk is `locked` plus one more idea: the account the application runs as is not a person, so it
+ * gets nothing at all. Everything a polkit client could ask for on behalf of `auroskiosk` is refused,
+ * including the things `locked` deliberately leaves alone (power, storage, colour management).
+ *
+ * The appliance is not supposed to be administrable from the front. It is administrable by being
+ * rebuilt.
+ * ------------------------------------------------------------------------------------------------ */
+
+polkit.addAdminRule(function(action, subject) {
+    return ["unix-group:aurosadmin"];
+});
+
+var AUROS_ADMIN_GROUP = "aurosadmin";
+var AUROS_KIOSK_USER  = "auroskiosk";
+
+var DENY_EXACT = [
+    "org.freedesktop.policykit.exec",
+    "org.freedesktop.policykit.temporaryauthorization.revoke",
+    "org.auros.policy.control-deny"
+];
+
+var DENY_PREFIX = [
+    "org.projectatomic.rpmostree1.",
+    "org.freedesktop.packagekit.",
+    "org.freedesktop.Flatpak.",
+    "org.freedesktop.bootc.",
+    "org.freedesktop.systemd1.",
+    "org.freedesktop.NetworkManager.",
+    "org.fedoraproject.FirewallD1.",
+    "org.freedesktop.accounts.",
+    "org.freedesktop.timedate1.",
+    "org.freedesktop.hostname1.",
+    "org.freedesktop.locale1.",
+    "org.freedesktop.machine1.",
+    "io.podman.",
+    /* Kiosk adds these two over locked: no session switching, no seat juggling, no new sessions. */
+    "org.freedesktop.login1.",
+    "org.freedesktop.udisks2."
+];
+
+function aurosGuarded(id) {
+    var i;
+    for (i = 0; i < DENY_EXACT.length; i++) {
+        if (id === DENY_EXACT[i]) { return true; }
+    }
+    for (i = 0; i < DENY_PREFIX.length; i++) {
+        if (id.indexOf(DENY_PREFIX[i]) === 0) { return true; }
+    }
+    return false;
+}
+
+polkit.addRule(function(action, subject) {
+    if (subject.user === "root") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    /* The appliance account asks for nothing and receives nothing. This rule comes BEFORE the guarded
+     * set on purpose: it is a default-deny, not a blocklist, and it is the only default-deny in the
+     * four modes. It is affordable here precisely because nobody is sitting behind this account. */
+    if (subject.user === AUROS_KIOSK_USER) {
+        polkit.log("auros/kiosk: denied " + action.id + " to the kiosk session account");
+        return polkit.Result.NO;
+    }
+    if (!aurosGuarded(action.id)) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (subject.isInGroup(AUROS_ADMIN_GROUP)) {
+        return polkit.Result.AUTH_ADMIN;
+    }
+    polkit.log("auros/kiosk: denied " + action.id + " to " + subject.user);
+    return polkit.Result.NO;
+});

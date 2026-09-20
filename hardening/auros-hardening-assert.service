@@ -1,0 +1,22 @@
+[Unit]
+# AUROS — asserts at every boot that the hardening layer is actually in force.
+#
+# This unit is EXPECTED to fail loudly rather than quietly, and its failure is expected to turn
+# `systemctl is-system-running` into `degraded`, which check B2 treats as a boot failure. That is the
+# point: a machine whose SELinux is permissive or whose firewall is down should not be recorded as a
+# clean boot.
+Description=Auros hardening assertions
+Documentation=https://github.com/aarohkandy/auros-base
+After=firewalld.service polkit.service
+Wants=firewalld.service
+ConditionPathExists=/usr/libexec/auros/hardening-assert
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/auros/hardening-assert
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

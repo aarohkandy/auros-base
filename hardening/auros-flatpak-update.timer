@@ -1,0 +1,13 @@
+[Unit]
+Description=Auros: update system Flatpaks daily
+Documentation=https://github.com/aarohkandy/auros-base
+
+[Timer]
+OnCalendar=daily
+# A 2012 laptop that is switched on at 08:55 and off at 15:30 never sees a fixed 03:00 schedule.
+Persistent=true
+# 180 machines on one school uplink must not all start at once (BLOCKED.md B6).
+RandomizedDelaySec=3h
+
+[Install]
+WantedBy=timers.target

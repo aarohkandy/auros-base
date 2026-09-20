@@ -1,0 +1,20 @@
+# dconf system database for policy mode LOCKED.
+#
+# SCOPE, so nobody over-reads this file: Plasma does not use dconf. This database governs the
+# GTK/GNOME-based applications that are on the image anyway -- GNOME Disks, Evince, file choosers,
+# anything shipped as a GTK app or a GTK-based Flatpak that honours the host dconf profile.
+#
+# It is here because org/gnome/desktop/lockdown/disable-command-line is a real second lock on the
+# "open a terminal from inside an application" door, on a different toolkit from the KDE one. Two
+# toolkits, two locks. Neither is the enforcement -- polkit and sudoers are -- but a school laptop is
+# a pile of applications, not a desktop environment, and each application has its own idea of what a
+# user may do.
+#
+# The matching file under locks/ is what makes these immutable. A key here without a lock there is a
+# default, and a default is a suggestion.
+[org/gnome/desktop/lockdown]
+disable-command-line=true
+disable-user-switching=true
+
+[org/gnome/desktop/screensaver]
+lock-enabled=true

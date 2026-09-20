@@ -1,0 +1,20 @@
+# AUROS — /etc/sudoers.d/50-auros-baseline   (mode 0440, validated with `visudo -cf` at build time)
+#
+# sudoers.d files are read in lexical order and the LAST matching rule wins. 50- is deliberate:
+#   < 50   upstream and distribution drop-ins, which this file is allowed to override
+#   > 50   the policy modes (open / managed / locked / kiosk), which are allowed to override this file
+# This is the "baseline that the policy modes then tighten" — it must not be the last word.
+#
+# `locked` and `kiosk` are expected to ship 70-auros-policy-<mode> and remove %wheel entirely.
+# ASSUMPTION (task A3, not this file's owner): the policy modes use the 70- prefix in this directory.
+
+Defaults   use_pty
+Defaults   passwd_tries=3
+Defaults   timestamp_timeout=5
+Defaults   lecture=once
+Defaults   env_reset
+Defaults   secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Administrators authenticate. There is no NOPASSWD rule here and build/10-hardening.sh fails the
+# build if one is in force from anywhere that sorts after this file.
+%wheel     ALL=(ALL) ALL

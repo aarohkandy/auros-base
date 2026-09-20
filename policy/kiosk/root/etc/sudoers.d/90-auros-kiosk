@@ -1,0 +1,15 @@
+# Auros policy mode: KIOSK -- as locked, and the appliance account is named explicitly.
+#
+# The `ALL ALL=(ALL:ALL) !ALL` line already covers auroskiosk. It is repeated by name anyway, because
+# the account that runs the application is the one identity on this machine whose denial somebody will
+# eventually want to read in a file rather than infer from a wildcard.
+#
+# See 90-auros-locked for why the file is named 90- and why it has no dot in it.
+
+Defaults        lecture = never
+Defaults:%aurosadmin    timestamp_timeout=0
+
+ALL             ALL=(ALL:ALL) !ALL
+auroskiosk      ALL=(ALL:ALL) !ALL
+root            ALL=(ALL:ALL) ALL
+%aurosadmin     ALL=(ALL:ALL) ALL

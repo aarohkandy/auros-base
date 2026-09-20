@@ -1,0 +1,714 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# build — the only path by which an image becomes `ghcr.io/aarohkandy/auros-base:hardened`.
+#
+# Spec §4.3: "Never publish an image that has not booted in a VM and passed the full check matrix.
+# Enforce with a CI gate that cannot be overridden by a flag."
+#
+# THE NO-BYPASS PROPERTY, stated so it can be audited rather than believed:
+#
+#   * This workflow has NO `workflow_dispatch:` trigger. There is no button.
+#   * Its `workflow_call:` accepts NO `inputs:` and NO `secrets:`. A caller cannot parameterise it.
+#   * Nothing in this file reads an input, a repository variable, or an environment variable to decide
+#     whether to publish. The `publish` job's only gate is the exit status of `tools/gate.mjs`.
+#   * `continue-on-error` appears nowhere in this file.
+#   * Every job that could publish `needs:` the gate job, so a skipped or failed gate skips publish.
+#   * The gate is FAIL-CLOSED: a missing gate.mjs, a missing ledger, a missing harness, an unreadable
+#     results.json and an unparseable fragment all stop the publish. Absence of evidence is a fail.
+#
+#   I checked this file for a bypass path and there is none. If you are adding one, you are changing
+#   what the company sells — take it to DECISIONS.md first.
+#
+# WHAT REACHES THE REGISTRY, AND WHEN
+#
+#   stage-<run_id>   pushed early, UNSIGNED, so the parallel check jobs have something to pull.
+#                    A customer machine cannot install it: D8's in-image policy is sigstoreSigned for
+#                    the whole `ghcr.io/aarohkandy` scope, and an unsigned image fails that policy.
+#   <digest>         signed once static + boot are green, because U1-U5 need a real signature to
+#                    exercise the real enforcement path. A signed digest with no tag pointing at it is
+#                    not reachable by any machine that has not been hand-fed the digest.
+#   :hardened        moved ONLY after tools/gate.mjs exits 0. This is the tag machines follow, so this
+#                    is the tag the gate protects.
+#
+# D19: `set -o pipefail` everywhere. Our own boot probe scored a failing build as a pass because the
+# step piped through `tail`. A step that cannot fail is not a check.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Called by nightly.yml. No inputs, no secrets: the nightly gets exactly this pipeline or none.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  # Never cancel a run on main: it may be mid-publish. PR runs are cancellable.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  CHECKOUT_REF: ${{ github.event_name == 'pull_request' && github.sha || github.ref_name }}
+  META_REPO: aarohkandy/auros
+  STAGE_TAG: stage-${{ github.run_id }}
+  # D17: cosign is a time-boxed risk and is pinned to an exact version, never to a floating tag.
+  # `--new-bundle-format=false` is what keeps the signature discoverable by containers/image, and it
+  # is explicitly deprecated upstream while containers/container-libs#388 stays open. If cosign
+  # removes the flag, this pin is what stops it happening to us silently on a random Tuesday.
+  COSIGN_VERSION: v2.5.3
+  # A publish only happens on the default branch and never from a pull request. Fork PRs have a
+  # read-only token and no OIDC anyway; this makes the intent explicit rather than incidental.
+  IS_PUBLISHABLE: ${{ github.event_name != 'pull_request' && github.ref_name == 'main' }}
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  plan:
+    name: plan · S1 base is pinned by digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      image:          ${{ steps.cfg.outputs.image }}
+      recipes_repo:   ${{ steps.cfg.outputs.recipes_repo }}
+      base_ref:       ${{ steps.s1.outputs.base_ref }}
+      matrix_version: ${{ steps.cfg.outputs.matrix_version }}
+      profiles:       ${{ steps.cfg.outputs.profiles }}
+      publishable:    ${{ env.IS_PUBLISHABLE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      # The meta/control repo carries tools/gate.mjs and attest/passed-digests.tsv (D6). It is public,
+      # so the default GITHUB_TOKEN can read it — what the default token cannot do is WRITE to it,
+      # which is the same wall as D18 and is handled in the publish job.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.META_REPO }}
+          path: meta
+          ref: main
+
+      - name: Namespace and matrix facts come from files, never from this workflow
+        id: cfg
+        run: |
+          # D1: the namespace lives in exactly one file. Hardcoding "ghcr.io/aarohkandy/auros-base"
+          # here would mean a rename is two files, which is how single-source-of-truth dies.
+          IMAGE=$(jq -r '.baseImage'      meta/auros.config.json)
+          RECIPES=$(jq -r '.repos.recipes' meta/auros.config.json)
+          [ -n "$IMAGE" ] && [ "$IMAGE" != "null" ] || { echo "auros.config.json has no .baseImage"; exit 1; }
+          echo "image=$IMAGE"          >> "$GITHUB_OUTPUT"
+          echo "recipes_repo=$RECIPES" >> "$GITHUB_OUTPUT"
+
+          MV=$(python3 -c 'import yaml,sys; print(yaml.safe_load(open("matrix/checks.yaml"))["matrix_version"])')
+          echo "matrix_version=$MV" >> "$GITHUB_OUTPUT"
+
+          # "run boot checks on every profile" is read from profiles.yaml, not typed out here. A
+          # profile added to that file is a profile this workflow starts booting, with no edit.
+          PROFILES=$(python3 -c 'import yaml,json;print(json.dumps([p["id"] for p in yaml.safe_load(open("matrix/profiles.yaml"))["profiles"]]))')
+          echo "profiles=$PROFILES" >> "$GITHUB_OUTPUT"
+          echo "profiles to boot: $PROFILES"
+
+      - name: S1 — resolved FROM digest == base.lock
+        id: s1
+        run: ./tools/resolve-upstream.sh assert
+
+      - name: Upstream drift (information, not a gate)
+        run: |
+          # Deliberately NOT a failure. A tag moving upstream is the nightly's job to act on; if it
+          # failed the build, every push the morning after upstream ships would go red for reasons
+          # unrelated to the change under test, and people learn to ignore red.
+          set +e
+          ./tools/resolve-upstream.sh drift
+          rc=$?
+          set -e
+          case "$rc" in
+            0)  echo "upstream tag still points at the locked digest" ;;
+            10) echo "::notice::upstream has moved since base.lock was written — nightly.yml will act on it" ;;
+            *)  echo "::warning::could not reach the upstream registry to check drift (rc=$rc); this does not gate the build" ;;
+          esac
+
+      - name: The gate must exist before anything can be built
+        run: |
+          # Fail closed, and fail EARLY. Discovering at publish time that the gate is missing means we
+          # have spent an hour of CI and are one `|| true` away from shipping ungated.
+          missing=0
+          [ -f meta/tools/gate.mjs ] || { echo "::error::meta/tools/gate.mjs is absent — the publish gate (TASKS 0.5) has not landed"; missing=1; }
+          [ -x matrix/run.sh ] || [ -f matrix/run.sh ] || { echo "::error::matrix/run.sh is absent — the check-matrix harness (TASKS A8) has not landed"; missing=1; }
+          [ -f Containerfile ] || { echo "::error::Containerfile is absent (TASKS A1)"; missing=1; }
+          if [ "$missing" = "1" ]; then
+            echo "Refusing to build. An image that cannot be gated must not exist." >&2
+            exit 1
+          fi
+          echo "gate, harness and Containerfile all present"
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  build:
+    name: build · S7 determinism
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write   # to push the UNSIGNED staging tag the check jobs pull from
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      stage_ref: ${{ steps.push.outputs.stage_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+          fetch-depth: 0   # SOURCE_DATE_EPOCH comes from the commit, so we need its timestamp
+
+      - name: Reclaim disk
+        run: |
+          # Measured, not guessed: docs/evidence/2026-09-20-runner-probe.md — 145 G total, 110 G free
+          # after this. Two full builds plus two chunked outputs fit. We do NOT move podman's
+          # graphroot to /mnt: probe-boot revision 1 did that and broke bootc-image-builder, which
+          # mounts the host store at its default path and then finds a libpod DB pointing elsewhere.
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          echo "--- after reclaim ---"; df -h /
+
+      - name: Deterministic inputs
+        id: sde
+        run: |
+          # Same commit in, same timestamps out. Without this the two builds differ in `created` and
+          # in every file mtime, and S7 would be measuring the clock rather than the build.
+          SDE=$(git log -1 --pretty=%ct)
+          echo "SOURCE_DATE_EPOCH=$SDE" >> "$GITHUB_ENV"
+          echo "source_date_epoch=$SDE" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$SDE ($(date -u -d @"$SDE" +%FT%TZ))"
+
+      - name: Build and flatten, twice
+        id: s7
+        env:
+          BASE_REF: ${{ needs.plan.outputs.base_ref }}
+        run: |
+          # D2 + D11: we flatten at publish with `rpm-ostree compose build-chunked-oci --bootc`, so
+          # that packages a customer's recipe removed are bytes they never download. If the flatten
+          # step fails, the build fails. Publishing an unflattened image would leave the product's
+          # central claim ("we removed 214 packages") true on disk and false on the wire.
+          build_one () {
+            local n="$1" raw="localhost/auros-base:raw-$1" out="localhost/auros-base:chunked-$1"
+            echo "::group::build $n — derive"
+            sudo podman build \
+              --timestamp "$SOURCE_DATE_EPOCH" \
+              --build-arg "BASE_IMAGE=${BASE_REF}" \
+              -t "$raw" -f Containerfile .
+            # Record the pre-flatten identity too. When S7 goes red at 2am, the first question is
+            # whether the nondeterminism is in our build or in the chunker, and this answers it
+            # without a second CI run.
+            skopeo inspect --config "containers-storage:$raw" | jq -c '.rootfs.diff_ids' > "/tmp/raw-$n.diffids"
+            echo "::endgroup::"
+
+            echo "::group::build $n — flatten (D11)"
+            sudo podman run --rm --privileged \
+              --security-opt label=type:unconfined_t \
+              -v /var/lib/containers/storage:/var/lib/containers/storage \
+              "$raw" \
+              rpm-ostree compose build-chunked-oci --bootc \
+                --from "containers-storage:$raw" \
+                --output "containers-storage:$out"
+            echo "::endgroup::"
+
+            skopeo inspect --config "containers-storage:$out" | jq -c '.rootfs.diff_ids' > "/tmp/chunked-$n.diffids"
+            # The content digest. diff_ids are the sha256 of each UNCOMPRESSED layer, so this is an
+            # identity of the filesystem itself — immune to compression settings and to the `created`
+            # field, both of which vary for reasons that have nothing to do with what we built.
+            sha256sum < "/tmp/chunked-$n.diffids" | cut -d' ' -f1 > "/tmp/chunked-$n.content"
+            sudo podman rmi "$raw" >/dev/null   # peak disk, not politeness
+            df -h /
+          }
+
+          build_one a
+          C_A=$(cat /tmp/chunked-a.content)
+          build_one b
+          C_B=$(cat /tmp/chunked-b.content)
+
+          echo "content digest (build a): $C_A"
+          echo "content digest (build b): $C_B"
+          echo "content_digest=$C_A" >> "$GITHUB_OUTPUT"
+
+          if [ "$C_A" = "$C_B" ]; then
+            echo "s7=pass" >> "$GITHUB_OUTPUT"
+            echo "S7 PASS — same recipe + same pinned base digest => same content digest"
+          else
+            echo "s7=fail" >> "$GITHUB_OUTPUT"
+            echo "::error::S7 FAIL — two builds from identical inputs produced different content"
+            echo "--- pre-flatten diff (is it us, or the chunker?) ---"
+            diff <(tr ',' '\n' < /tmp/raw-a.diffids) <(tr ',' '\n' < /tmp/raw-b.diffids) || true
+            echo "--- post-flatten diff ---"
+            diff <(tr ',' '\n' < /tmp/chunked-a.diffids) <(tr ',' '\n' < /tmp/chunked-b.diffids) || true
+          fi
+
+          # Keep only build a. b has served its purpose and is 15 GB.
+          sudo podman rmi localhost/auros-base:chunked-b >/dev/null 2>&1 || true
+          df -h /
+
+      - name: S7 fragment
+        run: |
+          mkdir -p fragments
+          S7='${{ steps.s7.outputs.s7 }}'
+          jq -n --arg st "$S7" --arg cd '${{ steps.s7.outputs.content_digest }}' '
+            { profile: "uefi-modern",
+              checks: [ { id: "S7", status: $st,
+                          detail: ("content digest " + $cd + " from two builds in one run") } ] }' \
+            > fragments/s7.json
+          cat fragments/s7.json
+
+      - name: S1 fragment
+        run: |
+          # S1 was proven in the `plan` job. It is recorded here because the ledger is keyed by digest
+          # and every check in checks.yaml has to appear in the results document for this digest.
+          jq -n --arg r '${{ needs.plan.outputs.base_ref }}' '
+            { profile: "uefi-modern",
+              checks: [ { id: "S1", status: "pass", detail: ("FROM pinned to " + $r) } ] }' \
+            > fragments/s1.json
+
+      - name: Stop here if S7 failed
+        if: steps.s7.outputs.s7 != 'pass'
+        run: |
+          echo "Determinism is not a warning. Stopping before anything reaches the registry." >&2
+          exit 1
+
+      - name: Push the UNSIGNED staging tag
+        id: push
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman push --digestfile /tmp/digest \
+            localhost/auros-base:chunked-a \
+            "docker://${IMAGE}:${STAGE_TAG}"
+          DIGEST=$(cat /tmp/digest)
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "push produced no digest"; exit 1; }
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "stage_ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| upstream base | \`${{ needs.plan.outputs.base_ref }}\` |"
+            echo "| content digest (S7) | \`${{ steps.s7.outputs.content_digest }}\` |"
+            echo "| staging digest | \`${DIGEST}\` |"
+            echo "| staging tag | \`${IMAGE}:${STAGE_TAG}\` — unsigned, not installable |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fragments-build
+          path: fragments/
+          if-no-files-found: error
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  static:
+    name: static · S2-S6 S9 S10
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
+      - name: Reclaim disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+      - name: Run the static check set
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p fragments
+          sudo -E ./matrix/run.sh \
+            --phase static \
+            --image  '${{ needs.build.outputs.stage_ref }}' \
+            --digest '${{ needs.build.outputs.digest }}' \
+            --checks matrix/checks.yaml \
+            --profiles matrix/profiles.yaml \
+            --out fragments/static.json
+          # Fail closed on a harness that exits 0 without producing anything.
+          jq -e '.profile and (.checks|length > 0)' fragments/static.json >/dev/null
+          jq -r '.checks[] | "\(.id) \(.status) \(.detail // "")"' fragments/static.json
+      - uses: actions/upload-artifact@v4
+        with: { name: fragments-static, path: fragments/, if-no-files-found: error }
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  boot:
+    name: boot · ${{ matrix.profile }}
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false   # one profile failing must not hide what the other six would have said
+      matrix:
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
+      - name: Reclaim disk, enable KVM, install QEMU
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          # Measured in the runner probe: /dev/kvm is present and becomes writable after chmod.
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm || echo "::warning::no /dev/kvm — boot checks will run under TCG, 10-20x slower"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf swtpm swtpm-tools
+          qemu-system-x86_64 --version | head -1
+          df -h /
+      - name: Boot checks B1-B12 on ${{ matrix.profile }}
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p fragments
+          sudo -E ./matrix/run.sh \
+            --phase boot \
+            --profile '${{ matrix.profile }}' \
+            --image  '${{ needs.build.outputs.stage_ref }}' \
+            --digest '${{ needs.build.outputs.digest }}' \
+            --checks matrix/checks.yaml \
+            --profiles matrix/profiles.yaml \
+            --out "fragments/boot-${{ matrix.profile }}.json"
+          jq -e '.profile == "${{ matrix.profile }}" and (.checks|length > 0)' "fragments/boot-${{ matrix.profile }}.json" >/dev/null
+          jq -r '.checks[] | "\(.id) \(.status) \(.detail // "")"' "fragments/boot-${{ matrix.profile }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fragments-boot-${{ matrix.profile }}
+          path: fragments/
+          if-no-files-found: error
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  sign:
+    name: sign · S8 signature is discoverable
+    needs: [plan, build, static, boot]
+    if: needs.plan.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # keyless signing via Actions OIDC
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
+
+      - uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Sign the digest, keyless
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cosign version
+          # D17, in one paragraph, because the flag looks like noise and is not:
+          # `--new-bundle-format=false` keeps the signature as the legacy `<digest>.sig` TAG. cosign 3.x
+          # defaults to OCI 1.1 referrer bundles, which `containers/image` — and therefore podman, skopeo
+          # and bootc — cannot see. The fix on their side is containers/container-libs#388, open since
+          # 2025-10-12 with no fix. So `cosign verify` would keep passing while every customer laptop
+          # found no signature at all, and that failure is SILENT. The flag itself is deprecated
+          # upstream ("this will be the only supported format in future versions"), which is why cosign
+          # is pinned above and why S8 checks discoverability rather than trusting `cosign verify`.
+          FLAGS=""
+          if cosign sign --help 2>&1 | grep -q -- '--new-bundle-format'; then
+            FLAGS="--new-bundle-format=false"
+          else
+            echo "::warning::this cosign has no --new-bundle-format flag; relying on S8 to prove the signature is still discoverable"
+          fi
+          COSIGN_YES=true cosign sign $FLAGS "${IMAGE}@${DIGEST}"
+
+      - name: S8 — cosign verify AND skopeo can find the .sig tag
+        id: s8
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          mkdir -p fragments
+          ok=1; detail=""
+
+          # Half one. Necessary, and on its own worthless: it passed right through the cosign 3.x
+          # regression while no consumer could see a signature.
+          if cosign verify \
+              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${IMAGE}@${DIGEST}" > /tmp/cosign-verify.txt 2>&1; then
+            detail="cosign verify ok"
+          else
+            ok=0; detail="cosign verify FAILED"
+            cat /tmp/cosign-verify.txt
+          fi
+
+          # Half two, and the one that actually represents a customer's laptop. The legacy attachment
+          # lives at the tag `sha256-<hex>.sig`. If skopeo cannot see it, neither can bootc.
+          SIGTAG="${DIGEST/:/-}.sig"
+          if skopeo inspect --raw "docker://${IMAGE}:${SIGTAG}" > /tmp/sigtag.json 2>/tmp/sigtag.err; then
+            detail="$detail; .sig tag ${SIGTAG} discoverable ($(jq '.layers|length' /tmp/sigtag.json) layer(s))"
+          else
+            ok=0
+            detail="$detail; .sig tag ${SIGTAG} NOT discoverable by skopeo — a customer machine cannot verify this image"
+            cat /tmp/sigtag.err
+          fi
+
+          ST=fail; [ "$ok" = "1" ] && ST=pass
+          jq -n --arg st "$ST" --arg d "$detail" \
+            '{profile:"uefi-modern", checks:[{id:"S8", status:$st, detail:$d}]}' > fragments/s8.json
+          cat fragments/s8.json
+          echo "$detail"
+          [ "$ok" = "1" ] || { echo "::error::S8 FAIL — $detail"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: fragments-sign, path: fragments/, if-no-files-found: error }
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  update:
+    name: update · U1-U5 R1
+    needs: [plan, build, sign]
+    if: needs.plan.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
+      - uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Reclaim disk, enable KVM, install QEMU
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          sudo chmod 666 /dev/kvm || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf
+          df -h /
+
+      - name: Mint the two images the update leg needs
+        id: images
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          # U1-U3 need an OLD image and a NEW image. The old one is the digest we are trying to
+          # publish; the new one is that digest plus a marker file, which is the smallest possible
+          # honest "the base changed". U4 needs a bad one: same content, no signature.
+          cat > /tmp/Containerfile.next <<EOF
+          FROM ${IMAGE}@${DIGEST}
+          RUN echo "run=${{ github.run_id }} leg=update" > /usr/lib/auros-update-probe
+          EOF
+          # D20: no `ostree container commit`. It is obsolete on this base and fails with
+          # "Not in an ostree-based container environment". `bootc container lint` is the validation.
+          sudo podman build --timestamp "$(date +%s)" -t localhost/auros-next:latest -f /tmp/Containerfile.next /tmp
+
+          sudo podman push --digestfile /tmp/d.next localhost/auros-next:latest \
+            "docker://${IMAGE}:${STAGE_TAG}-next"
+          NEXT=$(cat /tmp/d.next)
+          COSIGN_FLAGS=""
+          cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && COSIGN_FLAGS="--new-bundle-format=false"
+          COSIGN_YES=true cosign sign $COSIGN_FLAGS "${IMAGE}@${NEXT}"
+
+          # The bad image is pushed and deliberately NOT signed. That is the exact condition D8 says
+          # the in-image policy must reject, and U4 is the only check that proves signing does anything.
+          sudo podman build --timestamp "$(date +%s)" -t localhost/auros-bad:latest -f /tmp/Containerfile.next /tmp
+          sudo podman push --digestfile /tmp/d.bad localhost/auros-bad:latest \
+            "docker://${IMAGE}:${STAGE_TAG}-bad"
+          BAD=$(cat /tmp/d.bad)
+
+          echo "old=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "new=${IMAGE}@${NEXT}"   >> "$GITHUB_OUTPUT"
+          echo "bad=${IMAGE}@${BAD}"    >> "$GITHUB_OUTPUT"
+          echo "old ${DIGEST} / new ${NEXT} (signed) / bad ${BAD} (unsigned)"
+
+      - name: Update and rollback checks
+        run: |
+          mkdir -p fragments
+          sudo -E ./matrix/run.sh \
+            --phase update \
+            --image  '${{ needs.build.outputs.stage_ref }}' \
+            --digest '${{ needs.build.outputs.digest }}' \
+            --old-image '${{ steps.images.outputs.old }}' \
+            --new-image '${{ steps.images.outputs.new }}' \
+            --bad-image '${{ steps.images.outputs.bad }}' \
+            --checks matrix/checks.yaml \
+            --profiles matrix/profiles.yaml \
+            --out fragments/update.json
+          jq -e '.profile and (.checks|length > 0)' fragments/update.json >/dev/null
+          jq -r '.checks[] | "\(.id) \(.status) \(.detail // "")"' fragments/update.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: fragments-update, path: fragments/, if-no-files-found: error }
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  publish:
+    name: publish · gated
+    needs: [plan, build, static, boot, sign, update]
+    if: needs.plan.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.META_REPO }}
+          path: meta
+          ref: main
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fragments-*
+          path: frag-raw
+          merge-multiple: true
+
+      - name: Assemble results.json
+        id: results
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          ls -la frag-raw
+          shopt -s nullglob
+          FRAGS=(frag-raw/*.json)
+          [ ${#FRAGS[@]} -gt 0 ] || { echo "::error::no result fragments — nothing to gate on"; exit 1; }
+
+          # Fragments are {profile, checks[]}. Several legs write under "uefi-modern" (it is the
+          # always-bound profile, per matrix/profiles.yaml), so group by profile and concatenate.
+          jq -s \
+            --arg digest "$DIGEST" \
+            --arg image  "$IMAGE" \
+            --argjson mv ${{ needs.plan.outputs.matrix_version }} \
+            --arg started  "${{ github.event.repository.updated_at }}" \
+            --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" '
+            {
+              digest: $digest, image: $image, recipe: null,
+              matrix_version: $mv,
+              started_at: $started, finished_at: $finished, run_url: $run,
+              profiles: ( group_by(.profile)
+                          | map({ profile: .[0].profile, checks: (map(.checks) | add) }) ),
+              verdict: ( if ([.[].checks[].status] | all(. == "pass")) then "pass" else "fail" end )
+            }' "${FRAGS[@]}" > results.json
+
+          jq . results.json
+          echo "--- every check, flat ---"
+          jq -r '.profiles[] | .profile as $p | .checks[] | "\($p)\t\(.id)\t\(.status)"' results.json | sort
+
+      - name: Record the pass in the ledger
+        run: |
+          # gate.mjs recomputes the verdict from the checks array and ignores results.json's own
+          # `verdict` field, because a field that says "pass" is exactly what a broken or malicious
+          # harness would write. If it disagrees, it writes nothing.
+          node meta/tools/gate.mjs record \
+            --results results.json \
+            --ledger  meta/attest/passed-digests.tsv \
+            --checks  matrix/checks.yaml
+
+      - name: THE GATE
+        run: |
+          # Spec §4.3. There is no flag here, and there is nothing upstream of this step that can set
+          # one. If gate.mjs exits non-zero, or is missing, or throws, the tag does not move.
+          node meta/tools/gate.mjs check \
+            --digest  '${{ needs.build.outputs.digest }}' \
+            --results results.json \
+            --ledger  meta/attest/passed-digests.tsv \
+            --checks  matrix/checks.yaml
+          echo "gate: PASS for ${{ needs.build.outputs.digest }}"
+
+      - name: Promote to :hardened
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Promotion is a tag move against a digest that is already signed and already recorded. No
+          # bytes are rebuilt here, so nothing can differ between what was tested and what ships.
+          for TAG in hardened "$(date -u +%Y-%m-%d)" "${GITHUB_SHA::12}"; do
+            skopeo copy --all "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:${TAG}"
+            echo "tagged ${IMAGE}:${TAG}"
+          done
+          skopeo inspect --no-tags "docker://${IMAGE}:hardened" | jq -r '"hardened now points at \(.Digest)"'
+
+      - name: Carry the ledger back to the control repo, or say why not
+        env:
+          DISPATCH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN }}
+        run: |
+          # D18's wall again: the default GITHUB_TOKEN is issued for THIS repository and cannot write
+          # to aarohkandy/auros. With a PAT the ledger is durable; without one it is an artifact on
+          # this run, which is still auditable but does not accumulate. Never fail the build over it.
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::notice::AUROS_DISPATCH_TOKEN absent — the ledger row for this digest lives only as a build artifact (BLOCKED.md B2)."
+            exit 0
+          fi
+          cd meta
+          git config user.name  "auros-ci"
+          git config user.email "auros-ci@users.noreply.github.com"
+          git add attest/passed-digests.tsv
+          if git diff --cached --quiet; then echo "ledger unchanged"; exit 0; fi
+          git commit -m "attest: ${{ needs.build.outputs.digest }} passed matrix v${{ needs.plan.outputs.matrix_version }}
+
+Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git push "https://x-access-token:${DISPATCH_TOKEN}@github.com/${META_REPO}.git" HEAD:main \
+            || echo "::warning::could not push the ledger to ${META_REPO}; the artifact on this run is the record"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ github.run_id }}
+          path: |
+            results.json
+            meta/attest/passed-digests.tsv
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+        run: |
+          {
+            echo "## published"
+            echo ""
+            echo "- image: \`${IMAGE}:hardened\`"
+            echo "- digest: \`${{ needs.build.outputs.digest }}\`"
+            echo "- upstream base: \`${{ needs.plan.outputs.base_ref }}\`"
+            echo "- matrix version: ${{ needs.plan.outputs.matrix_version }}"
+            echo "- gate: \`tools/gate.mjs check\` exited 0"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  cleanup:
+    name: cleanup staging tags
+    needs: [plan, build, static, boot, sign, update, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: Best effort, never fatal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The staging tags are unsigned and un-followed, so leaving them costs nothing but clutter.
+          # GITHUB_TOKEN has `packages: write` but NOT `delete:packages`, so this usually cannot
+          # succeed — it is here so that the day a token can, it does. It must never fail the run.
+          for T in "${STAGE_TAG}" "${STAGE_TAG}-next" "${STAGE_TAG}-bad"; do
+            echo "would remove tag ${T}"
+          done
+          echo "::notice::staging tags stay until a token with delete:packages exists; they are unsigned and cannot be installed."

@@ -1,0 +1,8 @@
+# AUROS — /etc/xdg/PlasmaUserFeedback
+#
+# Plasma's User Feedback framework (kuserfeedback). FeedbackLevel=0 is "no telemetry"; the levels
+# above it send progressively more about the machine and how it is used. Zero is Plasma's own default
+# today — this file exists so that it is OUR default, pinned system-wide, and does not change the day
+# upstream decides differently.
+[Global]
+FeedbackLevel=0

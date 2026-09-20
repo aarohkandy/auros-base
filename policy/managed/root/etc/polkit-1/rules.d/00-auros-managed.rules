@@ -1,0 +1,75 @@
+/* ---------------------------------------------------------------------------------------------
+ * Auros policy mode: MANAGED
+ *
+ * The difference between managed and locked is one word in one function, and it is the whole product
+ * difference between the two modes:
+ *
+ *   managed -> AUTH_ADMIN   the machine asks for the IT password, and then allows it, at the seat.
+ *   locked  -> NO           the machine refuses at the seat. Changes arrive as a new image.
+ *
+ * Same guarded set, same admin identity, same file position. Everything else below is identical to
+ * 00-auros-locked.rules on purpose: two files that must stay in step are easier to keep in step when
+ * they read the same.
+ * ------------------------------------------------------------------------------------------------ */
+
+polkit.addAdminRule(function(action, subject) {
+    return ["unix-group:aurosadmin"];
+});
+
+var AUROS_ADMIN_GROUP = "aurosadmin";
+
+var DENY_EXACT = [
+    "org.freedesktop.policykit.exec",
+    "org.freedesktop.policykit.temporaryauthorization.revoke",
+    /* The canary: allow_any=yes by default, so any non-zero pkcheck here proves this file is live. */
+    "org.auros.policy.control-deny"
+];
+
+var DENY_PREFIX = [
+    "org.projectatomic.rpmostree1.",
+    "org.freedesktop.packagekit.",
+    "org.freedesktop.Flatpak.",
+    "org.freedesktop.bootc.",
+    "org.freedesktop.systemd1.",
+    "org.freedesktop.NetworkManager.",
+    "org.fedoraproject.FirewallD1.",
+    "org.freedesktop.accounts.",
+    "org.freedesktop.timedate1.",
+    "org.freedesktop.hostname1.",
+    "org.freedesktop.locale1.",
+    "org.freedesktop.machine1.",
+    "io.podman."
+];
+
+var DENY_STORAGE = [
+    "org.freedesktop.udisks2.filesystem-mount-system",
+    "org.freedesktop.udisks2.filesystem-fstab",
+    "org.freedesktop.udisks2.modify-device",
+    "org.freedesktop.udisks2.open-device"
+];
+
+function aurosGuarded(id) {
+    var i;
+    for (i = 0; i < DENY_EXACT.length; i++) {
+        if (id === DENY_EXACT[i]) { return true; }
+    }
+    for (i = 0; i < DENY_STORAGE.length; i++) {
+        if (id === DENY_STORAGE[i]) { return true; }
+    }
+    for (i = 0; i < DENY_PREFIX.length; i++) {
+        if (id.indexOf(DENY_PREFIX[i]) === 0) { return true; }
+    }
+    return false;
+}
+
+polkit.addRule(function(action, subject) {
+    if (!aurosGuarded(action.id)) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (subject.user === "root") {
+        return polkit.Result.YES;
+    }
+    /* AUTH_ADMIN, not AUTH_ADMIN_KEEP: no 5-minute grace window. A teacher who unlocks one thing has
+     * unlocked one thing, not the next five minutes of whatever the student does next. */
+    return polkit.Result.AUTH_ADMIN;
+});

@@ -1,0 +1,20 @@
+# Auros policy mode: LOCKED -- sudo is for the administrative account and nobody else, every time.
+#
+# WHY 90-: @includedir /etc/sudoers.d is the LAST line of /etc/sudoers, and files inside it are read
+# in lexical order with later rules winning. Fedora's `%wheel ALL=(ALL) ALL` is in the main file, so
+# anything here overrides it, and 90- puts us after anything a package might drop in at 10- or 50-.
+#
+# WHY NO DOT IN THE FILENAME: sudo silently SKIPS files in sudoers.d whose name contains a `.` or ends
+# in `~`. A policy file that is silently ignored is exactly the "configured but not effective" failure
+# that check B5 exists to catch, and it would look completely fine in a directory listing.
+#
+# timestamp_timeout=0 removes sudo's grace window, to match the polkit side (AUTH_ADMIN, not
+# AUTH_ADMIN_KEEP). An administrator who unlocked one thing has unlocked one thing -- not the next
+# fifteen minutes of whatever happens at that keyboard after they walk away.
+
+Defaults        lecture = never
+Defaults:%aurosadmin    timestamp_timeout=0
+
+ALL             ALL=(ALL:ALL) !ALL
+root            ALL=(ALL:ALL) ALL
+%aurosadmin     ALL=(ALL:ALL) ALL

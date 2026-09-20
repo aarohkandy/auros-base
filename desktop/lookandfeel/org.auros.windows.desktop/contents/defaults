@@ -1,0 +1,36 @@
+# Auros look-and-feel defaults.
+# Format is [file][group] / key=value — the values Plasma writes into a user's config when this
+# look-and-feel is applied.
+#
+# NOTE ON WHAT WE DELIBERATELY DO NOT DO: this package does not attempt to reskin Plasma to look like
+# Windows.  There is no Windows-alike icon theme, no fake Start orb, no XP/7 window decoration.  Two
+# reasons, and both are binding.  First, prohibition §4.2 — we do not let anybody believe this IS
+# Windows; the moment it looks identical, every difference underneath becomes a betrayal rather than a
+# difference.  Second, a third-party clone theme is an unmaintained dependency in an image we rebuild
+# every night, and check S3 exists precisely because we do not want that.
+#
+# So: we match the SHAPE and the BEHAVIOUR — where things are, what a click does, what a key does —
+# and we keep Breeze's own appearance, which is legible and maintained by people who are not us.
+
+[kdeglobals][KDE]
+LookAndFeelPackage=org.auros.windows.desktop
+widgetStyle=Breeze
+SingleClick=false
+
+[kdeglobals][General]
+ColorScheme=BreezeLight
+
+[kdeglobals][Icons]
+Theme=breeze
+
+[plasmarc][Theme]
+name=breeze
+
+[kcminputrc][Mouse]
+cursorTheme=breeze_cursors
+
+[kwinrc][org.kde.kdecoration2]
+library=org.kde.breeze
+theme=Breeze
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
