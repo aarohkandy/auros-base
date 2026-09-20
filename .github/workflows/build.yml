@@ -202,6 +202,21 @@ jobs:
           sudo docker system prune -af --volumes >/dev/null 2>&1 || true
           echo "--- after reclaim ---"; df -h /
 
+      - name: D21 — mirror the pinned upstream digest into our namespace
+        if: env.IS_PUBLISHABLE == 'true'
+        env:
+          MIRROR: ${{ needs.plan.outputs.mirror }}
+        run: |
+          # Upstream deletes the digest we pin — weekly cleanup, older-than 90 days, keep-n-tagged 7.
+          # `skopeo copy --all` preserves the manifest digest, so the mirror is the same bytes under a
+          # name we control. This is what keeps spec §1.3 ("if we vanish, you rebuild your exact OS
+          # from the file") true after upstream forgets.
+          #
+          # Fork PRs cannot push to our registry, so this is scoped to publishable runs. A fork PR
+          # that needs the mirror to build will find it already populated by an earlier run on main.
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ./tools/resolve-upstream.sh mirror --mirror "$MIRROR"
+
       - name: Deterministic inputs
         id: sde
         run: |
@@ -691,9 +706,9 @@ jobs:
           git config user.email "auros-ci@users.noreply.github.com"
           git add attest/passed-digests.tsv
           if git diff --cached --quiet; then echo "ledger unchanged"; exit 0; fi
-          git commit -m "attest: ${{ needs.build.outputs.digest }} passed matrix v${{ needs.plan.outputs.matrix_version }}
-
-Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git commit \
+            -m "attest: ${{ needs.build.outputs.digest }} passed matrix v${{ needs.plan.outputs.matrix_version }}" \
+            -m "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           git push "https://x-access-token:${DISPATCH_TOKEN}@github.com/${META_REPO}.git" HEAD:main \
             || echo "::warning::could not push the ledger to ${META_REPO}; the artifact on this run is the record"
 

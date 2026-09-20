@@ -106,12 +106,10 @@ jobs:
             echo "::error::resolve-upstream.sh reported drift but changed no files. That is a bug in the script, not a no-op."
             exit 1
           fi
-          git commit -m "base.lock: upstream ${{ steps.check.outputs.old_digest }} -> ${{ steps.check.outputs.upstream_digest }}
-
-ghcr.io/ublue-os/aurora:stable moved. Rebuilding against the new digest and running the full
-check matrix. Nothing publishes unless every check passes on every profile.
-
-Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git commit \
+            -m "base.lock: upstream ${{ steps.check.outputs.old_digest }} -> ${{ steps.check.outputs.upstream_digest }}" \
+            -m "ghcr.io/ublue-os/aurora:stable moved. Rebuilding against the new digest and running the full check matrix. Nothing publishes unless every check passes on every profile." \
+            -m "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           # This push does NOT trigger build.yml — pushes made with GITHUB_TOKEN never trigger
           # workflows. That is deliberate on GitHub's side and fine here: the `build` job below calls
           # build.yml directly, and build.yml checks out the branch TIP, so it picks up this commit.

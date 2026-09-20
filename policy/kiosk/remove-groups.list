@@ -1,0 +1,14 @@
+# comps groups unmarked when policy mode KIOSK is applied.
+#
+# Removing a package and leaving its comps group marked installed is the third of the three quiet
+# ways a prune undoes itself (see policy-lib.sh, auros_unmark_groups). Nothing errors: the group
+# simply stays marked, and the next `dnf group upgrade` in any later layer puts the desktop back.
+#
+# auros_unmark_groups tries both dnf verbs, then CHECKS, then warns loudly and records it in
+# applied.json if a group is still marked. It does not pretend to have succeeded.
+kde-desktop-environment
+kde-desktop
+kde-apps
+kde-media
+kde-office
+gnome-desktop

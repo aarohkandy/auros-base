@@ -1,0 +1,24 @@
+This is the AUROS signature-enforcement canary.
+
+It is not an operating system. It has no kernel, no init, and no filesystem beyond this file. It
+exists so that signing/verify-enforcement.sh (check U4) can offer a real machine a real image
+from our real registry and prove that the machine REFUSES it.
+
+Three tags are built from this one image:
+
+  :signed    signed with the production Auros key. The POSITIVE CONTROL. It must be ACCEPTED.
+             If it is refused, enforcement is not "extra strict" -- it is misconfigured, and the
+             negative results below mean nothing, because a policy that refuses everything also
+             refuses the bad thing.
+
+  :unsigned  never signed. Must be REFUSED. This is the tag that proves the scoped sigstoreSigned
+             rule beats the transports.docker[""] catch-all, because it lives INSIDE our enforced
+             namespace. If the catch-all were winning, this would be accepted.
+
+  :wrongkey  signed with a throwaway key generated during the test run. Must be REFUSED. This
+             proves the machine checks WHICH key signed the image, not merely that a signature
+             exists somewhere.
+
+This image must never appear in a recipe's FROM line, and must never be published under a tag
+that could be mistaken for a product image. It lives in the auros-canary repository, not in
+auros-base, for that reason.

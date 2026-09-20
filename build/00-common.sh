@@ -250,8 +250,8 @@ auros_preflight() {
     # editing the Containerfile:
     #   build/<nn>-<name>.d/   data beside the script, always copied with build/
     #   <name-without-prefix>/ a top-level directory, which needs its own COPY line
-    [ -d "$AUROS_BUILD_DIR/build/$name.d" ] && datadir="build/$name.d"
-    [ -d "$AUROS_BUILD_DIR/${name#[0-9][0-9]-}" ] && datadir="${datadir:+$datadir, }${name#[0-9][0-9]-}"
+    if [ -d "$AUROS_BUILD_DIR/build/$name.d" ]; then datadir="build/$name.d"; fi
+    if [ -d "$AUROS_BUILD_DIR/${name#[0-9][0-9]-}" ]; then datadir="${datadir:+$datadir, }${name#[0-9][0-9]-}"; fi
     found "step $name  data: ${datadir:-none}"
   done
 

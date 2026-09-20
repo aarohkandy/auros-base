@@ -1,0 +1,16 @@
+# The signature-enforcement canary. A few hundred bytes, on purpose.
+#
+# FROM scratch so that there is nothing here that could conceivably boot, be switched to by
+# accident, or be mistaken for a product image if someone finds the tag in the registry. The
+# only thing it needs to be is a real OCI artifact in our real namespace that our signing
+# pipeline can either sign or deliberately not sign.
+#
+# Built and pushed by CI to <registry>/<org>/auros-canary with three tags -- see
+# NOT-A-BOOTABLE-IMAGE.txt for what each one proves.
+
+FROM scratch
+COPY NOT-A-BOOTABLE-IMAGE.txt /NOT-A-BOOTABLE-IMAGE.txt
+LABEL org.auros.role="signature-enforcement-canary" \
+      org.auros.bootable="false" \
+      org.auros.never-use-as-base="true" \
+      org.opencontainers.image.description="Not an OS. Negative control for Auros check U4."

@@ -54,12 +54,19 @@ pkg_install() {
         say "already present: $*"
     fi
 }
+# dnf4 spells it --noautoremove and dnf5 spells it --no-autoremove. Probe once rather than guess:
+# guessing wrong makes the removal step fail the whole base build on an option name.
+RMFLAGS=()
+if $PKG remove --help 2>&1 | grep -q -- '--no-autoremove'; then RMFLAGS=(--no-autoremove)
+elif $PKG remove --help 2>&1 | grep -q -- '--noautoremove'; then RMFLAGS=(--noautoremove)
+else say "note: $PKG has neither --noautoremove nor --no-autoremove; removing without it"; fi
+
 pkg_remove_if_present() {
     local have=() p
     for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 && have+=("$p"); done
     if ((${#have[@]})); then
         say "removing: ${have[*]}"
-        $PKG remove -y --noautoremove "${have[@]}"
+        $PKG remove -y "${RMFLAGS[@]}" "${have[@]}"
     else
         say "not installed, nothing to remove: $*"
     fi
@@ -277,7 +284,12 @@ install -D -m 0644 "$SRC/compat/auros-bottles-setup.service" \
     /usr/lib/systemd/user/auros-bottles-setup.service
 ln -sf ../auros-bottles-setup.service \
     /usr/lib/systemd/user/graphical-session.target.wants/auros-bottles-setup.service
+bu=$(grep -o 'windows-apps\.v[0-9]*\.stamp' /usr/lib/systemd/user/auros-bottles-setup.service | head -1)
+bs=$(grep -o 'STAMP_VERSION=v[0-9]*' /usr/libexec/auros/auros-bottles-setup | head -1 | cut -d= -f2)
+[[ $bu == "windows-apps.${bs}.stamp" ]] || {
+    echo "FATAL: bottles stamp version mismatch: unit says '$bu', script says '$bs'." >&2; exit 1; }
 say "template at /usr/share/auros/windows-apps/ ; materialiser runs per user only when Bottles exists"
+say "bottles stamp version: $bs (unit and script agree)"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════════
 # 7. THE AUDIT AND THE DOCUMENTS

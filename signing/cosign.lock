@@ -1,0 +1,31 @@
+# The pinned cosign version. CI reads this file; nothing hardcodes a version anywhere else.
+#
+# Shell-sourceable and grep-able on purpose, same shape as base.lock.
+#
+# WHY 2.6.5 AND NOT 3.1.3 (both released 2026-08-06, both current, both supported):
+#
+#   cosign v3.1.3  --new-bundle-format default TRUE,  and marked deprecated with the message
+#                  "this will be the only supported format in future versions"
+#   cosign v2.6.5  --new-bundle-format default FALSE, and NOT deprecated
+#
+#   (Measured by reading cmd/cosign/cli/options/sign.go at each tag on 2026-09-20.)
+#
+# containers/image -- which is what podman and bootc use on the customer's laptop -- cannot read
+# new-format OCI 1.1 referrer bundles. containers/container-libs#388, the issue that would fix
+# that, has been OPEN since 2025-10-12 (last activity 2026-05-25, 7 comments, no fix). So on the
+# v3 line every signature we make is invisible to the machine that has to verify it unless we
+# pass a deprecated flag on every invocation, and `cosign verify` keeps passing the whole time.
+# That failure is SILENT, which is why check S8 asserts the legacy .sig tag is discoverable by
+# skopeo rather than trusting `cosign verify`.
+#
+# Pinning to the 2.6 line means the format we need is the DEFAULT rather than an override we are
+# one forgotten flag away from losing. We still pass --new-bundle-format=false explicitly --
+# belt and braces, and it documents the intent at the call site.
+#
+# This is a time-boxed position, not a permanent one. See RISKS.md R1.
+
+COSIGN_VERSION=v2.6.5
+COSIGN_RELEASED=2026-08-06
+COSIGN_INSTALLER_ACTION=sigstore/cosign-installer@v4.1.2
+COSIGN_BUNDLE_FORMAT_FLAG=--new-bundle-format=false
+COSIGN_PUBKEY_IN_IMAGE=/usr/lib/pki/containers/auros.pub

@@ -42,7 +42,11 @@ ARG UPSTREAM_DIGEST=sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a4
 # image's own creation time (2026-09-15T20:33:50Z, recorded in base.lock as UPSTREAM_CREATED) rather
 # than 0, because a 1970 mtime on a system file confuses enough tooling to be its own problem.
 ARG SOURCE_DATE_EPOCH=1789504430
-ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+# No ENV for any of the above, deliberately. Build arguments are already exposed to RUN as
+# environment variables, which is how build/00-common.sh reads UPSTREAM_DIGEST and SOURCE_DATE_EPOCH;
+# an ENV would additionally bake them into the published image's environment, where SOURCE_DATE_EPOCH
+# in particular would then be inherited by every process on a customer's laptop forever.
 
 # -euo pipefail for every RUN below, rather than repeated at the top of each one. A build step that
 # fails quietly in the middle of a pipeline is how an image ships half-hardened.
@@ -66,9 +70,17 @@ SHELL ["/usr/bin/bash", "-euo", "pipefail", "-c"]
 # IF YOU ADD A TOP-LEVEL DATA DIRECTORY, ADD IT HERE IN THE SAME CHANGE. build/00-common.sh prints,
 # for every step it is about to run, which of its data directories it can actually see — so a missing
 # COPY shows up as a named line in the build log rather than as a mysterious failure forty lines on.
-COPY build/     /tmp/auros-build/build/
-COPY hardening/ /tmp/auros-build/hardening/
-COPY base.lock  /tmp/auros-build/base.lock
+COPY build/        /tmp/auros-build/build/
+COPY base.lock     /tmp/auros-build/base.lock
+COPY hardening/    /tmp/auros-build/hardening/
+COPY policy/       /tmp/auros-build/policy/
+COPY update-agent/ /tmp/auros-build/update-agent/
+COPY signing/      /tmp/auros-build/signing/
+COPY desktop/      /tmp/auros-build/desktop/
+
+# `tools/` is deliberately NOT copied: those are CI-side helpers that run on the runner against the
+# registry, not inside the image. Neither is `matrix/` — the check matrix is what judges the image,
+# and an image that carries its own grading criteria is not being graded by them.
 
 # ── The build ───────────────────────────────────────────────────────────────────────────────────
 # One RUN. Every step, then the cleanup that removes all of them, in a single layer — so the image
@@ -76,11 +88,11 @@ COPY base.lock  /tmp/auros-build/base.lock
 # physically holds the build inputs until the publish-time flatten rebuilds the image from the
 # committed filesystem; see D11. After 90-cleanup.sh, no path under /tmp/auros-build exists.)
 RUN chmod 0755 /tmp/auros-build/build/*.sh && \
-    for step in $(ls -1 /tmp/auros-build/build/[0-9][0-9]-*.sh | sort); do \
+    for _auros_step in $(ls -1 /tmp/auros-build/build/[0-9][0-9]-*.sh | sort); do \
         printf '\n══════════════════════════════════════════════════════════════════════════\n'; \
-        printf 'auros: running %s\n' "$(basename "$step")"; \
+        printf 'auros: running %s\n' "$(basename "$_auros_step")"; \
         printf '══════════════════════════════════════════════════════════════════════════\n'; \
-        "$step" || { printf 'auros: FAILED in %s\n' "$(basename "$step")" >&2; exit 1; }; \
+        "$_auros_step" || { printf 'auros: FAILED in %s\n' "$(basename "$_auros_step")" >&2; exit 1; }; \
     done && \
     test ! -e /tmp/auros-build || { printf 'auros: build context survived cleanup\n' >&2; exit 1; }
 

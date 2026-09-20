@@ -151,12 +151,18 @@ fi
 fatal_missing=""
 pending_missing=""
 check_one() {
-  local kind="$1" target="$2"
+  local kind="$1" target="$2" file pattern
   case "$kind" in
     cmd)  have_cmd  "$target" ;;
     pkg)  have_pkg  "$target" ;;
     unit) have_unit "$target" ;;
     path) [ -e "$target" ] ;;
+    # <file>::<extended-regex>. Used where a bare path check would be vacuous — see protected.list.
+    content)
+      file="${target%%::*}"
+      pattern="${target#*::}"
+      [ -f "$file" ] && grep -qE -- "$pattern" "$file"
+      ;;
     *)    return 0 ;;
   esac
 }

@@ -1,0 +1,603 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# gate1-exit — runs the Gate 1 exit condition LITERALLY and reports a binary result.
+#
+# Spec §6A, verbatim:
+#
+#   "push a trivial change to the base; within 20 minutes, without human action, a downstream test
+#    recipe has rebuilt and a running VM has picked up the new image on reboot. Then intentionally
+#    break the base; the VM must REFUSE the update and stay on the old image."
+#
+# GATE.md says a gate is passed only when its evidence names a CI run, a digest, or a results.json
+# that anyone can re-open. This workflow is that evidence. So it is written to be READ, not just to
+# exit 0 — every leg reports what it proved, what it only approximated, and what it could not
+# establish at all. A green tick nobody can interrogate is how a gate becomes a formality.
+#
+# Three honesty rules this file holds itself to:
+#
+#   1. A leg that could not be tested reports NOT PROVEN. It never reports PASS. "skip is not pass"
+#      is the matrix's rule (matrix/README.md) and it applies to the gate that reports on the matrix.
+#   2. Where a surrogate stands in for the real thing, the surrogate is named as a surrogate in the
+#      output, next to what it does and does not stand for.
+#   3. The overall verdict is the AND of the two legs the spec actually names. Supplementary
+#      evidence is reported but never counted toward the verdict, because a verdict that includes
+#      whatever happened to be green is not a verdict.
+#
+# WHAT THIS WORKFLOW PUBLISHES: ephemeral `gate1-<run_id>` tags only. It never writes `:hardened`,
+# and there is an assertion at the top that fails the run if that ever changes. Those tags are a test
+# fixture; the tag customers follow is moved only by build.yml, only behind tools/gate.mjs.
+#
+# D19: pipefail everywhere.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+name: gate1-exit
+
+on:
+  workflow_dispatch:
+  # Also weekly, because a Gate 1 property that was true in September and is not checked again is a
+  # property we will discover we lost from a customer. Monday 06:40 UTC, off the hour (BLOCKED.md B7).
+  schedule:
+    - cron: '40 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate1-exit
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  META_REPO: aarohkandy/auros
+  GATE_TAG: gate1-${{ github.run_id }}
+  COSIGN_VERSION: v3.1.3          # D25, pinned exactly; D17 explains why the pin is not cosmetic
+  BUDGET_SECONDS: '1200'          # the spec says 20 minutes. This is that number and nothing else.
+
+jobs:
+  gate1:
+    name: Gate 1 exit condition
+    runs-on: ubuntu-24.04          # D23
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      packages: write
+      id-token: write              # keyless cosign
+    steps:
+      # ─────────────────────────────────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.META_REPO }}
+          path: meta
+          ref: main
+      - uses: sigstore/cosign-installer@v3.7.0
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Guard — record where :hardened points, so we can prove we never moved it
+        id: guard
+        run: |
+          # A source scan for the string ":hardened" would be fragile and would trip over its own
+          # documentation. This is the assertion that actually means something: note the digest the
+          # customer-facing tag points at NOW, and re-check it at the end. If this workflow ever
+          # acquires a path that publishes, that check goes red.
+          case "${GATE_TAG}" in
+            gate1-*) echo "test tag is ${GATE_TAG}" ;;
+            *) echo "::error::GATE_TAG is not a gate1-* tag"; exit 1 ;;
+          esac
+          IMAGE=$(jq -r '.baseImage' meta/auros.config.json)
+          H=$(skopeo inspect --no-tags "docker://${IMAGE}:hardened" 2>/dev/null | jq -r .Digest || echo "none")
+          echo "hardened_before=$H" >> "$GITHUB_OUTPUT"
+          echo ":hardened currently points at ${H}"
+
+      - name: Facts from the files that own them
+        id: cfg
+        run: |
+          IMAGE=$(jq -r '.baseImage'       meta/auros.config.json)
+          REG=$(jq -r '.registry'          meta/auros.config.json)
+          ORG=$(jq -r '.org'               meta/auros.config.json)
+          RECIPES=$(jq -r '.repos.recipes' meta/auros.config.json)
+          echo "image=$IMAGE"       >> "$GITHUB_OUTPUT"
+          echo "recipes=$RECIPES"   >> "$GITHUB_OUTPUT"
+          echo "mirror=${REG}/${ORG}/auros-upstream-mirror" >> "$GITHUB_OUTPUT"
+          mkdir -p "$GITHUB_WORKSPACE/g1"
+          : > "$GITHUB_WORKSPACE/g1/report.md"
+          : > "$GITHUB_WORKSPACE/g1/verdicts.tsv"
+
+      - name: Prepare the runner
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm || echo "::warning::no /dev/kvm — everything below runs under TCG and will be slow"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf openssh-client
+          # probe-boot revision 1 broke by moving podman's graphroot to /mnt: bootc-image-builder
+          # mounts the host store at its default path and then finds a libpod DB pointing elsewhere.
+          # The store stays where it is. We have 110 GB; we do not need the gymnastics.
+          sudo podman pull quay.io/centos-bootc/bootc-image-builder:latest
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ssh-keygen -t ed25519 -N '' -f /tmp/g1key -C gate1 >/dev/null
+          df -h /
+
+      - name: Helper — one way to talk to the VM, so every step talks to it the same way
+        run: |
+          sudo tee /usr/local/bin/vm >/dev/null <<'SH'
+          #!/usr/bin/env bash
+          # Run a command on the gate1 VM. The VM's sudo needs a password; that is fine, it is a
+          # throwaway fixture whose password is in this file.
+          set -uo pipefail
+          exec ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                   -o LogLevel=ERROR -o ConnectTimeout=10 -i /tmp/g1key auros@127.0.0.1 \
+                   "echo auros | sudo -S -p '' bash -c $(printf '%q' "$*")"
+          SH
+          sudo chmod +x /usr/local/bin/vm
+          sudo tee /usr/local/bin/vm-digest >/dev/null <<'SH'
+          #!/usr/bin/env bash
+          # D25: the booted digest lives at .status.booted.image.imageDigest. Nowhere else.
+          set -uo pipefail
+          vm 'bootc status --json' 2>/dev/null | jq -r '.status.booted.image.imageDigest // empty'
+          SH
+          sudo chmod +x /usr/local/bin/vm-digest
+
+      # ─── BUILD V1 — the "before" image ────────────────────────────────────────────────────────
+      - name: Build and publish V1
+        id: v1
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          ./tools/resolve-upstream.sh assert --mirror '${{ steps.cfg.outputs.mirror }}'
+          ./tools/resolve-upstream.sh mirror --mirror '${{ steps.cfg.outputs.mirror }}'
+          BASE_REF=$(./tools/resolve-upstream.sh assert --quiet --mirror '${{ steps.cfg.outputs.mirror }}' \
+                     | grep '^base_ref=' | cut -d= -f2-)
+
+          sudo podman build --build-arg "BASE_IMAGE=${BASE_REF}" -t localhost/g1:v1 -f Containerfile .
+          # D2/D11 — flatten, same as the real publish path, so the pull sizes we observe are real.
+          sudo podman run --rm --privileged --security-opt label=type:unconfined_t \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            localhost/g1:v1 rpm-ostree compose build-chunked-oci --bootc \
+              --from containers-storage:localhost/g1:v1 \
+              --output containers-storage:localhost/g1:v1c
+          sudo podman push --digestfile /tmp/d1 localhost/g1:v1c "docker://${IMAGE}:${GATE_TAG}"
+          D1=$(cat /tmp/d1)
+          FLAGS=""; cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && FLAGS="--new-bundle-format=false"
+          COSIGN_YES=true cosign sign $FLAGS "${IMAGE}@${D1}"
+          echo "d1=$D1" >> "$GITHUB_OUTPUT"
+          echo "V1 = $D1"
+          sudo podman rmi localhost/g1:v1 >/dev/null 2>&1 || true
+
+      - name: Install V1 to a disk image and boot it
+        id: boot
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          cat > /tmp/config.toml <<EOF
+          [[customizations.user]]
+          name = "auros"
+          password = "auros"
+          key = "$(cat /tmp/g1key.pub)"
+          groups = ["wheel"]
+          EOF
+          mkdir -p /tmp/out
+          # D25: this base wants --rootfs xfs. The image is pulled from the registry by TAG, on
+          # purpose — the VM must end up tracking `${GATE_TAG}`, because "the base moved" means that
+          # tag pointing somewhere new, which is exactly how :hardened behaves in production.
+          sudo podman run --rm --privileged --security-opt label=type:unconfined_t \
+            -v /tmp/out:/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v /tmp/config.toml:/config.toml:ro \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type qcow2 --rootfs xfs "${IMAGE}:${GATE_TAG}"
+          QCOW=$(sudo find /tmp/out -name '*.qcow2' | head -1)
+          [ -n "$QCOW" ] || { echo "::error::bootc-image-builder produced no qcow2"; exit 1; }
+          sudo chmod 666 "$QCOW"
+          echo "qcow=$QCOW" >> "$GITHUB_OUTPUT"
+
+          # Writable NVRAM, or the firmware cannot record a boot entry (probe-boot rev 2).
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/vars.fd 2>/dev/null || cp /usr/share/OVMF/OVMF_VARS.fd /tmp/vars.fd
+          CODE=/usr/share/OVMF/OVMF_CODE_4M.fd; [ -f "$CODE" ] || CODE=/usr/share/OVMF/OVMF_CODE.fd
+          ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
+          echo "acceleration: $ACCEL"
+
+          sudo setsid nohup qemu-system-x86_64 \
+            -machine q35,accel=$ACCEL -cpu max -smp 4 -m 8192 \
+            -drive if=pflash,format=raw,unit=0,readonly=on,file="$CODE" \
+            -drive if=pflash,format=raw,unit=1,file=/tmp/vars.fd \
+            -drive file="$QCOW",format=qcow2,if=virtio \
+            -netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0 \
+            -display none -serial file:/tmp/serial.log -monitor none \
+            -pidfile /tmp/qemu.pid >/dev/null 2>&1 < /dev/null &
+          sleep 5
+          echo "qemu pid $(sudo cat /tmp/qemu.pid 2>/dev/null || echo '?')"
+
+          # Wait for SSH rather than for a string in the serial log: we need to run commands, and
+          # "a login prompt appeared" is a weaker fact than "we logged in".
+          UP=0
+          for i in $(seq 1 90); do
+            sleep 10
+            if vm 'true' >/dev/null 2>&1; then UP=1; echo "ssh up after $((i*10))s"; break; fi
+          done
+          if [ "$UP" != "1" ]; then
+            echo "--- serial, last 150 ---"; sudo tail -150 /tmp/serial.log || true
+            echo "::error::VM never became reachable. Nothing below can be evaluated."
+            exit 1
+          fi
+          vm 'bootc status --json' > /tmp/status0.json
+          jq '.status.booted' /tmp/status0.json
+
+      - name: Preflight — is signature enforcement REAL, or nominal? (D8)
+        id: d8
+        run: |
+          # This is the check that stops the whole thing being theatre. D8: Aurora's policy.json ends
+          # in an insecureAcceptAnything catch-all, so `--enforce-container-sigpolicy` SUCCEEDS while
+          # verifying nothing. If that is the state here, Leg B would "pass" by refusing nothing,
+          # and we would tell a school their machines reject tampered images when they do not.
+          #
+          # D25: the field that distinguishes the two is .status.booted.image.image.signature, which
+          # must read exactly "containerPolicy".
+          SIG=$(jq -r '.status.booted.image.image.signature // "none"' /tmp/status0.json)
+          echo "signature source: ${SIG}"
+          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+          DEPL=$(vm 'bootc status --json' | jq -r '[.status.booted, .status.rollback] | map(select(. != null)) | length')
+          echo "deployments=$DEPL" >> "$GITHUB_OUTPUT"
+          if [ "$SIG" != "containerPolicy" ]; then
+            echo "::error::signature source is '${SIG}', not 'containerPolicy'. D8's in-image policy (our key in /usr/lib/pki/containers, our registries.d with use-sigstore-attachments, a sigstoreSigned transport entry BEFORE any catch-all) is not in force. Leg B cannot mean anything until it is."
+          fi
+
+      # ─── LEG A — a trivial change propagates, unattended, within 20 minutes ───────────────────
+      - name: Leg A · push a trivial change to the base
+        id: v2
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          # "A trivial change to the base": one new file, nothing else. It produces a new base digest,
+          # and a new base digest under the tag the machine follows is precisely what Gate 1 measures
+          # the propagation of.
+          #
+          # NAMED HONESTLY: this is applied as a derived layer on top of the image we just built,
+          # not as a git commit that re-enters CI. A literal commit-and-retrigger needs a credential
+          # GITHUB_TOKEN does not have (pushes made with it never trigger workflows), which is the
+          # same D18 wall the dispatch leg below reports on. What is identical either way is the
+          # thing under test: a new digest appears under `${GATE_TAG}` and nobody touches the VM.
+          cat > /tmp/Containerfile.v2 <<EOF
+          FROM ${IMAGE}@${{ steps.v1.outputs.d1 }}
+          RUN printf 'gate1 run=%s leg=A\n' "${{ github.run_id }}" > /usr/lib/auros-gate1-marker
+          EOF
+          # D20: no `ostree container commit`. Obsolete on this base, fails with
+          # "Not in an ostree-based container environment", and every pre-2024 tutorial ends with it.
+          sudo podman build -t localhost/g1:v2 -f /tmp/Containerfile.v2 /tmp
+          sudo podman push --digestfile /tmp/d2 localhost/g1:v2 "docker://${IMAGE}:${GATE_TAG}"
+          D2=$(cat /tmp/d2)
+          FLAGS=""; cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && FLAGS="--new-bundle-format=false"
+          COSIGN_YES=true cosign sign $FLAGS "${IMAGE}@${D2}"
+          # S8's half that matters: can a containers/image consumer — i.e. the VM — SEE the signature?
+          SIGTAG="${D2/:/-}.sig"
+          skopeo inspect --raw "docker://${IMAGE}:${SIGTAG}" >/dev/null \
+            || { echo "::error::signature for ${D2} is not discoverable by skopeo; the VM will refuse a GOOD image and Leg A would fail for the wrong reason"; exit 1; }
+          echo "d2=$D2" >> "$GITHUB_OUTPUT"
+          echo "t0=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+          echo "V2 = $D2 — the clock starts now"
+
+      - name: Leg A · what is the machine's update schedule, really?
+        id: timer
+        run: |
+          # D22: `uupd`, not `bootc-fetch-apply-updates`, is the update driver on this base.
+          # /etc/rpm-ostreed.conf's AutomaticUpdatePolicy=stage is a decoy. Getting this wrong
+          # produces an agent that looks configured and never runs, which is the failure this step
+          # exists to make impossible to miss.
+          UNIT=none
+          for u in uupd.timer bootc-fetch-apply-updates.timer; do
+            if vm "systemctl cat $u" >/dev/null 2>&1; then UNIT=$u; break; fi
+          done
+          echo "unit=$UNIT" >> "$GITHUB_OUTPUT"
+          if [ "$UNIT" = "none" ]; then
+            echo "next_s=-1" >> "$GITHUB_OUTPUT"
+            echo "::error::no update timer on the machine. Nothing can propagate unattended."
+            exit 0
+          fi
+          vm "systemctl show $UNIT -p OnCalendar -p RandomizedDelaySec -p Persistent -p NextElapseUSecRealtime -p ActiveState" \
+            | tee /tmp/timer.txt
+          ACTIVE=$(grep -oP 'ActiveState=\K.*' /tmp/timer.txt || echo unknown)
+          NEXT_US=$(grep -oP 'NextElapseUSecRealtime=\K[0-9]*' /tmp/timer.txt || echo 0)
+          NOW_US=$(( $(date -u +%s) * 1000000 ))
+          NEXT_S=$(( NEXT_US > NOW_US ? (NEXT_US - NOW_US) / 1000000 : 0 ))
+          echo "unit=$UNIT active=$ACTIVE next in ${NEXT_S}s (budget ${BUDGET_SECONDS}s)"
+          echo "active=$ACTIVE" >> "$GITHUB_OUTPUT"
+          echo "next_s=$NEXT_S" >> "$GITHUB_OUTPUT"
+          if [ "$NEXT_S" -gt "${BUDGET_SECONDS}" ]; then
+            echo "::warning::${UNIT} next fires in ${NEXT_S}s, which is beyond the 20-minute budget. The unattended-within-20-minutes claim cannot be proven with this schedule."
+          fi
+
+      - name: Leg A · wait. Do nothing. That is the test.
+        id: legA
+        run: |
+          T0='${{ steps.v2.outputs.t0 }}'
+          D2='${{ steps.v2.outputs.d2 }}'
+          BUDGET='${{ env.BUDGET_SECONDS }}'
+          NEXT_S='${{ steps.timer.outputs.next_s }}'; NEXT_S="${NEXT_S:--1}"
+          RESULT=fail; ELAPSED=0; MODE=unattended
+
+          poll () {
+            local deadline=$1
+            while [ "$(date -u +%s)" -lt "$deadline" ]; do
+              sleep 30
+              CUR=$(vm-digest || true)
+              NOW=$(date -u +%s); ELAPSED=$(( NOW - T0 ))
+              echo "t+${ELAPSED}s booted=${CUR:-<unreachable, probably rebooting>}"
+              if [ "$CUR" = "$D2" ]; then return 0; fi
+            done
+            return 1
+          }
+
+          if poll $(( T0 + BUDGET )); then
+            RESULT=pass
+          elif [ "$NEXT_S" -gt "$BUDGET" ]; then
+            # The mechanism may be perfect and the SCHEDULE simply longer than the budget. Those are
+            # different findings and conflating them would either hide a broken updater or condemn a
+            # working one. So: report the literal claim as NOT PROVEN, then measure the mechanism
+            # separately with the timer's own unit triggered by hand, and label it a surrogate.
+            echo "::warning::budget expired; the timer had not fired. Running the SURROGATE."
+            MODE=surrogate
+            vm "systemctl start ${{ steps.timer.outputs.unit }}" || true
+            T0=$(date -u +%s)
+            poll $(( T0 + BUDGET )) && RESULT=surrogate-pass || RESULT=fail
+          fi
+
+          echo "result=$RESULT"  >> "$GITHUB_OUTPUT"
+          echo "elapsed=$ELAPSED" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE"       >> "$GITHUB_OUTPUT"
+          vm 'bootc status --json' > /tmp/status2.json 2>/dev/null || true
+          jq '{booted: .status.booted.image.imageDigest, rollback: .status.rollback.image.imageDigest}' /tmp/status2.json || true
+
+      - name: Leg A · U2 — is the previous image still on disk?
+        id: u2
+        run: |
+          # D10: exactly one rollback deployment is retained, never N. bootc exposes no pin verb.
+          # Asserting "2 deployments" is the real guarantee; anything promising "roll back to any
+          # recent image" would be false, and the website says "the previous image", singular.
+          RB=$(jq -r '.status.rollback.image.imageDigest // "none"' /tmp/status2.json 2>/dev/null || echo none)
+          echo "rollback=$RB" >> "$GITHUB_OUTPUT"
+          [ "$RB" = '${{ steps.v1.outputs.d1 }}' ] \
+            && echo "u2=pass" >> "$GITHUB_OUTPUT" \
+            || echo "u2=fail" >> "$GITHUB_OUTPUT"
+
+      - name: Leg A · did a downstream recipe rebuild?
+        id: downstream
+        env:
+          DISPATCH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN }}
+          RECIPES: ${{ steps.cfg.outputs.recipes }}
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          # Half one: the real thing. D18 — the default GITHUB_TOKEN is issued for THIS repository
+          # and cannot POST to another repo's /dispatches. Without a PAT this half is NOT PROVEN,
+          # and saying so is more useful than a surrogate dressed up as the real result.
+          if [ -n "${DISPATCH_TOKEN:-}" ]; then
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -X POST "https://api.github.com/repos/${RECIPES}/dispatches" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -d "$(jq -nc --arg d '${{ steps.v2.outputs.d2 }}' '{event_type:"base-updated",client_payload:{base_digest:$d}}')") || code=000
+            [ "$code" = "204" ] && echo "dispatch=sent" >> "$GITHUB_OUTPUT" || echo "dispatch=http-$code" >> "$GITHUB_OUTPUT"
+          else
+            echo "dispatch=no-credential" >> "$GITHUB_OUTPUT"
+            echo "::notice::no AUROS_DISPATCH_TOKEN — cross-repo dispatch NOT PROVEN (D18 / BLOCKED.md B2)"
+          fi
+
+          # Half two: the rebuild-graph half, in this run, labelled a SURROGATE. It proves that a
+          # recipe deriving from the tag picks up the new base digest — which is the property spec
+          # §3 calls "CVE response is one rebuild". It does NOT prove that auros-recipes' own CI
+          # noticed and rebuilt unattended; only the dispatch or its 10-minute poll can prove that.
+          printf 'FROM %s:%s\nRUN true\n' "$IMAGE" "$GATE_TAG" > /tmp/Containerfile.recipe
+          sudo podman build --pull=always -t localhost/g1:recipe -f /tmp/Containerfile.recipe /tmp
+          PARENT=$(skopeo inspect --no-tags "docker://${IMAGE}:${GATE_TAG}" | jq -r .Digest)
+          echo "recipe built on ${PARENT}"
+          [ "$PARENT" = '${{ steps.v2.outputs.d2 }}' ] \
+            && echo "graph=pass" >> "$GITHUB_OUTPUT" \
+            || echo "graph=fail" >> "$GITHUB_OUTPUT"
+
+      # ─── LEG B — break it, and the machine must refuse ────────────────────────────────────────
+      - name: Leg B · offer a broken base and require refusal
+        id: legB
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          BEFORE=$(vm-digest || echo "")
+          echo "booted before: $BEFORE"
+
+          # Break it in the way that matters. An image with a bug still boots; an image that is not
+          # OURS is the one that must never install. U4's criterion is exactly this: offered an
+          # unsigned or wrongly-signed image, `bootc upgrade` exits non-zero and the booted digest
+          # is UNCHANGED.
+          cat > /tmp/Containerfile.v3 <<EOF
+          FROM ${IMAGE}@${{ steps.v2.outputs.d2 }}
+          RUN printf 'gate1 run=%s leg=B tampered\n' "${{ github.run_id }}" > /usr/lib/auros-gate1-marker
+          EOF
+          sudo podman build -t localhost/g1:v3 -f /tmp/Containerfile.v3 /tmp
+          sudo podman push --digestfile /tmp/d3 localhost/g1:v3 "docker://${IMAGE}:${GATE_TAG}"
+          D3=$(cat /tmp/d3)
+          echo "d3=$D3" >> "$GITHUB_OUTPUT"
+          echo "pushed UNSIGNED ${D3} to the tag the VM follows"
+
+          # B.1 — unsigned.
+          set +e
+          vm 'bootc upgrade' > /tmp/upg1.txt 2>&1
+          RC1=$?
+          set -e
+          echo "bootc upgrade exit = $RC1"; tail -20 /tmp/upg1.txt || true
+          AFTER1=$(vm-digest || echo "")
+          B1=fail
+          [ "$RC1" -ne 0 ] && [ "$AFTER1" = "$BEFORE" ] && B1=pass
+          echo "b1=$B1" >> "$GITHUB_OUTPUT"
+          echo "b1_rc=$RC1" >> "$GITHUB_OUTPUT"
+
+          # B.2 — signed, but by the wrong key. Stronger than B.1: it proves the policy checks WHOSE
+          # signature it is, not merely that a signature exists. A policy that accepts any signature
+          # is an unlocked door with a lock painted on it.
+          COSIGN_PASSWORD="" cosign generate-key-pair --output-key-prefix /tmp/impostor
+          FLAGS=""; cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && FLAGS="--new-bundle-format=false"
+          COSIGN_PASSWORD="" COSIGN_YES=true cosign sign $FLAGS --key /tmp/impostor.key "${IMAGE}@${D3}"
+          set +e
+          vm 'bootc upgrade' > /tmp/upg2.txt 2>&1
+          RC2=$?
+          set -e
+          echo "bootc upgrade (wrong key) exit = $RC2"; tail -20 /tmp/upg2.txt || true
+          AFTER2=$(vm-digest || echo "")
+          B2=fail
+          [ "$RC2" -ne 0 ] && [ "$AFTER2" = "$BEFORE" ] && B2=pass
+          echo "b2=$B2" >> "$GITHUB_OUTPUT"
+          echo "b2_rc=$RC2" >> "$GITHUB_OUTPUT"
+          echo "after=$AFTER2" >> "$GITHUB_OUTPUT"
+          echo "before=$BEFORE" >> "$GITHUB_OUTPUT"
+
+      - name: Leg B · and it must still refuse when nobody is watching
+        id: legBunattended
+        run: |
+          # `bootc upgrade` by hand proves the enforcement path. It does not prove the UNATTENDED
+          # path refuses, and the unattended path is the one a school actually lives on. So: trigger
+          # the timer's unit the way the machine would, wait, and require the booted digest to be
+          # unchanged.
+          BEFORE='${{ steps.legB.outputs.before }}'
+          vm "systemctl start ${{ steps.timer.outputs.unit }}" >/dev/null 2>&1 || true
+          sleep 240
+          AFTER=$(vm-digest || echo "")
+          echo "before=${BEFORE} after=${AFTER}"
+          [ "$AFTER" = "$BEFORE" ] && echo "b3=pass" >> "$GITHUB_OUTPUT" || echo "b3=fail" >> "$GITHUB_OUTPUT"
+
+      # ─── THE REPORT ───────────────────────────────────────────────────────────────────────────
+      - name: Write the report
+        id: report
+        if: always()
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          A='${{ steps.legA.outputs.result }}'
+          MODE='${{ steps.legA.outputs.mode }}'
+          B1='${{ steps.legB.outputs.b1 }}'; B2='${{ steps.legB.outputs.b2 }}'; B3='${{ steps.legBunattended.outputs.b3 }}'
+          SIG='${{ steps.d8.outputs.sig }}'
+          ELAPSED='${{ steps.legA.outputs.elapsed }}'
+
+          # The verdict is the AND of the two legs the spec names, and nothing else.
+          # Leg A counts ONLY as `pass` — `surrogate-pass` is not a pass, because the claim is
+          # "within 20 minutes without human action" and a surrogate involved human action.
+          LEG_A=FAIL; [ "$A" = "pass" ] && LEG_A=PASS
+          [ "$A" = "surrogate-pass" ] && LEG_A="NOT PROVEN"
+          LEG_B=FAIL; [ "$B1" = "pass" ] && [ "$B3" = "pass" ] && LEG_B=PASS
+          VERDICT=FAIL; [ "$LEG_A" = "PASS" ] && [ "$LEG_B" = "PASS" ] && VERDICT=PASS
+
+          R="$GITHUB_WORKSPACE/g1/report.md"
+          {
+            echo "# Gate 1 exit condition — ${VERDICT}"
+            echo ""
+            echo "> *push a trivial change to the base; within 20 minutes, without human action, a downstream"
+            echo "> test recipe has rebuilt and a running VM has picked up the new image on reboot. Then"
+            echo "> intentionally break the base; the VM must refuse the update and stay on the old image.*"
+            echo ""
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "· $(date -u +%FT%TZ) · budget **${BUDGET_SECONDS}s**"
+            echo ""
+            echo "## The two legs the spec names"
+            echo ""
+            echo "| Leg | Result | What was observed |"
+            echo "|---|---|---|"
+            echo "| **A** — a trivial base change reaches a running machine, unattended, inside 20 min | **${LEG_A}** | booted digest changed to \`${{ steps.v2.outputs.d2 }}\` after **${ELAPSED}s** (mode: \`${MODE}\`) |"
+            echo "| **B** — a broken base is refused and the machine stays put | **${LEG_B}** | \`bootc upgrade\` exit \`${{ steps.legB.outputs.b1_rc }}\` unsigned / \`${{ steps.legB.outputs.b2_rc }}\` wrong-key; booted digest \`${{ steps.legB.outputs.after }}\` (unchanged: $([ '${{ steps.legB.outputs.after }}' = '${{ steps.legB.outputs.before }}' ] && echo yes || echo NO)) |"
+            echo ""
+            echo "## Every assertion, individually"
+            echo ""
+            echo "| | Assertion | Result |"
+            echo "|---|---|---|"
+            echo "| D8 | signature source is \`containerPolicy\`, so enforcement is real and not the \`insecureAcceptAnything\` catch-all | $([ "$SIG" = containerPolicy ] && echo 'PASS' || echo "**FAIL** — reads \`${SIG}\`") |"
+            echo "| U1 | booted digest == the new digest, no human action, inside budget | $([ "$A" = pass ] && echo PASS || echo "**${A}**") |"
+            echo "| U2 | the previous image is still on disk (D10: exactly one rollback, never N) | $([ '${{ steps.u2.outputs.u2 }}' = pass ] && echo PASS || echo "**FAIL** — rollback is \`${{ steps.u2.outputs.rollback }}\`") |"
+            echo "| U4a | unsigned image: \`bootc upgrade\` non-zero, digest unchanged | $([ "$B1" = pass ] && echo PASS || echo '**FAIL**') |"
+            echo "| U4b | image signed by the WRONG key: still refused | $([ "$B2" = pass ] && echo PASS || echo '**FAIL**') |"
+            echo "| U4c | the same refusal happens on the UNATTENDED path, not just by hand | $([ "$B3" = pass ] && echo PASS || echo '**FAIL**') |"
+            echo "| §3 | a recipe deriving from the base picks up the new digest (rebuild graph) | $([ '${{ steps.downstream.outputs.graph }}' = pass ] && echo 'PASS · surrogate' || echo '**FAIL**') |"
+            echo ""
+            echo "## What this run did NOT prove"
+            echo ""
+            echo "Read this part. A gate whose limits are not written down gets quoted as if it had none."
+            echo ""
+            echo "- **Cross-repo propagation:** \`${{ steps.downstream.outputs.dispatch }}\`."
+            if [ '${{ steps.downstream.outputs.dispatch }}' = 'no-credential' ]; then
+              echo "  D18 — the default \`GITHUB_TOKEN\` is issued for this repository and cannot POST to"
+              echo "  \`${{ steps.cfg.outputs.recipes }}/dispatches\`. **NOT PROVEN**, and it is not a surrogate's"
+              echo "  job to cover for it. The §3 row above proves the rebuild *graph*; it does not prove that"
+              echo "  \`auros-recipes\` CI noticed on its own. That needs the PAT in BLOCKED.md **B2**, or the"
+              echo "  10-minute poll observed end to end (BLOCKED.md **B7**: free public-repo crons run late)."
+            fi
+            echo "- **The trivial change** was a derived layer producing a new digest under \`${GATE_TAG}\`, not a"
+            echo "  git commit re-entering CI — pushes made with \`GITHUB_TOKEN\` never trigger workflows."
+            echo "  What is under test is identical: a new digest appears and nobody touches the machine."
+            if [ "$MODE" = "surrogate" ]; then
+              echo "- **The 20-minute claim is NOT PROVEN on this run.** \`${{ steps.timer.outputs.unit }}\` was next due in"
+              echo "  **${{ steps.timer.outputs.next_s }}s**, past the budget, so the timer was started by hand and only the"
+              echo "  *mechanism* was measured. D22: \`uupd.timer\` ships \`OnCalendar=*-*-* 04:00:00\` with"
+              echo "  \`RandomizedDelaySec=15m\`, i.e. once a day. **Gate 1's exit condition is not satisfiable by a"
+              echo "  daily timer.** Either the base ships a drop-in shortening the interval, or the 20-minute"
+              echo "  number is not a promise we can make. That is a product decision, not a CI bug."
+            fi
+            echo "- **This is a VM.** \`matrix/profiles.yaml\` is explicit about what QEMU cannot establish: real"
+            echo "  Wi-Fi association, trackpad, brightness keys, true firmware suspend, webcam, battery, GPU"
+            echo "  acceleration on GMA-era hardware, and whether a vendor's firmware honours \`BootNext\`."
+            echo "  A green Gate 1 means the software is sound. It does not mean a particular 2013 ThinkPad works."
+            echo ""
+            echo "## Fixtures"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| V1 (before) | \`${{ steps.v1.outputs.d1 }}\` signed |"
+            echo "| V2 (trivial change) | \`${{ steps.v2.outputs.d2 }}\` signed |"
+            echo "| V3 (broken) | \`${{ steps.legB.outputs.d3 }}\` unsigned, then wrong-key |"
+            echo "| tag under test | \`${IMAGE}:${GATE_TAG}\` — ephemeral; \`:hardened\` was never touched |"
+            echo "| update unit | \`${{ steps.timer.outputs.unit }}\` (\`${{ steps.timer.outputs.active }}\`) |"
+          } > "$R"
+          cat "$R" >> "$GITHUB_STEP_SUMMARY"
+          cat "$R"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Guard — prove :hardened was never moved by this run
+        if: always()
+        env:
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          BEFORE='${{ steps.guard.outputs.hardened_before }}'
+          AFTER=$(skopeo inspect --no-tags "docker://${IMAGE}:hardened" 2>/dev/null | jq -r .Digest || echo "none")
+          echo "hardened: ${BEFORE} -> ${AFTER}"
+          if [ "$BEFORE" != "$AFTER" ]; then
+            # Either this workflow grew a publish path, or build.yml published mid-run. Both need a
+            # human to look. A test fixture that can move the customer-facing tag is not a fixture.
+            echo "::error::the :hardened tag moved during a gate1-exit run (${BEFORE} -> ${AFTER}). This workflow must never publish. Check for a concurrent build.yml run before assuming the worst, then check this file."
+            exit 1
+          fi
+          echo ":hardened untouched, as required"
+
+      - name: Collect evidence
+        if: always()
+        run: |
+          sudo cp /tmp/serial.log /tmp/status0.json /tmp/status2.json /tmp/upg1.txt /tmp/upg2.txt /tmp/timer.txt \
+            "$GITHUB_WORKSPACE/g1/" 2>/dev/null || true
+          sudo chmod -R a+r "$GITHUB_WORKSPACE/g1" || true
+          sudo sh -c 'kill $(cat /tmp/qemu.pid) 2>/dev/null' || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate1-evidence-${{ github.run_id }}
+          path: g1/
+          if-no-files-found: warn
+
+      - name: Binary result
+        if: always()
+        run: |
+          # The whole point. A workflow that reports Gate 1 and exits 0 regardless is decoration.
+          [ '${{ steps.report.outputs.verdict }}' = 'PASS' ] || {
+            echo "::error::GATE 1 EXIT: ${{ steps.report.outputs.verdict }} — read g1/report.md in the artifacts"
+            exit 1
+          }
+          echo "GATE 1 EXIT: PASS"

@@ -15,6 +15,16 @@
 #            S10 is the gate that stops an image missing them from ever being published; making this
 #            script fail on them instead would mean one task's unlanded work blocks every build.
 #
+# KINDS:
+#   cmd      on PATH
+#   pkg      rpm -q says installed
+#   unit     systemd knows the unit
+#   path     exists on the filesystem
+#   content  <file>::<extended-regex> — the file exists AND matches. Used where a path check would be
+#            vacuous: /etc/containers/registries.d and policy.json both exist on the upstream base
+#            already, and DECISIONS.md D8 is precisely about a policy that exists and verifies
+#            nothing. Checking the directory is there would reproduce the bug it warns about.
+#
 fatal	cmd	bootc
 fatal	cmd	systemctl
 fatal	path	/usr/lib/systemd/systemd
@@ -22,7 +32,8 @@ fatal	pkg	NetworkManager
 fatal	pkg	selinux-policy-targeted
 fatal	path	/etc/selinux/config
 pending	pkg	greenboot
-pending	path	/usr/lib/bootc/kargs.d
+fatal	path	/usr/lib/bootc/kargs.d
 pending	unit	bootc-fetch-apply-updates.timer
-pending	path	/etc/containers/registries.d
 pending	path	/usr/lib/pki/containers
+pending	content	/etc/containers/policy.json::sigstoreSigned
+pending	content	/etc/containers/policy.json::ghcr.io/aarohkandy

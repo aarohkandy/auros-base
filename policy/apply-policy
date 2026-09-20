@@ -1,0 +1,273 @@
+#!/usr/bin/bash
+# apply-policy -- activate one Auros policy mode on the image being built.
+#
+#   /usr/libexec/auros/apply-policy <open|managed|locked|kiosk>
+#
+# Runs at IMAGE BUILD TIME, not at boot. Two callers:
+#
+#   1. auros-base/build/20-policy.sh, which installs this payload and then activates the base's own
+#      mode (`open` -- the base is not a customer image and must still satisfy B1 and B12 literally).
+#
+#   2. A customer recipe's own build layer, as a single line:
+#          RUN /usr/libexec/auros/apply-policy locked
+#      This is the "declarative and switchable per-recipe" half of spec 6A. There is still exactly
+#      one base image; the mode is chosen in the derived layer, which is the only place it can be
+#      chosen without turning four modes into four bases.
+#
+# Environment:
+#   AUROS_ADMIN_USERS   space-separated accounts to add to the aurosadmin group
+#   AUROS_KIOSK_EXEC    required for kiosk unless /etc/auros/kiosk.conf already supplies KIOSK_EXEC
+#   AUROS_POLICY_PAYLOAD  override the payload directory (default /usr/share/auros/policy)
+set -euo pipefail
+
+PAYLOAD=${AUROS_POLICY_PAYLOAD:-/usr/share/auros/policy}
+# shellcheck source=/dev/null
+. "$PAYLOAD/lib/policy-lib.sh"
+
+MODE="${1:-}"
+case "$MODE" in
+    open|managed|locked|kiosk) ;;
+    *) die "usage: apply-policy <open|managed|locked|kiosk> (got '${MODE:-nothing}')" ;;
+esac
+
+SRC="$PAYLOAD/$MODE"
+[ -d "$SRC" ] || die "no payload for mode '$MODE' at $SRC"
+# shellcheck source=/dev/null
+. "$SRC/mode.env"
+
+install -d -m 0755 "$AUROS_POLICY_STATE"
+: > "${AUROS_MASKED_UNITS}" 2>/dev/null || install -m 0644 /dev/null "$AUROS_MASKED_UNITS"
+
+PREV="none"
+[ -r "$AUROS_MODE_STAMP" ] && PREV="$(cat "$AUROS_MODE_STAMP")"
+
+log "================================================================"
+log "applying policy mode: $MODE ($AUROS_MODE_TITLE)"
+log "  $AUROS_MODE_ONELINE"
+log "  previous mode on this image: $PREV"
+log "================================================================"
+
+# ── the one switch that is not reversible, and why we refuse it rather than pretend ──────────────
+# kiosk DELETES packages. Nothing in a later layer can bring them back, because the layer below no
+# longer contains them. Activating a less restrictive mode on top of a kiosk image would produce an
+# image whose stamp says "open" and which has no desktop in it -- a lie told by a file.
+if [ "$PREV" = "kiosk" ] && [ "$MODE" != "kiosk" ]; then
+    die "this image already had kiosk applied, which removed the desktop shell. Mode '$MODE' cannot be activated on top of it: the packages are gone from the layer below and no configuration change brings them back. Build this recipe from the base image instead."
+fi
+
+# ── release whatever the previous mode installed ─────────────────────────────────────────────────
+auros_uninstall_previous "$AUROS_MANIFEST"
+auros_unmask_previous
+auros_pam_su_release
+auros_dconf_clear
+auros_kdeglobals_strip "$AUROS_KDEGLOBALS"
+
+install -m 0644 /dev/null "$AUROS_MANIFEST"
+
+# ── things every mode gets, including open ───────────────────────────────────────────────────────
+# The polkit canary actions and the aurosadmin group live here. The canaries MUST exist in open too:
+# open is where org.auros.policy.control-deny is expected to return 0, and an assertion that cannot
+# observe the permissive case cannot prove the restrictive one.
+COMMON_MANIFEST="$AUROS_POLICY_STATE/common.manifest"
+if [ ! -s "$COMMON_MANIFEST" ]; then
+    install -m 0644 /dev/null "$COMMON_MANIFEST"
+    auros_install_tree "$PAYLOAD/common/root" "$COMMON_MANIFEST"
+else
+    log "common policy payload already installed"
+fi
+auros_ensure_admin_group
+
+# ── the mode's own files ─────────────────────────────────────────────────────────────────────────
+auros_install_tree "$SRC/root" "$AUROS_MANIFEST"
+auros_kdeglobals_apply "$SRC/kdeglobals"
+
+# Modes are shipped as file trees, which means a mode bug is a file with the wrong mode bits, and a
+# sudoers file with the wrong mode bits is a sudoers file sudo ignores -- silently. Fix and verify.
+for f in /etc/sudoers.d/90-auros-*; do
+    [ -e "$f" ] || continue
+    chmod 0440 "$f"
+    chown root:root "$f"
+done
+if command -v visudo >/dev/null 2>&1; then
+    for f in /etc/sudoers.d/90-auros-*; do
+        [ -e "$f" ] || continue
+        visudo -cf "$f" >/dev/null || die "$f is not valid sudoers syntax -- refusing to build. An invalid file in sudoers.d can break sudo for everyone, including recovery."
+        log "validated $f with visudo"
+    done
+else
+    warn "visudo is not available; the sudoers drop-in was installed without syntax validation"
+fi
+for f in /usr/libexec/auros/auros-kiosk-session /usr/libexec/auros/apply-policy /usr/libexec/auros/assert-policy; do
+    [ -e "$f" ] && chmod 0755 "$f"
+done
+
+AUROS_GROUPS_STILL_MARKED=""
+AUROS_REMOVED_TSV="$(mktemp)"
+: > "$AUROS_REMOVED_TSV"
+USR_BEFORE=0; USR_AFTER=0
+COMPOSITOR=""
+
+case "$MODE" in
+  open)
+    log "open: no restrictions are installed. The base image's hardening, the signed update path and"
+    log "open: the retained rollback deployment are untouched -- open means we added no lock on top,"
+    log "open: not that the floor was removed."
+    rm -f "$AUROS_POLICY_STATE/kiosk-compositor"
+    ;;
+
+  managed|locked)
+    auros_dconf_profile
+    auros_dconf_update
+    auros_pam_su_restrict
+    auros_unit_enable bootc-fetch-apply-updates.timer
+    auros_unit_disable debug-shell.service
+    auros_unit_mask debug-shell.service
+    log "$MODE: polkit rules, sudoers, KDE Kiosk restrictions and dconf locks are in place."
+    log "$MODE: none of that is evidence. /usr/libexec/auros/assert-policy is the evidence, and the"
+    log "$MODE: check matrix runs it inside a booted VM (check B5)."
+    ;;
+
+  kiosk)
+    # ---- 1. the application, decided before anything is deleted --------------------------------
+    KIOSK_EXEC="${AUROS_KIOSK_EXEC:-}"
+    if [ -z "$KIOSK_EXEC" ] && [ -r /etc/auros/kiosk.conf ]; then
+        # shellcheck source=/dev/null
+        . /etc/auros/kiosk.conf
+    fi
+    [ -n "${KIOSK_EXEC:-}" ] || die "kiosk mode needs an application. Pass AUROS_KIOSK_EXEC='...' or ship /etc/auros/kiosk.conf with KIOSK_EXEC set. A kiosk image with no application named is a machine that boots to a black screen, and it would pass every check that only looks at what was removed."
+    install -d -m 0755 /etc/auros
+    { printf '# Written by apply-policy. See kiosk.conf.example for the format.\n'
+      printf 'KIOSK_EXEC=%s\n' "\"$KIOSK_EXEC\""; } > /etc/auros/kiosk.conf
+    chmod 0644 /etc/auros/kiosk.conf
+    printf '/etc/auros/kiosk.conf\n' >> "$AUROS_MANIFEST"
+    log "kiosk application: $KIOSK_EXEC"
+
+    # ---- 2. a compositor, installed BEFORE the desktop is removed ------------------------------
+    # Order matters: if the compositor cannot be installed we must fail while the image is still
+    # usable, not after the desktop has been deleted.
+    DNF="$(auros_pkgmgr)"
+    if command -v cage >/dev/null 2>&1; then
+        COMPOSITOR=cage
+    elif [ "$DNF" != none ] && "$DNF" -y install --setopt=install_weak_deps=False cage >/dev/null 2>&1; then
+        COMPOSITOR=cage
+    elif command -v weston >/dev/null 2>&1; then
+        COMPOSITOR=weston
+    elif [ "$DNF" != none ] && "$DNF" -y install --setopt=install_weak_deps=False weston >/dev/null 2>&1; then
+        COMPOSITOR=weston
+    else
+        die "kiosk needs a Wayland kiosk compositor and neither cage nor weston could be installed. Refusing to delete the desktop shell from an image that would then have nothing to draw with."
+    fi
+    printf '%s\n' "$COMPOSITOR" > "$AUROS_POLICY_STATE/kiosk-compositor"
+    log "kiosk compositor: $COMPOSITOR (recorded at $AUROS_POLICY_STATE/kiosk-compositor; assert.sh checks the RUNNING process against this)"
+
+    # DELIBERATELY NOT greetd. greetd is a login/display manager by function, and check S9 asserts
+    # that no display-manager binary exists on a kiosk image. We would rather have no such binary at
+    # all than ship one and then argue about whether it counts. systemd starts the compositor
+    # directly; there is no greeter because there is nobody to greet.
+
+    # ---- 3. measure, then subtract --------------------------------------------------------------
+    USR_BEFORE="$(du -sxb /usr 2>/dev/null | cut -f1 || echo 0)"
+    AUROS_KEEP_PRESENT_BEFORE="$(mktemp)"
+    export AUROS_KEEP_PRESENT_BEFORE
+    auros_snapshot_keep "$SRC/keep.list" "$AUROS_KEEP_PRESENT_BEFORE"
+    auros_remove_packages "$SRC/remove.list" "$SRC/keep.list"
+    auros_unmark_groups "$SRC/remove-groups.list"
+    USR_AFTER="$(du -sxb /usr 2>/dev/null | cut -f1 || echo 0)"
+
+    # ---- 4. the post-condition that is not an opinion -------------------------------------------
+    MISSING_OK=1
+    SURVIVING=""
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        if command -v "$b" >/dev/null 2>&1 || [ -x "/usr/bin/$b" ] || [ -x "/usr/sbin/$b" ] || [ -x "/usr/libexec/$b" ]; then
+            SURVIVING="${SURVIVING:+$SURVIVING }$b"
+            MISSING_OK=0
+        fi
+    done < <(auros_read_list "$SRC/absent-binaries.list")
+    if [ "$MISSING_OK" != 1 ]; then
+        die "kiosk post-condition FAILED: these binaries are still on the image: $SURVIVING
+This is exactly the failure D12 and check S9 exist to catch -- a kiosk image with a desktop inside
+it. Do not work around it by editing absent-binaries.list. Find which package now provides the
+binary, add it to remove.list, and let the build go red until it is gone."
+    fi
+    log "kiosk post-condition: every binary in absent-binaries.list is absent"
+
+    # ---- 5. no console, no greeter, no way to a second session ----------------------------------
+    auros_unit_mask 'getty@.service'
+    auros_unit_mask 'serial-getty@.service'
+    auros_unit_mask 'debug-shell.service'
+    auros_unit_mask 'display-manager.service'
+    auros_unit_mask 'sddm.service'
+    auros_unit_mask 'gdm.service'
+    install -d -m 0755 /etc/systemd/system
+    ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target
+    printf '/etc/systemd/system/default.target\n' >> "$AUROS_MANIFEST"
+    log "default target set to multi-user.target (there is no display manager to reach graphical.target for)"
+
+    auros_dconf_profile
+    auros_dconf_update
+    auros_pam_su_restrict
+    auros_unit_enable auros-kiosk.service
+    auros_unit_enable bootc-fetch-apply-updates.timer
+
+    # ---- 6. accounts ----------------------------------------------------------------------------
+    if command -v systemd-sysusers >/dev/null 2>&1; then
+        systemd-sysusers >/dev/null 2>&1 || warn "systemd-sysusers returned non-zero; the auroskiosk account will be created on first boot instead"
+    fi
+    ;;
+esac
+
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers >/dev/null 2>&1 || true
+fi
+
+# ── the stamp ────────────────────────────────────────────────────────────────────────────────────
+# In /usr, not /etc: a runtime user cannot forge it, and the assertion script reads it to decide
+# which mode it is supposed to be proving.
+install -d -m 0755 "$AUROS_STATE_DIR"
+printf '%s\n' "$MODE" > "$AUROS_MODE_STAMP"
+chmod 0444 "$AUROS_MODE_STAMP"
+
+# ── the report ───────────────────────────────────────────────────────────────────────────────────
+{
+    printf '{\n'
+    printf '  "$comment": "Written by apply-policy at image build time. Sizes are MEASURED on-disk bytes under /usr, uncompressed. They are NOT pull size -- pull size is measured separately and lands in results.json as pull_size_delta_bytes (DECISIONS.md D2, D12).",\n'
+    printf '  "mode": "%s",\n' "$(auros_json_str "$MODE")"
+    printf '  "previous_mode": "%s",\n' "$(auros_json_str "$PREV")"
+    printf '  "title": "%s",\n' "$(auros_json_str "$AUROS_MODE_TITLE")"
+    printf '  "applied_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "admin_group": "aurosadmin",\n'
+    printf '  "admin_group_members": "%s",\n' "$(auros_json_str "$(getent group aurosadmin | cut -d: -f4)")"
+    printf '  "kiosk_compositor": "%s",\n' "$(auros_json_str "$COMPOSITOR")"
+    printf '  "usr_bytes_before": %s,\n' "${USR_BEFORE:-0}"
+    printf '  "usr_bytes_after": %s,\n' "${USR_AFTER:-0}"
+    printf '  "usr_bytes_reclaimed": %s,\n' "$(( ${USR_BEFORE:-0} - ${USR_AFTER:-0} ))"
+    printf '  "comps_groups_still_marked": "%s",\n' "$(auros_json_str "${AUROS_GROUPS_STILL_MARKED:-}")"
+    printf '  "packages_removed": [\n'
+    first=1
+    while IFS=$'\t' read -r name bytes mech; do
+        [ -n "$name" ] || continue
+        [ "$first" = 1 ] || printf ',\n'
+        first=0
+        printf '    {"name": "%s", "installed_size_bytes": %s, "mechanism": "%s"}' \
+               "$(auros_json_str "$name")" "${bytes:-0}" "$(auros_json_str "${mech:-unknown}")"
+    done < "$AUROS_REMOVED_TSV"
+    [ "$first" = 1 ] || printf '\n'
+    printf '  ]\n'
+    printf '}\n'
+} > "$AUROS_REPORT"
+chmod 0444 "$AUROS_REPORT"
+rm -f "$AUROS_REMOVED_TSV"
+
+log "----------------------------------------------------------------"
+log "policy mode '$MODE' applied."
+log "  files installed:   $(wc -l < "$AUROS_MANIFEST" | tr -d ' ')"
+log "  units masked:      $(wc -l < "$AUROS_MASKED_UNITS" | tr -d ' ')"
+if [ "$MODE" = kiosk ]; then
+    log "  /usr measured:     ${USR_BEFORE} -> ${USR_AFTER} bytes ($(( (${USR_BEFORE:-0} - ${USR_AFTER:-0}) / 1048576 )) MiB reclaimed, on disk, uncompressed)"
+    log "  D12: this is the REAL measured figure. It is not the size of a minimal kiosk image we did"
+    log "  D12: not build. We keep one base so a CVE is one rebuild, and this is what that costs."
+fi
+log "  report:            $AUROS_REPORT"
+log "  prove it:          /usr/libexec/auros/assert-policy   (run inside a booted VM -- check B5)"
+log "----------------------------------------------------------------"

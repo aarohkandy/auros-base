@@ -16,7 +16,8 @@ const out = {
   P_DISK_GB: p.disk_gb ?? 128,
   // firmware: uefi | uefi-sb | bios   (same vocabulary as hardware/compat.tsv's firmware column)
   P_FIRMWARE: fw.includes('seabios') || fw.includes('bios-only') || p.id === 'bios-legacy' ? 'bios'
-    : fw.includes('secure boot') || fw.includes('secureboot') ? 'uefi-sb' : 'uefi',
+    // "OVMF (UEFI, Secure Boot off)" must not match as secure boot. The word "off" is load-bearing.
+    : /secure\s*boot/.test(fw) && !/\boff\b|disabled/.test(fw) ? 'uefi-sb' : 'uefi',
   // cpu: `host` needs KVM; a named model is what old-cpu is for.
   P_CPU: /nehalem/i.test(String(p.cpu ?? '')) ? 'Nehalem'
     : /sandy/i.test(String(p.cpu ?? '')) ? 'SandyBridge'
