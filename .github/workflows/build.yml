@@ -332,13 +332,30 @@ jobs:
             echo "::endgroup::"
 
             echo "::group::build $n — flatten (D11)"
-            sudo podman run --rm --privileged \
-              --security-opt label=type:unconfined_t \
-              -v /var/lib/containers/storage:/var/lib/containers/storage \
+            # This invocation is the one ublue-os/bazzite runs in production, VERBATIM in shape
+            # (docs/evidence/research-dossiers.json, "What ublue-os ACTUALLY runs today #1"), rather
+            # than one reconstructed from the man page.
+            #
+            # The previous version passed `--from "containers-storage:$raw"`. build-chunked-oci adds
+            # the containers-storage: transport itself, so the reference arrived as
+            # "containers-storage:containers-storage:localhost/auros-base:raw-a" and the step died
+            # parsing it — one step AFTER the hardened image had built successfully for the first time.
+            #
+            # The proven shape differs in approach, not just the prefix: mount the raw image as a
+            # filesystem, chunk it with --rootfs, write an oci-archive, then pull that back into
+            # storage. Fewer moving parts than reading and writing the same container store from
+            # inside a container that is itself running out of that store.
+            RECHUNK_DIR="$(mktemp -d "${RUNNER_TEMP}/rechunk-XXXXXX")"
+            sudo podman run --rm --pull=never --privileged \
+              --mount=type=image,src="$raw",target=/rpm-ostree \
+              --volume "${RECHUNK_DIR}:/run/out" \
+              --entrypoint /usr/bin/rpm-ostree \
               "$raw" \
-              rpm-ostree compose build-chunked-oci --bootc \
-                --from "containers-storage:$raw" \
-                --output "containers-storage:$out"
+              compose build-chunked-oci --bootc --max-layers 127 --format-version 2 \
+                --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci
+            chunked="$(sudo podman pull -q "oci-archive:${RECHUNK_DIR}/chunked.oci")"
+            sudo podman tag "$chunked" "$out"
+            sudo rm -rf "$RECHUNK_DIR"
             echo "::endgroup::"
 
             sudo skopeo inspect --config "containers-storage:$out" | jq -c '.rootfs.diff_ids' > "/tmp/chunked-$n.diffids"
