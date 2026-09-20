@@ -1,0 +1,19 @@
+# Installed ONLY into the test-wrapper image, never into a customer image.
+[Unit]
+Description=Auros check-matrix in-guest agent
+After=multi-user.target network-online.target
+Wants=network-online.target
+# The agent must run even when the graphical target is what we are waiting for, so it is ordered after
+# multi-user rather than after graphical: a machine that never reaches a greeter is precisely the
+# machine whose report we need.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/auros-matrix/auros-matrix-agent.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

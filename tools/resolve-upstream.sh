@@ -257,8 +257,51 @@ cmd_assert() {
   fi
 
   emit s1_status pass
-  emit base_ref "${image}@${locked}"
-  say "S1 PASS — base is pinned by digest and the Containerfile and base.lock agree."
+  emit base_ref "${cf_image}@${locked}"
+  emit base_via "$via"
+  say "S1 PASS — base is pinned by digest and the Containerfile and base.lock agree (via ${via})."
+}
+
+cmd_mirror() {
+  # D21. Guarantees the pinned digest is pullable from a repo we control, forever.
+  need skopeo
+  local image locked mirror tag
+  image="$(lock_get UPSTREAM_IMAGE)"
+  locked="$(lock_get UPSTREAM_DIGEST)"
+  mirror="$(mirror_image)"
+  [ -n "$mirror" ] || die "mirror: no mirror image. Pass --mirror, set AUROS_MIRROR_IMAGE, or add
+       MIRROR_IMAGE= to base.lock. D21 is not optional — without it the pin rots in ~90 days."
+
+  # A digest is not a tag, so the copy needs somewhere to land. `sha256-<hex>` is the same shape
+  # cosign uses for its attachments, and it makes the mirror browsable by a human.
+  tag="${locked/:/-}"
+
+  if skopeo inspect --raw "docker://${mirror}@${locked}" >/dev/null 2>&1; then
+    emit mirrored true
+    emit mirror_ref "${mirror}@${locked}"
+    say "mirror: ${locked} is already in ${mirror} — nothing to do"
+    return 0
+  fi
+
+  say "mirror: copying ${image}@${locked} -> ${mirror}:${tag}"
+  if ! skopeo copy --all "docker://${image}@${locked}" "docker://${mirror}:${tag}"; then
+    die "mirror: could not copy the pinned digest from upstream.
+       If this says manifest unknown, upstream has ALREADY deleted it (D21) and the mirror does not
+       have it either. That is not recoverable by retrying: pick a new upstream digest with
+       'resolve-upstream.sh update', which re-resolves the tag, and mirror that one immediately."
+  fi
+
+  # Verify by digest, not by the copy's exit status. `skopeo copy --all` preserves the manifest
+  # digest; if it somehow did not, the mirror is a different image and FROM would resolve to
+  # something we never tested.
+  local got
+  got="$(skopeo inspect --no-tags "docker://${mirror}:${tag}" | jq -r .Digest)"
+  [ "$got" = "$locked" ] || die "mirror: copied image has digest ${got}, expected ${locked}.
+       The mirror is NOT a byte-identical copy and must not be built from."
+
+  emit mirrored true
+  emit mirror_ref "${mirror}@${locked}"
+  say "mirror: ${mirror}@${locked} verified"
 }
 
 cmd_drift() {
@@ -338,8 +381,9 @@ case "$CMD" in
   assert)  cmd_assert ;;
   drift)   cmd_drift ;;
   update)  cmd_update ;;
+  mirror)  cmd_mirror ;;
   ""|-h|--help|help)
     sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0 ;;
-  *) die "unknown command '${CMD}' (resolve | assert | drift | update)" ;;
+  *) die "unknown command '${CMD}' (resolve | assert | drift | update | mirror)" ;;
 esac

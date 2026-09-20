@@ -1,0 +1,58 @@
+{
+  "$comment": [
+    "AUROS containers-policy.json -- installed to /etc/containers/policy.json by",
+    "build/30-update-agent.sh. @AUROS_SCOPE@ is substituted at build time from AUROS_SCOPE,",
+    "which derives from auros.config.json (D1: the namespace lives in exactly one file).",
+    "",
+    "D8, and this is the whole point of the file: deriving from Aurora gives us NOTHING here.",
+    "The stock policy has a global default of insecureAcceptAnything, so `bootc switch",
+    "--enforce-container-sigpolicy` succeeds while verifying nothing at all.",
+    "",
+    "HOW SCOPE PRECEDENCE ACTUALLY WORKS, because 'put it before the catch-all' is the intent",
+    "but not the mechanism. JSON objects are unordered and containers/image does not read them",
+    "in order. From containers-policy.json(5): 'If multiple policy requirements match a given",
+    "image, only the requirements from the MOST SPECIFIC match apply, the more general policy",
+    "requirement definitions are ignored.' So the ghcr.io/<ns> entry below wins over the \"\"",
+    "catch-all for our images because it is a longer scope, not because of where it sits in the",
+    "file. Moving it would change nothing; deleting it would silently disable enforcement.",
+    "",
+    "WHY THE CATCH-ALL STAYS. Setting transports.docker[\"\"] to reject would break distrobox,",
+    "toolbox and every other image a user legitimately pulls. The deliberate, documented trade",
+    "is: OUR namespace is enforced, everything else is the same as any Fedora desktop.",
+    "signing/verify-enforcement.sh (check U4) is what proves the specific entry actually beats",
+    "the catch-all, by offering an UNSIGNED image inside our own namespace and requiring refusal.",
+    "",
+    "WHY default IS reject AND NOT insecureAcceptAnything. bootc's enforce-container-sigpolicy",
+    "checks the GLOBAL default only -- see is_default_insecure() in bootc's",
+    "crates/ostree-ext/src/container/skopeo.rs. With the stock Fedora default, that guard fails.",
+    "With reject, it passes, and non-docker transports are re-permitted individually below.",
+    "",
+    "signedIdentity matchRepository is MANDATORY, not decorative: cosign signatures carry only a",
+    "repository, and the default matchExact would reject every signature we ever make. If it were",
+    "missing, every pull would fail -- including the good ones -- and a negative test that only",
+    "checks 'the bad image was refused' would pass vacuously. That is why verify-enforcement.sh",
+    "runs a positive control first and aborts as INCONCLUSIVE if the good image is refused."
+  ],
+
+  "default": [{ "type": "reject" }],
+
+  "transports": {
+    "docker": {
+      "@AUROS_SCOPE@": [
+        {
+          "type": "sigstoreSigned",
+          "keyPath": "/usr/lib/pki/containers/auros.pub",
+          "signedIdentity": { "type": "matchRepository" }
+        }
+      ],
+      "": [{ "type": "insecureAcceptAnything" }]
+    },
+
+    "docker-daemon":     { "": [{ "type": "insecureAcceptAnything" }] },
+    "containers-storage": { "": [{ "type": "insecureAcceptAnything" }] },
+    "dir":               { "": [{ "type": "insecureAcceptAnything" }] },
+    "oci":               { "": [{ "type": "insecureAcceptAnything" }] },
+    "oci-archive":       { "": [{ "type": "insecureAcceptAnything" }] },
+    "docker-archive":    { "": [{ "type": "insecureAcceptAnything" }] }
+  }
+}

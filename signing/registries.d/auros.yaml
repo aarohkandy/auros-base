@@ -1,0 +1,26 @@
+# AUROS -- containers-registries.d(5) entry.
+#
+# Without this file the sigstoreSigned rule in policy.json is inert: containers/image will not
+# look for sigstore attachments at all unless use-sigstore-attachments is enabled for the scope,
+# so it would find no signature, refuse every pull of our images, and the failure would look like
+# a registry problem rather than a configuration one. D8 names this file explicitly for that
+# reason -- shipping the key and the policy without it is a half-installed lock.
+#
+# @AUROS_SCOPE@ is substituted at build time (see policy.json's comment).
+#
+# TWO RULES FROM THE MANUAL THAT BITE, both verified against containers-registries.d(5):
+#
+#  1. "Only the configuration for the MOST-PRECISELY MATCHING scope is used; configuration using
+#     more general scopes is ignored." So if any other file in /etc/containers/registries.d/
+#     defines a scope more specific than ours -- e.g. ghcr.io/<ns>/auros-base -- ours is ignored
+#     entirely, attachments are not read, and enforcement silently stops working.
+#
+#  2. "There can be at most one instance of any key under the docker section" ACROSS ALL FILES,
+#     and splitting one scope over two files is forbidden even when the settings agree.
+#
+# build/30-update-agent.sh checks for both conditions and fails the build rather than shipping an
+# image whose signature configuration is quietly overridden.
+
+docker:
+  "@AUROS_SCOPE@":
+    use-sigstore-attachments: true

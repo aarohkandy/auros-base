@@ -64,6 +64,16 @@ jobs:
           name = "probe"
           password = "probe"
           groups = ["wheel"]
+
+          # Rev 3 failed here with:
+          #   "min-free-space-percent '3%' would be exceeded, at least 16.4 kB requested"
+          # The image is 8.4 GB across 257 layers and the DEFAULT root filesystem bootc-image-builder
+          # creates is too small for it — ostree refuses the write rather than filling the disk.
+          # This is also a real product fact, not just a CI detail: it puts a hard floor under the
+          # "minimum viable machine" assumption, and the small-disk test profile has to respect it.
+          [[customizations.filesystem]]
+          mountpoint = "/"
+          minsize = "20 GiB"
           EOF
           mkdir -p output
           # The builder image must be pulled first — it no longer pulls for itself.

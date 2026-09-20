@@ -1,0 +1,24 @@
+# AUROS -- bootc install configuration.
+#
+# Discovered as a drop-in from /usr/lib/bootc/install and merged in ALPHANUMERIC order, so 30-
+# lands after Aurora's own 20-aurora.toml (which sets root-fs-type = "btrfs") and can override it
+# if it ever needs to. It does not need to.
+#
+# enforce-container-sigpolicy is the install-time half of D8. Without it, `bootc install` records
+# the deployment as signature mode "insecure", and from then on NOTHING the machine fetches is
+# verified -- policy.json, registries.d and the public key are all present and all ignored. The
+# machine would look correctly configured to anyone reading the filesystem.
+#
+# READ THE LIMIT HONESTLY, because it is easy to over-read this flag. From bootc-install-config(5):
+# it "controls whether to enforce that containers-policy.json includes a DEFAULT policy which
+# requires signatures... image pulls will be rejected if the policy file specifies
+# insecureAcceptAnything as the default."
+#
+# That is a guard against a wide-open default. It is NOT per-image verification, and on its own
+# it would be satisfied by a policy that has a strict default and no rule for our namespace. The
+# actual verification of our images comes from the scoped sigstoreSigned rule in policy.json plus
+# use-sigstore-attachments in registries.d. All three are required. Check U4
+# (signing/verify-enforcement.sh) is what proves the combination works, by proving the negative.
+
+[install]
+enforce-container-sigpolicy = true

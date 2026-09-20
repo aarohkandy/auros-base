@@ -55,7 +55,9 @@ say "#AUROS-BOOT# $N"
 booted_digest() {
   local j=$1 d=''
   if command -v jq >/dev/null 2>&1; then
-    d=$(printf '%s' "$j" | jq -r '.. | objects | select(has("imageDigest")) | .imageDigest' 2>/dev/null | head -1)
+    # Explicitly .status.booted — never a recursive search, which could return the STAGED digest and
+    # make U1 report success for an update that has not actually taken effect yet.
+    d=$(printf '%s' "$j" | jq -r '.status.booted.image.imageDigest // .status.booted.image.image.digest // empty' 2>/dev/null | head -1)
     [ -n "$d" ] && { printf '%s' "$d"; return 0; }
   fi
   # No jq: narrow the JSON text to the "booted" object and take the digest from there. Crude, but it

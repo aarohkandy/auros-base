@@ -83,8 +83,10 @@ jobs:
     timeout-minutes: 10
     outputs:
       image:          ${{ steps.cfg.outputs.image }}
+      mirror:         ${{ steps.cfg.outputs.mirror }}
       recipes_repo:   ${{ steps.cfg.outputs.recipes_repo }}
       base_ref:       ${{ steps.s1.outputs.base_ref }}
+      base_via:       ${{ steps.s1.outputs.base_via }}
       matrix_version: ${{ steps.cfg.outputs.matrix_version }}
       profiles:       ${{ steps.cfg.outputs.profiles }}
       publishable:    ${{ env.IS_PUBLISHABLE }}
@@ -113,6 +115,11 @@ jobs:
           echo "image=$IMAGE"          >> "$GITHUB_OUTPUT"
           echo "recipes_repo=$RECIPES" >> "$GITHUB_OUTPUT"
 
+          # D21's mirror, derived from the same one file rather than written out again here.
+          REG=$(jq -r '.registry' meta/auros.config.json)
+          ORG=$(jq -r '.org'      meta/auros.config.json)
+          echo "mirror=${REG}/${ORG}/auros-upstream-mirror" >> "$GITHUB_OUTPUT"
+
           MV=$(python3 -c 'import yaml,sys; print(yaml.safe_load(open("matrix/checks.yaml"))["matrix_version"])')
           echo "matrix_version=$MV" >> "$GITHUB_OUTPUT"
 
@@ -124,7 +131,18 @@ jobs:
 
       - name: S1 — resolved FROM digest == base.lock
         id: s1
-        run: ./tools/resolve-upstream.sh assert
+        run: ./tools/resolve-upstream.sh assert --mirror '${{ steps.cfg.outputs.mirror }}'
+
+      - name: Is D21 actually in force?
+        run: |
+          # Not a gate — A1 owns the Containerfile and may not have flipped FROM to the mirror yet.
+          # But it must be visible, because the day it matters is the day upstream garbage-collects
+          # our pin and every build fails on an image nobody touched.
+          if [ '${{ steps.s1.outputs.base_via }}' = 'upstream' ]; then
+            echo "::warning::FROM still resolves against upstream, not the mirror. D21 says the pin is deleted by upstream's weekly GHCR cleanup after ~90 days or 7 newer stable tags. The mirror is populated by this run regardless, so flipping FROM to '${{ steps.cfg.outputs.mirror }}' is a one-line change in the Containerfile."
+          else
+            echo "D21 in force: FROM resolves via the mirror."
+          fi
 
       - name: Upstream drift (information, not a gate)
         run: |

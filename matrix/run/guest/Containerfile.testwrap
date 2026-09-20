@@ -1,0 +1,37 @@
+# THE TEST WRAPPER — and the harness's most important honesty caveat.
+#
+# The artifact that actually boots in QEMU is not byte-for-byte the image under test: it is the image
+# under test plus this layer. results.json records the digest of the IMAGE UNDER TEST, because that is
+# the thing a customer receives, and this file is what you read to know exactly what was added on top.
+#
+# What this layer adds, and nothing else:
+#   1. /usr/local/lib/auros-matrix/  — the agent and its config. Nothing in the image reads this path.
+#   2. auros-matrix-agent.service    — one oneshot unit, enabled.
+#   3. A test user, and (optionally) display-manager autologin for it, because B7/B8/B12 need a live
+#      desktop session and there is nobody in the room to type a password.
+#   4. (update runs only) an /etc/hosts entry and a registries.conf.d snippet pointing ghcr.io at the
+#      harness's local registry, and a drop-in that compresses the bootc update timer's interval.
+#
+# What it deliberately does NOT do: touch policy.json, the pki keys, the policy layer, the package set,
+# or anything else a check looks at. If you ever find yourself adding a line here to make a check pass,
+# you are no longer testing the product.
+ARG BASE
+FROM ${BASE}
+
+COPY auros-matrix-agent.sh /usr/local/lib/auros-matrix/auros-matrix-agent.sh
+COPY config.env /usr/local/lib/auros-matrix/config.env
+COPY auros-matrix-agent.service /usr/lib/systemd/system/auros-matrix-agent.service
+COPY overlay/ /
+
+ARG TEST_USER=auros
+ARG AUTOLOGIN=1
+RUN set -euo pipefail; \
+    chmod 0755 /usr/local/lib/auros-matrix/auros-matrix-agent.sh; \
+    systemctl enable auros-matrix-agent.service; \
+    if ! id "${TEST_USER}" >/dev/null 2>&1; then useradd -m -G wheel "${TEST_USER}" || useradd -m "${TEST_USER}"; fi; \
+    if [ "${AUTOLOGIN}" = "1" ] && [ -d /etc/sddm.conf.d ] || [ "${AUTOLOGIN}" = "1" ]; then \
+      mkdir -p /etc/sddm.conf.d; \
+      printf '[Autologin]\nUser=%s\nSession=plasma\nRelogin=false\n' "${TEST_USER}" > /etc/sddm.conf.d/00-auros-matrix-autologin.conf; \
+    fi; \
+    mkdir -p /var/lib/auros-matrix; \
+    echo "auros-matrix test wrapper — NOT A SHIPPING IMAGE" > /etc/auros-matrix-wrapper
