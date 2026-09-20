@@ -32,6 +32,10 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 STUBS="$(stubdir)"
 install_sed_shim "$STUBS"
+# The shim (and any other stub) must be ahead of the real tools for every block this file runs.
+# Without this the build scripts' GNU `sed -i` silently became a BSD `sed -i <suffix>` and corrupted
+# the file it was meant to edit, while still exiting 0.
+export PATH="$STUBS:$PATH"
 
 # ── the fake machine's binaries ──────────────────────────────────────────────────────────────────
 # These are not simulations of dnf and rpm. They are the smallest thing that lets the code under

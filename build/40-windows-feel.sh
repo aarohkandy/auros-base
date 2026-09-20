@@ -215,8 +215,23 @@ found "session adds the flatpak exports to XDG_DATA_DIRS, so an app installed in
 
 # Double-click is the single most-felt setting in this layer, so it is asserted rather than trusted to
 # a loop that copied seven files.
-grep -qx 'SingleClick=false' /etc/xdg/kdeglobals \
-  || die "SingleClick=false is not in /etc/xdg/kdeglobals — KDE would open files on a single click, and every person coming off Windows double-clicks"
+#
+# THE ASSERTION IS GROUP-AWARE, and it has to be. kdeglobals is an INI file and KConfig reads
+# SingleClick out of [KDE] and nowhere else. `grep -qx 'SingleClick=false'` matched the line wherever
+# it appeared — so a file with the key under [General], which KConfig ignores entirely, passed this
+# check while the machine still opened files on one click. A check that accepts a configuration the
+# software does not read is the "configured but not effective" failure B5 is named after, in the one
+# setting D4 makes the product.
+_auros_ini_value() { # <file> <group> <key> -- the LAST value KConfig would see for that key
+  awk -v want="[$2]" -v key="$3" '
+    /^[[:space:]]*\[/ { ing = ($0 ~ "^[[:space:]]*\\" want "[[:space:]]*$"); next }
+    ing && index($0, key "=") == 1 { sub(/^[^=]*=/, "", $0); v = $0 }
+    END { if (v != "") print v }
+  ' "$1"
+}
+_auros_singleclick="$(_auros_ini_value /etc/xdg/kdeglobals KDE SingleClick)"
+[ "$_auros_singleclick" = "false" ] \
+  || die "[KDE] SingleClick=false is not in force in /etc/xdg/kdeglobals (found '${_auros_singleclick:-nothing}') — KDE would open files on a single click, and every person coming off Windows double-clicks. The key is only read from the [KDE] group; a copy under any other group does nothing."
 did "double-click to open is set system-wide (kdeglobals [KDE] SingleClick=false)"
 record windows-default "double-click"
 

@@ -1,0 +1,25 @@
+# SYSTEMD UNITS THAT ACTUALLY EXIST IN THE BASE IMAGE.
+#
+# Captured by installing the package and reading `rpm -ql`, not from memory or documentation:
+#   greenboot  — probe-greenboot.yml, run 35542125710, greenboot-0.16.4-0.fc44
+#   bootc      — shipped by the Aurora base, bootc 1.16.10
+#
+# WHY THIS FILE EXISTS
+# Three consecutive base builds failed on unit names that do not exist in the versions we run. The
+# script named NINE greenboot units; the package ships THREE. 0.16 collapsed task-runner, status,
+# grub2-set-counter, grub2-set-success, the rpm-ostree fallback and both redboot units into a single
+# binary driven by greenboot-healthcheck.service.
+#
+# Every one of those names was plausible, every one appears in documentation somewhere, and none of
+# them is real here. `tests/units.test.sh` compares what our scripts try to ENABLE against this list,
+# so the next stale name is caught in a second on a laptop rather than in twelve minutes in CI.
+#
+# To update: run probe-greenboot.yml (or the equivalent for another package), read rpm -ql, edit
+# here. Never add a line because a build wanted it — add it because a package ships it.
+
+greenboot-healthcheck.service
+greenboot-set-rollback-trigger.service
+greenboot-success.target
+bootc-fetch-apply-updates.timer
+bootc-fetch-apply-updates.service
+ostree-finalize-staged.service

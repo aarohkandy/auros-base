@@ -171,8 +171,17 @@ extract_fn() { # <file> <function-name>
 extract_between() { # <file> <start-regex> <end-regex>
   local f="$1" body
   [ -f "$f" ] || t_abort "extract_between: no such file: $f"
-  body="$(sed -n "/$2/,/$3/p" "$f")"
+  # \%...% addresses rather than /.../, so a regex containing a slash — which every path in these
+  # scripts does — is not mistaken for the delimiter. With /.../ the abort below fired on a pattern
+  # that was perfectly correct, which teaches people to delete the abort.
+  body="$(sed -n "\%$2%,\%$3%p" "$f")"
   [ -n "$body" ] || t_abort "extract_between: empty extraction from $f between [$2] and [$3] — the block moved or was deleted, so this test is vacuous."
+  # AND IT HAS TO PARSE. A range that ends one line short of a closing `fi` yields a block bash
+  # refuses to run — and `bash -c` on it exits non-zero with "unexpected end of file", which a test
+  # expecting a refusal SCORES AS THE REFUSAL IT WANTED. That is a green test measuring a syntax
+  # error. Checked here, once, where the message can say so.
+  printf '%s\n' "$body" | bash -n 2>/dev/null \
+    || t_abort "extract_between: the block from $f between [$2] and [$3] does not parse as bash — the range probably ends inside an if/for/while. A block that cannot run would make every 'red' case pass for the wrong reason."
   printf '%s\n' "$body"
 }
 
@@ -202,7 +211,13 @@ rootify() { # reads code on stdin, takes absolute prefixes as arguments
     alt="${alt:+$alt|}$esc"
   done
   [ -n "$alt" ] || { cat; return 0; }
-  sed -E "s#($alt)#\\\$ROOT&#g"
+  # The second pass re-quotes. `compgen -G '/etc/ssh/ssh_host_*'` becomes
+  # `compgen -G '$ROOT/etc/ssh/ssh_host_*'`, and SINGLE QUOTES DO NOT EXPAND $ROOT — so the glob
+  # matched nothing, the `else` branch ran, and the test reported that no host keys were baked into
+  # an image that had three of them. A rewrite that silently disarms the code it is preparing is the
+  # harness telling the same lie the harness exists to catch, so any single-quoted string that now
+  # starts with $ROOT is converted to a double-quoted one.
+  sed -E "s#($alt)#\\\$ROOT&#g" | sed -E "s#'(\\\$ROOT[^']*)'#\"\\1\"#g"
 }
 
 # ── the fake machine ─────────────────────────────────────────────────────────────────────────────

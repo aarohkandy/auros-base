@@ -13,8 +13,19 @@
 
 set -uo pipefail
 
+# ── THE ONE TEST SEAM ───────────────────────────────────────────────────────────────────────────
+# Every absolute path below is taken relative to ${AUROS_TEST_ROOT}, which is unset on a real machine
+# -- ${R} is then empty and the paths are exactly the paths. tests/30-update-agent.test.sh sets it to
+# a scratch tree with stub binaries on PATH, which is how this check is shown to be able to go RED.
+# Same seam and same reasoning as 40-no-new-failed-units.sh.
+#
+# A REQUIRED health check that cannot fail does not merely prove nothing: it silently DISABLES
+# rollback while looking installed, because greenboot declares a boot green when every required check
+# exits 0. That is the worst outcome in this directory, so every branch here is exercised.
+R="${AUROS_TEST_ROOT:-}"
+
 TIMER=bootc-fetch-apply-updates.timer
-WRAPPER=/usr/libexec/auros/auros-update
+WRAPPER="${R}/usr/libexec/auros/auros-update"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 

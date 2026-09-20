@@ -452,15 +452,20 @@ auros_enable() {
   record enabled-unit "$u"
 }
 
+# THE UNITS THAT ACTUALLY EXIST, verified by building greenboot and reading `rpm -ql`
+# (probe-greenboot.yml, run 35542125710) rather than remembered from an older release.
+#
+# greenboot 0.16.4 ships exactly three units. This list previously named NINE, six of which do not
+# exist in this version — greenboot-task-runner, greenboot-status, greenboot-grub2-set-counter,
+# greenboot-grub2-set-success, greenboot-rpm-ostree-grub2-check-fallback, and both redboot units.
+# 0.16 collapsed all of that into one binary driven by greenboot-healthcheck.service.
+#
+# Enabling a unit that does not exist is not a harmless no-op: `auros_enable` dies on it, which is
+# how this was caught, and the alternative — tolerating it — would have produced an image where
+# nothing arms rollback and every part still looked enabled.
 for u in bootc-fetch-apply-updates.timer \
          greenboot-healthcheck.service \
-         greenboot-task-runner.service \
-         greenboot-status.service \
-         greenboot-grub2-set-counter.service \
-         greenboot-grub2-set-success.service \
-         greenboot-rpm-ostree-grub2-check-fallback.service \
-         redboot-auto-reboot.service \
-         redboot-task-runner.service; do
+         greenboot-set-rollback-trigger.service; do
   auros_enable "$u"
 done
 
@@ -471,12 +476,34 @@ assert_link() {
   [ -e "/etc/systemd/system/$1" ] || [ -e "/usr/lib/systemd/system/$1" ] \
     || die "enablement link $1 was not created -- $2"
 }
-assert_link 'timers.target.wants/bootc-fetch-apply-updates.timer'                        "the machine would never fetch an update"
-assert_link 'multi-user.target.wants/greenboot-healthcheck.service'                      "no health check would ever run, and every boot would be declared good"
-assert_link 'boot-complete.target.requires/greenboot-healthcheck.service'                "boot-complete.target would be reached without the checks passing"
-assert_link 'ostree-finalize-staged.service.requires/greenboot-grub2-set-counter.service' "the GRUB boot counter would never be staged and auto-rollback (U3) would not happen (D9)"
-assert_link 'redboot.target.wants/redboot-auto-reboot.service'                           "a failed boot would be recorded and then ignored"
-did "all five load-bearing enablement links verified on disk"
+# The assertion DERIVES its expected links from the unit files rather than hardcoding target names.
+#
+# Hardcoding is what put six nonexistent units in the list above, and it would have done the same
+# here: a link like `ostree-finalize-staged.service.requires/greenboot-grub2-set-counter.service`
+# names both a unit and a target from a version we are not running. Reading WantedBy and RequiredBy
+# out of the unit that is actually installed cannot drift, because it has nothing to drift from.
+#
+# What stays hardcoded is the part that is genuinely OUR requirement rather than greenboot's: that
+# these three units are enabled AT ALL. That list is short, and each entry names the safety property
+# it makes real.
+assert_unit_enabled() { # unit, consequence-if-missing
+  local u="$1" why="$2" n=0 t d
+  for d in wants requires; do
+    for t in $(sed -n "s/^${d^}By=//p" "/usr/lib/systemd/system/$u" 2>/dev/null | tr ' ' '\n'); do
+      [ -n "$t" ] || continue
+      if [ -e "/usr/lib/systemd/system/$t.$d/$u" ] || [ -e "/etc/systemd/system/$t.$d/$u" ]; then
+        n=$((n+1)); found "$u -> $t.$d"
+      else
+        die "$u declares ${d^}By=$t but the link was not created -- $why"
+      fi
+    done
+  done
+  [ "$n" -gt 0 ] || die "$u is installed but declares no WantedBy or RequiredBy, so enabling it did nothing -- $why"
+}
+assert_unit_enabled bootc-fetch-apply-updates.timer        "the machine would never fetch an update"
+assert_unit_enabled greenboot-healthcheck.service          "no health check would run, and every boot would be declared good"
+assert_unit_enabled greenboot-set-rollback-trigger.service "nothing would arm the rollback trigger and auto-rollback (U3) would silently not exist (D9)"
+did "every enablement link verified on disk, derived from the units themselves"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 step "summary"

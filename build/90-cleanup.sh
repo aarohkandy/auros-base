@@ -163,7 +163,18 @@ check_one() {
       pattern="${target#*::}"
       [ -f "$file" ] && grep -qE -- "$pattern" "$file"
       ;;
-    *)    return 0 ;;
+    # AN UNRECOGNISED KIND IS FATAL, and it used to be `return 0`.
+    #
+    # That default made every row with a typo in its first column pass unconditionally. `fatal<TAB>
+    # cmb<TAB>bootc` would report "PROTECTED ok cmb bootc" on an image with no bootc in it, and the
+    # protected-set assertion — the thing that stops us shipping a machine we could never patch
+    # again — would be silently one row weaker with nothing anywhere saying so. A check that cannot
+    # fail is not a check (D19), and this one could not fail for any input it did not recognise.
+    #
+    # protected.list is OUR file, not third-party data, so the right answer is to refuse the build
+    # rather than warn. Contrast hardening/telemetry.tsv, which other layers append to and where an
+    # unknown kind is reported and skipped on purpose.
+    *)    die "protected.list names an unknown kind '$kind' (target '$target'). A row whose kind is not one of cmd/pkg/unit/path/content is a protection that silently does nothing — fix the typo rather than the list." ;;
   esac
 }
 

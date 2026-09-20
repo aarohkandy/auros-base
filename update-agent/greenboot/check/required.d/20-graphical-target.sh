@@ -19,11 +19,22 @@
 #
 # ASSUMPTION about another agent's area, stated per the file-ownership rule: the policy-mode
 # layer decides whether a display manager exists. This check reads that off the filesystem
-# (/usr/lib/systemd/system/display-manager.service) rather than off a config file, so it stays
+# (${R}/usr/lib/systemd/system/display-manager.service) rather than off a config file, so it stays
 # correct no matter how that layer is implemented, and it does not require that layer to write
 # anything for us.
 
 set -uo pipefail
+
+# ── THE ONE TEST SEAM ───────────────────────────────────────────────────────────────────────────
+# Every absolute path below is taken relative to ${AUROS_TEST_ROOT}, which is unset on a real machine
+# -- ${R} is then empty and the paths are exactly the paths. tests/30-update-agent.test.sh sets it to
+# a scratch tree with stub binaries on PATH, which is how this check is shown to be able to go RED.
+# Same seam and same reasoning as 40-no-new-failed-units.sh.
+#
+# A REQUIRED health check that cannot fail does not merely prove nothing: it silently DISABLES
+# rollback while looking installed, because greenboot declares a boot green when every required check
+# exits 0. That is the worst outcome in this directory, so every branch here is exercised.
+R="${AUROS_TEST_ROOT:-}"
 
 DEADLINE_SECONDS=120
 POLL_SECONDS=2
@@ -43,7 +54,7 @@ wait_for_active() {
     return 1
 }
 
-if [[ -e /usr/lib/systemd/system/display-manager.service || -e /etc/systemd/system/display-manager.service ]]; then
+if [[ -e ${R}/usr/lib/systemd/system/display-manager.service || -e ${R}/etc/systemd/system/display-manager.service ]]; then
     echo "image declares a display manager"
     wait_for_active display-manager.service \
         || fail "this image ships a display manager but it never reached a running state; there is no login prompt"
