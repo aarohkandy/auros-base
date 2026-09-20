@@ -9,6 +9,58 @@ and did not. That finding is first, because everything else depends on it.
 
 ---
 
+## 0. NOTHING IN THIS DIRECTORY HAS BEEN MEASURED. Read this before quoting any of it.
+
+`signing/keys/auros.pub` **does not exist**. The directory contains `.gitkeep` and `README.md`:
+
+```
+$ ls -la auros-base/signing/keys/
+-rw-r--r--  0 .gitkeep
+-rw-r--r--  ... README.md
+```
+
+`build/30-update-agent.sh` does `[ -s "$KEY_SRC" ] || die`, which is correct and fail-closed — and
+which means **the base image build dies at step 30 and no Auros image has ever been produced.**
+
+The consequence for every claim on this page, stated so nobody has to infer it:
+
+| Claim | Status |
+|---|---|
+| the key ships at `/usr/lib/pki/containers/auros.pub` | **never built** |
+| `policy.json`'s `keyPath` points at it and the scoped entry beats the catch-all | **never built, never booted** |
+| `registries.d` makes the `sigstoreSigned` rule non-inert | **never built, never booted** |
+| `30-auros.toml` sets `enforce-container-sigpolicy` at install time | **never installed** |
+| check **U4** — an unsigned image in our namespace is refused | **has never run, not once** |
+| `verify-enforcement.sh` proves the chain end to end | **has never run against a real image** |
+
+The chain was traced by reading the files and it is correct **as written**: the scope derivation in
+`build/30-update-agent.sh` yields `ghcr.io/<org>` from `AUROS_SOURCE_REPO`; `containers/image`
+resolves docker scopes most-specific-first, so `ghcr.io/<org>` beats the `""` catch-all regardless
+of key order in the JSON; and the build-time validator genuinely checks `keyPath`, `signedIdentity`
+and the absence of a global-default catch-all — it was exercised against six mutated policies and
+went red on three of them.
+
+**Correct on paper is not evidence.** `bootc switch --enforce-container-sigpolicy` against an
+unsigned `ghcr.io/<org>` image *should* fail per these files, and **no measurement in this
+repository demonstrates that it does.** Until it has, this directory describes a design, not a
+property, and no website copy, GATE.md row or customer sentence may say otherwise.
+
+### What makes it measurable
+
+One §9-reserved human action — it mints a long-lived organisational credential, which is not an
+agent's decision (spec §9, and `signing/keys/README.md`):
+
+1. `cosign generate-key-pair`
+2. commit `auros-base/signing/keys/auros.pub`
+3. set `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD` as repository secrets
+
+The second credential the pipeline now needs is `AUROS_DISPATCH_TOKEN` (D18, BLOCKED.md B2): the
+publish gate reads the ledger from a fresh clone of the control repo, so a pass that cannot be
+pushed there is a pass no gate will see, and `build.yml`'s `record` job fails rather than letting
+the publish proceed on evidence nobody can re-read.
+
+---
+
 ## 1. Keyless via Actions OIDC does not work for our consumer. We sign with a key pair.
 
 The task, PLAN.md §A5 and D17 all describe **cosign keyless via GitHub Actions OIDC**. Read
@@ -94,6 +146,15 @@ Scope precedence and the deliberate retention of the catch-all are explained in
 `policy.json.README.md`. Short version: the scoped entry wins by **specificity**, not by
 position, and `transports.docker[""]` stays so that distrobox and every other legitimate image
 still work.
+
+**The residual, because it is easy to overstate what this buys.** The catch-all means signature
+enforcement applies to *our namespace and nothing else*. `bootc switch docker.io/anything` on a
+shipped machine is accepted unsigned; `"default": [{"type":"reject"}]` never answers, because the
+docker transport's own `""` entry is more specific than the global default. `open` policy mode
+leaves the user with sudo, so this is reachable. The claim we are entitled to make is
+**"nobody but us can update this machine from our own namespace"** — not "this machine refuses
+tampered images", and not "only we can update it". `policy.json.README.md` carries the full
+wording; any copy on the website has to match it.
 
 ---
 

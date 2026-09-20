@@ -437,7 +437,10 @@ a_kde_door() {
     }
     marker="$dir/a-shell-ran"
     script="$dir/open-a-shell"
-    { printf '#!/usr/bin/bash\n'; printf 'touch %s\n' "$marker"; printf 'exit 0\n'; } > "$script"
+    # /bin/sh, not /usr/bin/bash: the only thing this script has to do is prove that SOMETHING ran
+    # it, and the narrowest possible interpreter dependency is the right one for a probe. (It also
+    # lets policy/tests/assert-lib.test.sh drive this function on a host that is not Fedora.)
+    { printf '#!/bin/sh\n'; printf 'touch %s\n' "$marker"; printf 'exit 0\n'; } > "$script"
     chmod 0755 "$script"
     mkdir -p "$dir/home/.config" "$dir/home/.cache" "$dir/home/.local/share" "$dir/run"
     chmod 0700 "$dir/run"

@@ -150,7 +150,7 @@ auros_disable_weak_deps() {
 auros_verify_weak_deps() {
     local conf="$1" dnf out=""
     dnf="$(auros_pkgmgr)"
-    [ "$dnf" = none ] && { warn "no dnf available; cannot verify that install_weak_deps took effect in $conf"; return 0; }
+    [ "$dnf" = none ] && { warn "install_weak_deps is NOT VERIFIED in $conf: no dnf on this image to ask. If Recommends are still on, a later dnf install in the recipe layer can reinstate a package we removed; check S3 asserts the removal set from outside and is what would catch it."; return 0; }
     if out="$("$dnf" --dump-main-config 2>/dev/null)" && [ -n "$out" ]; then
         :
     elif out="$("$dnf" config-manager --dump 2>/dev/null)" && [ -n "$out" ]; then

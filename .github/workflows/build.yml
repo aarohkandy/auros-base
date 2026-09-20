@@ -191,6 +191,18 @@ jobs:
           # have spent an hour of CI and are one `|| true` away from shipping ungated.
           missing=0
           [ -f meta/tools/gate.mjs ] || { echo "::error::meta/tools/gate.mjs is absent — the publish gate (TASKS 0.5) has not landed"; missing=1; }
+          [ -f matrix/run/record-pass.mjs ] || { echo "::error::matrix/run/record-pass.mjs is absent — nothing can write a pass, so nothing can ever satisfy the gate"; missing=1; }
+          # The gate and the recorder must agree about the argv this pipeline uses. Asking the gate
+          # about a digest nobody recorded costs nothing and answers the only question that matters
+          # about the invocation: exit 1 is a refusal (good), exit 2 means this workflow and that
+          # program disagree about the command line and the publish step would die before gating.
+          SENTINEL="sha256:$(printf '0%.0s' $(seq 1 64))"
+          set +e; node meta/tools/gate.mjs "$SENTINEL" >/dev/null 2>&1; grc=$?; set -e
+          case "$grc" in
+            1) echo "gate CLI contract OK — refuses an unrecorded digest with exit 1" ;;
+            0) echo "::error::the gate ALLOWS a digest that was never tested. Nothing is built until that is fixed."; missing=1 ;;
+            *) echo "::error::the gate exited ${grc} on 'gate.mjs <digest>' — it cannot decide, so it cannot gate. This is how the publish step silently stopped running: it called subcommands that do not exist."; missing=1 ;;
+          esac
           [ -x matrix/run.sh ] || [ -f matrix/run.sh ] || { echo "::error::matrix/run.sh is absent — the check-matrix harness (TASKS A8) has not landed"; missing=1; }
           [ -f Containerfile ] || { echo "::error::Containerfile is absent (TASKS A1)"; missing=1; }
           if [ "$missing" = "1" ]; then

@@ -94,15 +94,41 @@ if have_pkg greenboot-default-health-checks; then
   warn "greenboot-default-health-checks is installed (not by us). Its 01_repository_dns_check.sh is a REQUIRED check that fails when DNS is unreachable, which would roll a machine back over a school's broadband outage. Review before shipping."
 fi
 
-for f in /usr/libexec/greenboot/greenboot \
-         /usr/libexec/greenboot/greenboot-grub2-set-counter \
-         /usr/libexec/greenboot/redboot-auto-reboot \
-         /usr/lib/systemd/system/greenboot-healthcheck.service \
-         /usr/lib/systemd/system/greenboot-grub2-set-counter.service \
-         /usr/lib/systemd/system/redboot-auto-reboot.service; do
-  [ -e "$f" ] || die "greenboot installed but $f is missing -- the package layout changed, re-read greenboot.spec before continuing"
-done
-did "greenboot payload verified"
+# Assert the CAPABILITIES we depend on, not a remembered file list.
+#
+# greenboot 0.16.4 reorganised itself and the old list was from 0.15: `greenboot-grub2-set-counter`
+# and `redboot-auto-reboot` no longer exist as separate binaries or units. What replaced them is
+# `greenboot-set-rollback-trigger.service`, and the grub fragment now ships in the package itself.
+# Verified by building the package and reading `rpm -ql` (probe-greenboot.yml, run 35542125710)
+# rather than by guessing a second time.
+#
+# Naming capabilities rather than paths means the next reorganisation produces a legible failure
+# ("nothing arms the rollback trigger") instead of a filename nobody recognises.
+_gb_missing=()
+_gb_need() { # capability, then one or more paths that would satisfy it
+  local cap="$1"; shift
+  local f
+  for f in "$@"; do [ -e "$f" ] && { found "$cap -> $f"; return 0; }; done
+  _gb_missing+=("$cap (looked for: $*)")
+}
+_gb_need "the greenboot runner"          /usr/libexec/greenboot/greenboot
+_gb_need "the health-check unit"         /usr/lib/systemd/system/greenboot-healthcheck.service
+# THE one that makes rollback real. Without something arming a rollback trigger, every other part of
+# greenboot still looks correctly installed and check U3 is a fiction.
+_gb_need "something that arms rollback"  /usr/lib/systemd/system/greenboot-set-rollback-trigger.service \
+                                         /usr/lib/systemd/system/greenboot-grub2-set-counter.service \
+                                         /usr/libexec/greenboot/greenboot-grub2-set-counter
+_gb_need "the success target"            /usr/lib/systemd/system/greenboot-success.target
+_gb_need "the GRUB boot-counter fragment" /usr/lib/bootupd/grub2-static/configs.d/08_greenboot.cfg
+
+if [ ${#_gb_missing[@]} -gt 0 ]; then
+  printf 'auros[30-update-agent]   greenboot is installed but these capabilities are absent:\n' >&2
+  printf 'auros[30-update-agent]     - %s\n' "${_gb_missing[@]}" >&2
+  printf 'auros[30-update-agent]   what the package ACTUALLY ships:\n' >&2
+  rpm -ql greenboot 2>/dev/null | sed 's/^/auros[30-update-agent]     /' >&2
+  die "greenboot's layout does not provide what auto-rollback needs. The file list above is ground truth -- update the capability map, do not delete the check."
+fi
+did "greenboot capabilities verified (runner, health-check unit, rollback trigger, success target, GRUB fragment)"
 
 GB_FRAGMENT=/usr/lib/bootupd/grub2-static/configs.d/08_greenboot.cfg
 [ -f "$GB_FRAGMENT" ] || die \
@@ -197,9 +223,20 @@ step "A5. health checks"
 # greenboot's runner globs '*.sh' and sorts by name; required.d runs in STRICT mode, so the first
 # failure stops the rest. The numeric prefixes are that order: most fundamental first.
 #
-# /etc/greenboot is where greenboot looks, and where a site can add or override a check without us
-# cutting a new image. On a bootc host /etc is three-way merged on upgrade, so machines that have
-# not edited these keep tracking the image.
+# WHERE OUR CHECKS GO, and this changed with greenboot 0.16.
+#
+# 0.16 added /usr/lib/greenboot/{check/required.d,check/wanted.d,green.d,red.d} alongside the /etc
+# ones, and that distinction is exactly the one a bootc image should care about:
+#
+#   /usr/lib  is IMAGE-lifecycled. It is replaced wholesale by every update and cannot drift.
+#   /etc      is MACHINE state, three-way merged on upgrade, and editable on the machine.
+#
+# OUR required checks are rollback triggers — they are the safety property we sell, and a machine
+# where somebody deleted one has silently lost its ability to recover from a bad update, while still
+# looking correctly configured. So ours go in /usr/lib, where they come back with every image.
+#
+# /etc stays available for a SITE to add its own checks without us cutting an image. greenboot reads
+# both, which is why 0.16 has both.
 
 for dir in check/required.d check/wanted.d green.d red.d; do
   found "$dir:"
@@ -209,7 +246,7 @@ for dir in check/required.d check/wanted.d green.d red.d; do
   [ ${#files[@]} -gt 0 ] || die "no scripts in $UA/greenboot/$dir"
   for f in "${files[@]}"; do
     bash -n "$f" || die "$f is not valid bash -- a health check that cannot parse fails on every boot"
-    install_file "$f" "/etc/greenboot/$dir/$(basename "$f")" 0755
+    install_file "$f" "/usr/lib/greenboot/$dir/$(basename "$f")" 0755
   done
 done
 
@@ -223,7 +260,7 @@ install_file "$UA/tmpfiles/auros-update-agent.conf" /usr/lib/tmpfiles.d/auros-up
 # EVERY REQUIRED CHECK IS A ROLLBACK TRIGGER. Adding one is a safety decision, not a refactor, so
 # the count is asserted here and reasoned about in update-agent/README.md. If this fails, the right
 # response is to write down why the new check is worth a rollback -- not to change the number.
-req="$(find /etc/greenboot/check/required.d -name '*.sh' | wc -l | tr -d ' ')"
+req="$(find /usr/lib/greenboot/check/required.d -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')"
 [ "$req" = "4" ] || die "expected 4 required health checks, found $req. Every required check can roll a machine back; adding one belongs in update-agent/README.md and DECISIONS.md, not in a quiet commit."
 did "4 required checks (rollback triggers), 3 wanted checks (reported only)"
 
@@ -288,8 +325,26 @@ known={"type","keyPath","keyPaths","keyData","keyDatas","fulcio","pki","rekorPub
 for req in (q for rs in docker.values() for q in rs):
     u=set(req)-known
     if u: bad("unknown requirement key(s) %s" % sorted(u))
-print("  ✓ %s -> sigstoreSigned(%s, %s); catch-all %s for other registries" % (
-    scope, kp, si, "kept" if "" in docker else "absent"))
+print("  ✓ %s -> sigstoreSigned(%s, %s)" % (scope, kp, si))
+# The catch-all is a deliberate trade (signing/policy.json.README.md, "The \"\" catch-all stays"),
+# but "catch-all kept for other registries" reads as a footnote about tidiness. It is not. Printing
+# the CONSEQUENCE is the difference between a decision that stays visible and one that quietly
+# becomes the thing everybody assumes was never there.
+catchall=[r.get("type") for r in (docker.get("") or [])]
+if catchall==["insecureAcceptAnything"]:
+    print('  ! transports.docker[""] is insecureAcceptAnything: signature enforcement applies to %s'
+          ' AND NOTHING ELSE. `bootc switch docker.io/<anything>` is accepted UNSIGNED on this image,'
+          ' and "default": reject never answers because this entry is more specific. Deliberate --'
+          ' see signing/policy.json.README.md. The only claim this image supports is "nobody but us'
+          ' can update it from our own namespace".' % scope)
+elif catchall==["reject"]:
+    print('  ✓ transports.docker[""] rejects; only %s and any registry enumerated above can be pulled' % scope)
+elif catchall:
+    bad('transports.docker[""] is %r, which is neither insecureAcceptAnything (the recorded trade) '
+        'nor reject (the strict alternative). An unreviewed third option here is how a policy stops '
+        'meaning what its documentation says.' % catchall)
+else:
+    print('  ✓ no transports.docker[""] entry; the global default (reject) applies to every other registry')
 PY
 
 # ── registries.d ─────────────────────────────────────────────────────────────────────────────────

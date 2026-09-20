@@ -43,9 +43,31 @@ our own repo instead of inherited from Aurora's.
 
 Setting `transports.docker[""]` to `reject` would break distrobox, toolbox, and every other image
 a user legitimately pulls. The trade, stated plainly so nobody discovers it later: **our namespace
-is enforced; every other registry behaves exactly as it does on any Fedora desktop.** We are not
-selling a machine that can only run our containers; we are selling a machine that cannot be
-updated by anyone but us.
+is enforced; every other registry behaves exactly as it does on any Fedora desktop.**
+
+### The residual this creates, named rather than left implied
+
+It is the same construct D8 identifies as the trap, and for `ghcr.io/<namespace>` it is correctly
+shadowed by the more specific `sigstoreSigned` entry, so D8's letter is satisfied. The part that
+survives is this: on a shipped machine, `enforce-container-sigpolicy` verifies **nothing for any
+other registry**. `bootc switch docker.io/anything` or `quay.io/anything` is accepted unsigned, and
+`"default": [{"type":"reject"}]` never gets a say, because the docker transport's own `""` entry
+answers first. In `open` policy mode the user has sudo, so this is reachable, not theoretical.
+
+So the honest claim is narrow, and it is the only one any of our documentation, CI output or
+website copy may make:
+
+> **Nobody but us can update this machine from our own namespace.** An image that claims to be
+> Auros and is not signed by our key is refused.
+
+It is **not** "the machine refuses tampered images", and it is **not** "the machine cannot be
+updated by anyone but us" — an administrator with sudo can `bootc switch` it onto an unsigned image
+from some other registry, and the policy will let them. That is a different operating system
+replacing ours, not our image being tampered with, and no signature policy scoped to our namespace
+was ever going to stop it. A recipe that wants the stricter behaviour sets
+`transports.docker[""]` to `reject` and enumerates the registries it needs; the base does not,
+because the base also has to be the developer-desktop recipe's base (spec §6B) and there is exactly
+one base.
 
 `verify-enforcement.sh` is what proves the scoped entry actually beats the catch-all, by offering
 the machine an unsigned image **inside our own namespace** and requiring refusal. If the catch-all

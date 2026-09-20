@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# ==================================================================================================
+# assert-lib.test.sh — prove the runtime assertion primitives can go RED, and for the right reason.
+#
+# D19: "a step that cannot fail is not a check." An audit found two ways this library was decoration:
+#
+#   1. Several attempts in the shared suites fail for `aurosprobe` on an OPEN image too — it is a
+#      sessionless system account in no privileged group, /etc is root-owned and /usr is read-only —
+#      so their failure under `locked` proved nothing. They are now labelled corroborating, and
+#      a_pk_not_hard_denied is the negative control that goes RED if the discriminating half ever
+#      stops discriminating.
+#   2. The KDE-Kiosk half of `locked` had NOTHING attempting it. a_kde_door now attempts it by
+#      asking a KDE application to run a script and looking for the marker the script leaves.
+#
+# Both are tested here, in both directions, against stubs. Nothing touches the host.
+# ==================================================================================================
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+LIB="$HERE/../lib/assert-lib.sh"
+[ -r "$LIB" ] || { echo "cannot find lib/assert-lib.sh"; exit 2; }
+
+PASS=0; FAILED=0
+ok() { printf '  \033[32mok\033[0m    %s\n' "$1"; PASS=$((PASS+1)); }
+no() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAILED=$((FAILED+1)); if [ -n "${2:-}" ]; then printf '%s\n' "$2" | sed 's/^/        /'; fi; }
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+BIN="$WORK/bin"; mkdir -p "$BIN"
+
+# A stub KDE application. `konsole -e <script>` runs the script when the door is open and refuses
+# when $KDE_DOOR=shut — which is what KAuthorized("shell_access") does on a locked image.
+cat > "$BIN/konsole" <<'EOS'
+#!/usr/bin/env bash
+if [ "${KDE_DOOR:-open}" = shut ]; then echo "You do not have permission to open a terminal" >&2; sleep 30; fi
+[ "${1:-}" = "-e" ] && exec "$2"
+exit 0
+EOS
+cat > "$BIN/kioclient6" <<'EOS'
+#!/usr/bin/env bash
+if [ "${KDE_DOOR:-open}" = shut ]; then echo "refused" >&2; sleep 30; fi
+[ "${1:-}" = "exec" ] && exec "$2"
+exit 0
+EOS
+# A stub pkcheck whose answer comes from $PK_RC, so the three polkit judgements can be driven.
+cat > "$BIN/pkcheck" <<'EOS'
+#!/usr/bin/env bash
+exit "${PK_RC:-1}"
+EOS
+# macOS has no coreutils `timeout`, which every attempt primitive in the library uses. The image
+# does (coreutils is in the protected set), so this stub is a host-portability shim for the test and
+# not a change to what is being tested: it reproduces the exit-124-on-timeout contract the library
+# relies on.
+if ! command -v timeout >/dev/null 2>&1; then
+cat > "$BIN/timeout" <<'EOS'
+#!/usr/bin/env bash
+secs=$1; shift
+"$@" &
+pid=$!
+( sleep "$secs"; kill -9 "$pid" 2>/dev/null; exit 0 ) & watchdog=$!
+wait "$pid"; rc=$?
+kill "$watchdog" 2>/dev/null
+[ "$rc" -ge 128 ] && rc=124
+exit "$rc"
+EOS
+fi
+chmod 0755 "$BIN"/*
+export PATH="$BIN:$PATH"
+export AUROS_KDE_SETTLE=3 AUROS_ASSERT_TIMEOUT=6
+
+# shellcheck disable=SC1090
+. "$LIB"
+
+reset() { A_PASS=0; A_FAIL=0; A_LINES=(); A_CORROBORATING=(); A_CONTROL_DISCRIMINATING=(); A_CONTROL_NON_DISCRIMINATING=(); }
+last()  { printf '%s' "${A_LINES[*]: -1}"; }
+
+echo "── a_kde_door: the attempt is capable of SUCCEEDING, which is what makes a refusal evidence ─"
+reset; KDE_DOOR=open a_kde_door kde.konsole open konsole "konsole -e <script>" -- -e @SCRIPT@ >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "open image + open door => pass" || no "open image + open door => pass" "$(last)"
+
+reset; KDE_DOOR=shut a_kde_door kde.konsole open konsole "konsole -e <script>" -- -e @SCRIPT@ >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "open image + SHUT door => FAIL (the control catches a probe that can never succeed)" \
+                  || no "open image + SHUT door => FAIL" "$(last)"
+printf '%s' "$(last)" | grep -q 'artefact of the probe' \
+    && ok "  ...and says every KAuthorized denial elsewhere would be an artefact" \
+    || no "  ...and says every KAuthorized denial elsewhere would be an artefact" "$(last)"
+
+echo "── a_kde_door: locked ──────────────────────────────────────────────────────────────────────"
+reset; KDE_DOOR=shut a_kde_door kde.konsole shut konsole "konsole -e <script>" -- -e @SCRIPT@ >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "locked + shut door => pass" || no "locked + shut door => pass" "$(last)"
+
+reset; KDE_DOOR=open a_kde_door kde.konsole shut konsole "konsole -e <script>" -- -e @SCRIPT@ >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "locked + OPEN door => FAIL — a shell ran through konsole" || no "locked + OPEN door => FAIL" "$(last)"
+printf '%s' "$(last)" | grep -q 'kdeglobals' \
+    && ok "  ...and names the kdeglobals ordering hazard as the usual cause" \
+    || no "  ...and names the kdeglobals ordering hazard as the usual cause" "$(last)"
+
+echo "── a_kde_door: a missing binary is only acceptable when the mode removed it ────────────────"
+reset; a_kde_door kde.missing shut /nonexistent-kde-binary "a door that is gone" -- -e @SCRIPT@ >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "expect=shut + absent binary => pass (the door does not exist)" || no "expect=shut + absent binary => pass" "$(last)"
+reset; a_kde_door kde.missing open /nonexistent-kde-binary "a door that is gone" -- -e @SCRIPT@ >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "expect=open + absent binary => FAIL (the control cannot establish anything)" || no "expect=open + absent binary => FAIL" "$(last)"
+
+echo "── a_pk_not_hard_denied: the negative control that stops the polkit half from rotting ──────"
+for rc in 0 3; do
+    reset; PK_RC=$rc a_pk_not_hard_denied ctl org.example.action >/dev/null 2>&1
+    [ "$A_FAIL" = 0 ] && ok "open image answers pkcheck $rc => control passes" || no "open image answers pkcheck $rc => control passes" "$(last)"
+done
+reset; PK_RC=1 a_pk_not_hard_denied ctl org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "open image answers pkcheck 1 => control FAILS" || no "open image answers pkcheck 1 => control FAILS" "$(last)"
+printf '%s' "$(last)" | grep -q 'artefact of the probe subject' \
+    && ok "  ...and says a locked denial of that action would be an artefact" \
+    || no "  ...and says a locked denial of that action would be an artefact" "$(last)"
+
+echo "── the locked/managed distinction is still enforced ────────────────────────────────────────"
+reset; PK_RC=3 a_pk_hard_deny x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "locked rejects pkcheck 3 (that is managed behaviour)" || no "locked rejects pkcheck 3" "$(last)"
+reset; PK_RC=3 a_pk_admin_only x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "managed accepts pkcheck 3" || no "managed accepts pkcheck 3" "$(last)"
+reset; PK_RC=0 a_pk_admin_only x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "managed rejects pkcheck 0" || no "managed rejects pkcheck 0" "$(last)"
+
+echo "── a_deny refuses to guess ─────────────────────────────────────────────────────────────────"
+reset; a_deny nonsense x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "an unknown level is a FAIL, not a silent default" || no "an unknown level is a FAIL" "$(last)"
+
+echo "── the update timer list is shared, and includes uupd (D22) ───────────────────────────────"
+printf '%s\n' "${A_UPDATE_TIMERS[@]}" | grep -qx 'uupd.timer' \
+    && ok "A_UPDATE_TIMERS includes uupd.timer" || no "A_UPDATE_TIMERS includes uupd.timer"
+if grep -qE "for t in [^\"]*(bootc-fetch|rpm-ostreed)" "$HERE/../open/assert.sh"; then
+    no "open/assert.sh still keeps its own hand-written timer list"
+else
+    ok "open/assert.sh iterates A_UPDATE_TIMERS rather than a second copy"
+fi
+grep -q 'A_UPDATE_TIMERS' "$HERE/../open/assert.sh" \
+    && ok "open/assert.sh references the shared array by name" || no "open/assert.sh references the shared array by name"
+
+echo "── corroborating attempts are declared as such ─────────────────────────────────────────────"
+reset; a_corroborate c1 "a thing that fails everywhere" -- /usr/bin/false >/dev/null 2>&1
+[ "${#A_CORROBORATING[@]}" = 1 ] && ok "a_corroborate records the id for the a_finish summary" || no "a_corroborate records the id"
+printf '%s' "$(last)" | grep -q 'corroborating' && ok "  ...and labels the line" || no "  ...and labels the line" "$(last)"
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAILED"
+[ "$FAILED" -eq 0 ]
