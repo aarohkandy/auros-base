@@ -487,14 +487,22 @@ assert_link() {
 # these three units are enabled AT ALL. That list is short, and each entry names the safety property
 # it makes real.
 assert_unit_enabled() { # unit, consequence-if-missing
-  local u="$1" why="$2" n=0 t d
-  for d in wants requires; do
-    for t in $(sed -n "s/^${d^}By=//p" "/usr/lib/systemd/system/$u" 2>/dev/null | tr ' ' '\n'); do
+  local u="$1" why="$2" n=0 t pair d directive
+  # systemd's DIRECTORY suffix and its DIRECTIVE are different words: the directive WantedBy creates a
+  # `.wants` directory, and RequiredBy creates `.requires`. Deriving one from the other — which is what
+  # this did, producing "WantsBy" and "RequiresBy" — matches nothing, so every unit appeared to declare
+  # no install section and the build failed claiming bootc's own timer could not be enabled.
+  #
+  # They are spelled out as pairs rather than transformed. Two hardcoded words cannot drift; a
+  # transformation between two things that only look related can, and did.
+  for pair in "wants:WantedBy" "requires:RequiredBy"; do
+    d="${pair%%:*}"; directive="${pair##*:}"
+    for t in $(sed -n "s/^${directive}=//p" "/usr/lib/systemd/system/$u" 2>/dev/null | tr ' ' '\n'); do
       [ -n "$t" ] || continue
       if [ -e "/usr/lib/systemd/system/$t.$d/$u" ] || [ -e "/etc/systemd/system/$t.$d/$u" ]; then
         n=$((n+1)); found "$u -> $t.$d"
       else
-        die "$u declares ${d^}By=$t but the link was not created -- $why"
+        die "$u declares ${directive}=$t but the link was not created -- $why"
       fi
     done
   done

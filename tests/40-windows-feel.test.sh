@@ -46,7 +46,11 @@ record(){ :; }
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "double-click — the single most-felt setting in the layer"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-CLICK_BLOCK="$(extract_between "$W" '^_auros_ini_value() {' '^  || die ' | rootify /etc/xdg/kdeglobals)"
+# The range is the WHOLE double-click section, from its comment to its record line, not just the
+# helper function. Anchoring on the helper's name would make the test abort — rather than go red —
+# the moment somebody replaced the implementation with a group-blind grep again, and an abort is a
+# weaker signal than "the wrong-group case now passes".
+CLICK_BLOCK="$(extract_between "$W" '^# Double-click is the single most-felt' '^record windows-default' | rootify /etc/xdg/kdeglobals)"
 
 click_case() { # <kdeglobals body>
   local root; root="$(newroot)"; mkdir -p "$root/etc/xdg"

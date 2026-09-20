@@ -55,5 +55,33 @@ else
   PASS=$((PASS+1))
 fi
 
+
+# ── The install-directive parse ─────────────────────────────────────────────────────────────────
+# systemd's DIRECTORY suffix and its DIRECTIVE are different words: WantedBy creates `.wants`,
+# RequiredBy creates `.requires`. Deriving one from the other produced "WantsBy" and "RequiresBy",
+# which match nothing — so every unit looked like it declared no install section, and the build
+# failed claiming bootc's own timer could not be enabled. A real unit file is the only thing that
+# would have caught it, so here is one.
+echo
+echo "install-directive parse:"
+UT=$(mktemp -d); mkdir -p "$UT/usr/lib/systemd/system"
+printf '[Unit]\nDescription=t\n\n[Install]\nWantedBy=timers.target\n'          > "$UT/usr/lib/systemd/system/x.timer"
+printf '[Install]\nRequiredBy=ostree-finalize-staged.service\n'                  > "$UT/usr/lib/systemd/system/y.service"
+printf '[Unit]\nDescription=no install section at all\n'                          > "$UT/usr/lib/systemd/system/z.service"
+
+parse () { sed -n "s/^$2=//p" "$UT/usr/lib/systemd/system/$1" 2>/dev/null; }
+expect () { # file, directive, expected
+  local got; got=$(parse "$1" "$2")
+  if [ "$got" = "$3" ]; then printf '  ok    %-12s %-10s -> %s\n' "$1" "$2" "${3:-<nothing>}"; PASS=$((PASS+1))
+  else printf '  FAIL  %-12s %-10s -> %s (want %s)\n' "$1" "$2" "${got:-<nothing>}" "${3:-<nothing>}"; FAIL=$((FAIL+1)); fi
+}
+expect x.timer   WantedBy    timers.target
+expect y.service RequiredBy  ostree-finalize-staged.service
+expect z.service WantedBy    ""
+# The exact bug: the wrong spellings must find nothing, so a future "clever" derivation goes red here.
+expect x.timer   WantsBy     ""
+expect y.service RequiresBy  ""
+rm -rf "$UT"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
