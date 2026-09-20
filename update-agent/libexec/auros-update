@@ -19,7 +19,19 @@
 # Failure policy: registry unreachable, or another updater holding the bootc lock, exits 0. U5
 # says an offline machine must be a no-op, not a breakage, and a non-zero exit here becomes a
 # failed unit, which 40-no-new-failed-units.sh would then read as a regression and roll the
-# machine back because the school's uplink blinked. Real errors still exit non-zero.
+# machine back because the school's uplink blinked.
+#
+# EXITING 0 IS NOT THE SAME AS SUCCEEDING, and the difference has to be recorded somewhere a
+# human can find it, or "this machine stopped being patched" is indistinguishable from "this
+# machine had nothing to do". The whole signal is three files in /var/lib/auros/update-agent:
+#
+#   last-fetch-attempt      written on EVERY run, success or failure
+#   last-successful-fetch   written ONLY after `bootc upgrade` returned 0
+#   last-error              written on failure, REMOVED on success
+#
+# 70-update-freshness.sh reads them and puts the answer in the boot-status motd. The only exit
+# that is genuinely non-zero is "bootc is not installed", below: a machine that cannot update
+# itself at all is not a transient condition and must not be reported as one.
 
 set -euo pipefail
 
@@ -123,7 +135,15 @@ print("" if d is None else (d if isinstance(d,str) else json.dumps(d)))
 ' "$1" 2>/dev/null || printf ''
 }
 
-booted_digest_before="$(bootc_json | json_get status.booted.image.imageDigest)"
+# `|| true` is not decoration. `bootc_json` propagates bootc's exit status, `json_get` swallows
+# its own, and under `set -o pipefail` a transient `bootc status` failure makes the pipeline
+# non-zero -- which makes the command substitution non-zero -- which makes `set -e` abort this
+# script before ANY of the error handling below runs, producing exactly the failed unit that the
+# service drop-in says must never happen. Measured:
+#     $ bash -c 'set -euo pipefail; f(){ return 3;}; g(){ cat;}; x="$(f|g)"; echo unreachable'
+#     exit=3, "unreachable" never printed.
+# An unreadable `bootc status` must degrade to "unknown", not to a dead unit.
+booted_digest_before="$(bootc_json | json_get status.booted.image.imageDigest || true)"
 log "booted digest before: ${booted_digest_before:-unknown}"
 
 stage_attempt() {
@@ -131,41 +151,76 @@ stage_attempt() {
     bootc upgrade --quiet
 }
 
+# ---------------------------------------------------------------------------------------------
+# HOW THE STATUS IS CAPTURED, and why it is not an `if !`
+# ---------------------------------------------------------------------------------------------
+# This block used to read:
+#
+#     if ! upgrade_out="$(stage_attempt 2>&1)"; then upgrade_rc=$?; ...
+#
+# `$?` there is the status of the NEGATED compound, which is 0 precisely WHEN THE COMMAND FAILED.
+# Measured, this machine, GNU bash 3.2.57 and identical under 5.x:
+#
+#     $ f(){ return 7; }; rc=0; if ! out="$(f)"; then rc=$?; fi; echo $rc   ->  0
+#     $ f(){ return 7; }; rc=0; out="$(f)" || rc=$?;            echo $rc   ->  7
+#
+# So `upgrade_rc` was 0 on every path, the offline/error branch below was unreachable dead code,
+# and a registry outage, an HTTP 500, a corrupt manifest and a REJECTED SIGNATURE all fell through
+# to the success path -- deleting last-error and writing a fresh last-successful-fetch stamp
+# immediately after printing the rejection. 70-update-freshness.sh is the only mechanism in the
+# design that notices a machine which has quietly stopped being patched, and its stamp was
+# refreshed on every timer run regardless of outcome, so it could never fire. A laptop that had
+# refused every update for two years reported "last successful update fetch was 0 day(s) ago".
+#
+# D19, verbatim: a step that cannot fail is not a check.
+#
+# Capture the status DIRECTLY. `x="$(cmd)" || rc=$?` reads the status of the command substitution
+# itself, and the `||` also keeps `set -e` from aborting on the failure we are about to handle.
 upgrade_rc=0
 upgrade_out=""
-if ! upgrade_out="$(stage_attempt 2>&1)"; then
-    upgrade_rc=$?
+upgrade_out="$(stage_attempt 2>&1)" || upgrade_rc=$?
+if (( upgrade_rc != 0 )); then
     warn "first fetch attempt failed (rc=${upgrade_rc}); retrying in ${LOCK_RETRY_SECONDS}s"
     warn "${upgrade_out}"
     sleep "${LOCK_RETRY_SECONDS}"
     upgrade_rc=0
-    if ! upgrade_out="$(stage_attempt 2>&1)"; then
-        upgrade_rc=$?
-    fi
+    upgrade_out="$(stage_attempt 2>&1)" || upgrade_rc=$?
 fi
 [[ -n "${upgrade_out}" ]] && printf '%s\n' "${upgrade_out}"
+
+# Always stamped, success or failure. This is what distinguishes "this machine has never tried"
+# from "this machine tries every six hours and is turned away every time" -- two states that
+# looked identical before, and only one of which is a machine nobody has to drive out to.
+date -uIseconds > "${STATE_DIR}/last-fetch-attempt"
 
 if (( upgrade_rc != 0 )); then
     # Could not fetch. Offline (U5), or uupd.timer is holding the bootc lock -- Aurora ships
     # uupd.timer enabled at 04:00 and uupd also runs `bootc upgrade`; bootc serialises with its
     # own lock and the loser errors out. Neither is a fault of this machine's, and neither should
     # produce a failed unit. Leave a breadcrumb and exit clean.
+    #
+    # NOTE what is deliberately NOT done here: last-successful-fetch is not written and
+    # last-error is not removed. Those two lines are the entire freshness signal.
     {
         printf 'timestamp=%s\n' "$(date -uIseconds)"
         printf 'rc=%s\n' "${upgrade_rc}"
         printf 'output<<EOF\n%s\nEOF\n' "${upgrade_out}"
     } > "${STATE_DIR}/last-error"
+    # A single greppable token on the console, so a failed fetch is visible to the check matrix
+    # from the serial log alone without a host->guest channel. See README, "What U5 must assert".
+    err "AUROS-UPDATE-FETCH-FAILED rc=${upgrade_rc}"
     err "fetch failed (rc=${upgrade_rc}). Staying on the current image and retrying at the next timer run."
     exit 0
 fi
 
 rm -f "${STATE_DIR}/last-error"
 date -uIseconds > "${STATE_DIR}/last-successful-fetch"
+log "AUROS-UPDATE-FETCH-OK"
 
 # ---------------------------------------------------------------------------------------------
 # 4. Did anything actually stage?
 # ---------------------------------------------------------------------------------------------
-staged_digest="$(bootc_json | json_get status.staged.image.imageDigest)"
+staged_digest="$(bootc_json | json_get status.staged.image.imageDigest || true)"
 if [[ -z "${staged_digest}" ]]; then
     log "already up to date; nothing staged."
     exit 0

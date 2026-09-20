@@ -10,6 +10,12 @@ name: probe
 on:
   workflow_dispatch:
 
+defaults:
+  run:
+    # D19: a pipe through tail/head/tee takes the LAST command\'s exit status, so a failing
+    # build can score as a passing step. That happened here once; it does not happen again.
+    shell: bash -euo pipefail {0}
+
 jobs:
   probe:
     runs-on: ubuntu-latest

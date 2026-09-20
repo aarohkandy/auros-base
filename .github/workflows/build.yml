@@ -386,7 +386,8 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ env.CHECKOUT_REF }}" }
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Reclaim disk
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
@@ -423,7 +424,8 @@ jobs:
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ env.CHECKOUT_REF }}" }
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Reclaim disk, enable KVM, install QEMU
         run: |
           df -h /
@@ -473,7 +475,8 @@ jobs:
       COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ env.CHECKOUT_REF }}" }
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Read signing/cosign.lock — the only place a cosign version is written
         id: cosign
@@ -610,7 +613,8 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ env.CHECKOUT_REF }}" }
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Read signing/cosign.lock
         id: cosign
         run: |
@@ -690,7 +694,8 @@ jobs:
       published: ${{ steps.promote.outputs.published }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ env.CHECKOUT_REF }}" }
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.META_REPO }}
