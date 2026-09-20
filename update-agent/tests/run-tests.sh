@@ -124,6 +124,13 @@ case "$1" in
     exit "$(cat "$S/bootc-status-rc" 2>/dev/null || echo 0)" ;;
   upgrade)
     [ -f "$S/bootc-upgrade-out" ] && cat "$S/bootc-upgrade-out"
+    # A queue of exit codes, one per call, so "fails then succeeds" is deterministic rather than
+    # a race against a background loop.
+    if [ -s "$S/bootc-upgrade-rc-seq" ]; then
+      rc=$(head -1 "$S/bootc-upgrade-rc-seq")
+      tail -n +2 "$S/bootc-upgrade-rc-seq" > "$S/.seq.tmp" && mv "$S/.seq.tmp" "$S/bootc-upgrade-rc-seq"
+      exit "${rc:-0}"
+    fi
     exit "$(cat "$S/bootc-upgrade-rc" 2>/dev/null || echo 0)" ;;
   --version) echo "bootc 1.16.10 (stub)"; exit 0 ;;
 esac
@@ -180,13 +187,21 @@ new_root() {
   printf '%s' "$r"
 }
 
-# run_script <script> <root> -> stdout+stderr on fd1, exit status in $RC
+# run_script <script> <root> -> echoes stdout+stderr, exit status in $RC
+#
+# NOTE, because it cost a debugging round: this CANNOT set RC from inside a command substitution.
+# `run_script ... >/dev/null; out="$RUN_OUT"` runs the function in a SUBSHELL, so an RC assigned in there is
+# discarded and every test reads the parent's stale 0 -- the same shape of bug as the fatal this
+# suite exists to catch: a status that looks captured and is not. Output goes through a file so
+# the status is assigned in this shell.
 RC=0
+RUN_OUT=""
 run_script() {
   local script=$1 root=$2; shift 2
-  local out
-  out="$(AUROS_TEST_ROOT="$root" bash "$script" "$@" 2>&1)"; RC=$?
-  printf '%s' "$out"
+  AUROS_TEST_ROOT="$root" bash "$script" "$@" > "$TMPROOT/.run.out" 2>&1
+  RC=$?
+  RUN_OUT="$(cat "$TMPROOT/.run.out")"
+  printf '%s' "$RUN_OUT"
 }
 
 epoch_iso() { # epoch_iso <seconds-ago>
@@ -206,7 +221,7 @@ r="$(new_root --healthy)"
 echo 125 > "$r/.stub/bootc-upgrade-rc"
 printf 'Source image rejected: invalid signature\n' > "$r/.stub/bootc-upgrade-out"
 printf '{"status":{"booted":{"image":{"imageDigest":"sha256:aaa"}}}}\n' > "$r/.stub/bootc-status.json"
-out="$(run_script "$AU" "$r")"
+run_script "$AU" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "A1 a rejected image exits 0 (U5: not a failed unit)" 0 "$RC"
 assert_has "A1 says so on the console" "AUROS-UPDATE-FETCH-FAILED rc=125" "$out"
 assert_file "A1 writes last-error" "$r/var/lib/auros/update-agent/last-error"
@@ -221,7 +236,7 @@ STALE="$(epoch_iso 2592000)"   # 30 days ago
 printf '%s\n' "$STALE" > "$r/var/lib/auros/update-agent/last-successful-fetch"
 echo 1 > "$r/.stub/bootc-upgrade-rc"
 printf '{"status":{"booted":{"image":{"imageDigest":"sha256:aaa"}}}}\n' > "$r/.stub/bootc-status.json"
-out="$(run_script "$AU" "$r")"
+run_script "$AU" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq "A2 still exits 0" 0 "$RC"
 assert_eq "A2 the 30-day-old stamp is UNCHANGED after a failed fetch" \
   "$STALE" "$(cat "$r/var/lib/auros/update-agent/last-successful-fetch")"
@@ -231,7 +246,7 @@ r="$(new_root --healthy)"
 printf 'boom\n' > "$r/var/lib/auros/update-agent/last-error"
 echo 0 > "$r/.stub/bootc-upgrade-rc"
 printf '{"status":{"booted":{"image":{"imageDigest":"sha256:aaa"}}}}\n' > "$r/.stub/bootc-status.json"
-out="$(run_script "$AU" "$r")"
+run_script "$AU" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "A3 exits 0" 0 "$RC"
 assert_has "A3 says the fetch succeeded" "AUROS-UPDATE-FETCH-OK" "$out"
 assert_file "A3 writes last-successful-fetch" "$r/var/lib/auros/update-agent/last-successful-fetch"
@@ -243,30 +258,48 @@ r="$(new_root --healthy)"
 echo 1 > "$r/.stub/bootc-status-rc"
 : > "$r/.stub/bootc-status.json"
 echo 0 > "$r/.stub/bootc-upgrade-rc"
-out="$(run_script "$AU" "$r")"
+run_script "$AU" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "A4 unreadable bootc status does not abort the script" 0 "$RC"
 assert_has "A4 degrades to 'unknown'" "booted digest before: unknown" "$out"
 assert_has "A4 still ran the upgrade" "AUROS-UPDATE-FETCH-OK" "$out"
 
-# A5 -- the retry path. First attempt fails, second succeeds: the stamp must move.
+# A5 -- the retry path. First attempt fails (uupd holding the bootc lock), second succeeds.
 r="$(new_root --healthy)"
-cat > "$STUBS/bootc-flaky-state" <<'X'
-X
-printf '{"status":{"booted":{"image":{"imageDigest":"sha256:aaa"}}}}\n' > "$r/.stub/bootc-status.json"
-echo 7 > "$r/.stub/bootc-upgrade-rc"
-( sleep 0 ) # keep shellcheck honest
-out="$(AUROS_TEST_ROOT="$r" bash -c '
-  # flip the stub to success the moment the first upgrade has been recorded
-  ( while :; do if grep -q "^upgrade" "$AUROS_TEST_ROOT/.stub/bootc-calls" 2>/dev/null; then echo 0 > "$AUROS_TEST_ROOT/.stub/bootc-upgrade-rc"; break; fi; done ) &
-  bash "$1" 2>&1' _ "$AU")"; RC=$?
+printf '{"status":{"booted":{"image":{"imageDigest":"sha256:aaa"}}},"staged":null}\n' > "$r/.stub/bootc-status.json"
+printf '7\n0\n' > "$r/.stub/bootc-upgrade-rc-seq"
+run_script "$AU" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "A5 retry path exits 0" 0 "$RC"
 assert_has "A5 announced the retry" "retrying in 60s" "$out"
+assert_has "A5 the second attempt succeeded" "AUROS-UPDATE-FETCH-OK" "$out"
+assert_file "A5 and the stamp moved" "$r/var/lib/auros/update-agent/last-successful-fetch"
+assert_nofile "A5 no last-error left behind" "$r/var/lib/auros/update-agent/last-error"
+assert_eq  "A5 bootc upgrade was called exactly twice" "2" \
+  "$(grep -c '^upgrade' "$r/.stub/bootc-calls")"
 
 # A6 -- source guard: the construct that caused the fatal must not come back.
-if grep -nE 'if[[:space:]]+![[:space:]]+[A-Za-z_][A-Za-z0-9_]*="\$\(' "$AU" >/dev/null; then
-  bad "A6 auros-update still captures an exit status through a negation (\$? is the NEGATION's status, always 0 on failure)"
+# It matches `if ! var="$(...)"` ONLY when a `$?` capture follows inside the branch. `if ! cmd`
+# used purely as a boolean is correct and common -- machine_in_use does it -- and flagging that
+# would make this guard noise, and a noisy guard gets switched off.
+if python3 - "$AU" <<'GUARD'
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+bad = []
+def code(x):            # the file DOCUMENTS the bug in a comment; do not flag the documentation
+    return not x.lstrip().startswith("#")
+for i, ln in enumerate(lines):
+    if code(ln) and re.search(r'if\s+!\s+[A-Za-z_][A-Za-z0-9_]*="\$\(', ln):
+        for j in range(i + 1, min(i + 5, len(lines))):
+            if code(lines[j]) and re.search(r'=\s*\$\?', lines[j]):
+                bad.append((i + 1, ln.strip(), j + 1, lines[j].strip()))
+                break
+for b in bad:
+    print("  line %d: %s\n    -> line %d: %s" % b, file=sys.stderr)
+sys.exit(1 if bad else 0)
+GUARD
+then
+  ok "A6 no 'if ! var=\$(...)' followed by a '\$?' capture remains in auros-update"
 else
-  ok "A6 no 'if ! var=\$(...)' status capture remains in auros-update"
+  bad "A6 auros-update captures an exit status through a negation -- there \$? is the NEGATION's status, which is 0 exactly when the command failed"
 fi
 if grep -n 'bootc_json | json_get' "$AU" | grep -qv '|| true'; then
   bad "A6 a 'bootc_json | json_get' substitution is missing '|| true'; under set -e + pipefail it aborts the unit"
@@ -283,7 +316,7 @@ HEALTHY='{"status":{"booted":{"image":{"imageDigest":"sha256:new"}},"rollback":{
 # B1 -- the whole point of the fatal: on a healthy machine this must be SILENT AND GREEN. Before
 # the fix it emitted a Python traceback and exited 1 on every boot of every machine forever.
 r="$(new_root --healthy)"; printf '%s' "$HEALTHY" > "$r/.stub/bootc-status.json"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B1 healthy machine exits 0" 0 "$RC"
 assert_not "B1 no Python traceback" "Traceback" "$out"
 assert_has "B1 reports the rollback deployment" "one rollback deployment retained" "$out"
@@ -291,7 +324,7 @@ assert_has "B1 reports the rollback deployment" "one rollback deployment retaine
 # B2 -- composefs (D9): rollback does not work there at all.
 r="$(new_root --healthy)"
 printf '%s' '{"status":{"booted":{"image":{"imageDigest":"sha256:new"},"composefs":true},"rollback":{"image":{}},"otherDeployments":[]}}' > "$r/.stub/bootc-status.json"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B2 composefs backend exits 1" 1 "$RC"
 assert_has "B2 names composefs and D9" "composefs/UKI backend (D9)" "$out"
 assert_not "B2 no Python traceback" "Traceback" "$out"
@@ -299,7 +332,7 @@ assert_not "B2 no Python traceback" "Traceback" "$out"
 # B3 -- deployments exist but none is the rollback: the real D10 failure.
 r="$(new_root --healthy)"
 printf '%s' '{"status":{"booted":{"image":{"imageDigest":"sha256:new"}},"rollback":null,"otherDeployments":[{"image":{}},{"image":{}}]}}' > "$r/.stub/bootc-status.json"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B3 3 deployments and no rollback exits 1" 1 "$RC"
 assert_has "B3 says there is nothing to roll back to" "NO rollback deployment" "$out"
 
@@ -307,13 +340,13 @@ assert_has "B3 says there is nothing to roll back to" "NO rollback deployment" "
 # puts a red line in the boot status of every machine on its first boot (D4: clean end to end).
 r="$(new_root --healthy)"
 printf '%s' '{"status":{"booted":{"image":{"imageDigest":"sha256:new"}},"rollback":null,"otherDeployments":[]}}' > "$r/.stub/bootc-status.json"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B4 never-updated machine exits 0" 0 "$RC"
 assert_has "B4 explains why" "has taken no update yet" "$out"
 
 # B5 -- garbage from bootc: a clear sentence, not a stack trace.
 r="$(new_root --healthy)"; printf 'not json at all' > "$r/.stub/bootc-status.json"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B5 unparseable status exits 1" 1 "$RC"
 assert_has "B5 says it could not parse" "could not parse" "$out"
 assert_not "B5 no Python traceback" "Traceback" "$out"
@@ -321,21 +354,21 @@ assert_not "B5 no Python traceback" "Traceback" "$out"
 # B6 -- the RUNTIME composefs detection the design was missing entirely.
 r="$(new_root --healthy)"; printf '%s' "$HEALTHY" > "$r/.stub/bootc-status.json"
 rm -f "$r/usr/lib/systemd/system/ostree-finalize-staged.service"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B6 missing ostree-finalize-staged.service exits 1" 1 "$RC"
 assert_has "B6 names the unit" "ostree-finalize-staged.service is absent" "$out"
 
 # B7 -- GRUB with no counter logic: rollback silently does not exist.
 r="$(new_root --healthy)"; printf '%s' "$HEALTHY" > "$r/.stub/bootc-status.json"
 printf 'menuentry stuff\n' > "$r/boot/grub2/grub.cfg"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B7 grub.cfg without boot_counter exits 1" 1 "$RC"
 assert_has "B7 gives the fix" "bootupctl update" "$out"
 
 # B8 -- upstream's default of 3 would make "fails twice" a lie.
 r="$(new_root --healthy)"; printf '%s' "$HEALTHY" > "$r/.stub/bootc-status.json"
 printf 'GREENBOOT_MAX_BOOT_ATTEMPTS=3\nDISABLED_HEALTHCHECKS=()\n' > "$r/etc/greenboot/greenboot.conf"
-out="$(run_script "$RW" "$r")"
+run_script "$RW" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "B8 MAX_BOOT_ATTEMPTS=3 exits 1" 1 "$RC"
 assert_has "B8 says what Auros ships" "Auros ships 2" "$out"
 
@@ -346,20 +379,20 @@ FR="$UA/greenboot/check/wanted.d/70-update-freshness.sh"
 
 # C1 -- first boot: no stamp yet, and none is due. Must be GREEN.
 r="$(new_root)"; printf '60.00 100.00\n' > "$r/proc/uptime"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C1 first boot exits 0" 0 "$RC"
 assert_has "C1 explains that none is due yet" "none is due yet" "$out"
 
 # C2 -- up for five days with no successful fetch: that machine is not being patched.
 r="$(new_root)"; printf '432000.00 100.00\n' > "$r/proc/uptime"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C2 five days up with no fetch exits 1" 1 "$RC"
 
 # C3 -- short uptime but the agent has known this machine for three days across reboots.
 r="$(new_root)"; printf '60.00 100.00\n' > "$r/proc/uptime"
 python3 -c 'import time,sys;open(sys.argv[1],"w").write(str(int(time.time())-259200)+"\n")' \
   "$r/var/lib/auros/update-agent/agent-first-seen"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C3 known for 3 days with no fetch exits 1 despite a 60s uptime" 1 "$RC"
 assert_has "C3 points at the timer" "bootc-fetch-apply-updates.timer" "$out"
 
@@ -367,27 +400,27 @@ assert_has "C3 points at the timer" "bootc-fetch-apply-updates.timer" "$out"
 r="$(new_root)"; printf '432000.00 100.00\n' > "$r/proc/uptime"
 epoch_iso 300 > "$r/var/lib/auros/update-agent/last-fetch-attempt"
 printf 'rc=125\noutput<<EOF\nSource image rejected\nEOF\n' > "$r/var/lib/auros/update-agent/last-error"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C4 tried-and-never-succeeded exits 1" 1 "$RC"
 assert_has "C4 distinguishes it from 'never tried'" "has never once succeeded" "$out"
 assert_has "C4 quotes the last error" "Source image rejected" "$out"
 
 # C5 -- a fetch yesterday is fine.
 r="$(new_root)"; epoch_iso 86400 > "$r/var/lib/auros/update-agent/last-successful-fetch"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C5 a one-day-old stamp exits 0" 0 "$RC"
 assert_has "C5 reports the age" "1 day(s) ago" "$out"
 
 # C6 -- twenty days is the condition this check exists for.
 r="$(new_root)"; epoch_iso 1728000 > "$r/var/lib/auros/update-agent/last-successful-fetch"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C6 a twenty-day-old stamp exits 1" 1 "$RC"
 assert_has "C6 says it may be drifting out of support" "drifting out of support" "$out"
 
 # C7 -- succeeded recently but failing right now: still green, but the failures are shown.
 r="$(new_root)"; epoch_iso 86400 > "$r/var/lib/auros/update-agent/last-successful-fetch"
 printf 'rc=125\n' > "$r/var/lib/auros/update-agent/last-error"
-out="$(run_script "$FR" "$r")"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C7 recent success with a current failure exits 0" 0 "$RC"
 assert_has "C7 but surfaces the current failure" "most recent fetch attempt FAILED" "$out"
 
@@ -400,7 +433,7 @@ SD="$r"
 
 # D1 -- first boot: no baseline, passes, and offers a candidate.
 r="$(new_root --healthy)"; printf 'flaky-sdcard.service\n' > "$r/.stub/failed-units"
-out="$(run_script "$NF" "$r")"
+run_script "$NF" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq   "D1 first boot passes" 0 "$RC"
 assert_file "D1 offers a candidate baseline" "$r/var/lib/auros/update-agent/failed-units.candidate"
 assert_has  "D1 the candidate is stamped with this boot" "boot-id 3f2b1c8a" \
@@ -410,7 +443,7 @@ assert_has  "D1 the candidate is stamped with this boot" "boot-id 3f2b1c8a" \
 # promotion and not a re-sample, the machine's failed set is CHANGED before green.d runs -- which
 # is exactly what "the desktop fails after multi-user.target" looks like.
 printf 'flaky-sdcard.service\nplasma-late.service\n' > "$r/.stub/failed-units"
-out="$(run_script "$GD" "$r")"
+run_script "$GD" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "D2 green.d exits 0" 0 "$RC"
 assert_has "D2 says it promoted the healthcheck's snapshot" "promoted the healthcheck's own snapshot" "$out"
 assert_eq  "D2 the baseline is the EARLY snapshot, not the late re-sample" \
@@ -422,19 +455,19 @@ assert_nofile "D2 the candidate is consumed" "$r/var/lib/auros/update-agent/fail
 # the same unit failing at CHECK time on the next boot is a regression and the boot goes red.
 printf '3f2b1c8a-0000-4000-8000-000000000002\n' > "$r/proc/sys/kernel/random/boot_id"   # next boot
 printf 'flaky-sdcard.service\nplasma-late.service\n' > "$r/.stub/failed-units"
-out="$(run_script "$NF" "$r")"
+run_script "$NF" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "D3 a newly failed unit is a regression -> exit 1" 1 "$RC"
 assert_has "D3 names it" "REGRESSED: plasma-late.service" "$out"
 
 # D4 -- the pre-existing failure alone is not a regression.
 printf 'flaky-sdcard.service\n' > "$r/.stub/failed-units"
-out="$(run_script "$NF" "$r")"
+run_script "$NF" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "D4 an already-failing unit is not a regression" 0 "$RC"
 
 # D5 -- the site's ignore list suppresses a known-bad unit.
 printf 'flaky-sdcard.service\nplasma-late.service\n' > "$r/.stub/failed-units"
 printf '# site\nplasma-late.service\n' >> "$r/etc/auros/update-agent/failed-units.ignore"
-out="$(run_script "$NF" "$r")"
+run_script "$NF" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq "D5 an ignored unit does not roll the machine back" 0 "$RC"
 
 # D6 -- a candidate from a different boot must not be promoted, and the fallback must announce
@@ -443,7 +476,7 @@ r="$(new_root --healthy)"
 printf '#boot-id 00000000-dead-4000-8000-000000000000\nold.service\n' \
   > "$r/var/lib/auros/update-agent/failed-units.candidate"
 printf 'late.service\n' > "$r/.stub/failed-units"
-out="$(run_script "$GD" "$r")"
+run_script "$GD" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "D6 stale candidate -> green.d exits 0" 0 "$RC"
 assert_has "D6 refuses to promote it" "not this boot's" "$out"
 assert_has "D6 and says the fallback is skewed" "FALLBACK" "$out"
@@ -453,7 +486,7 @@ assert_eq  "D6 fell back to sampling here" "late.service" "$(cat "$r/var/lib/aur
 r="$(new_root --healthy)"
 printf '#boot-id 3f2b1c8a-0000-4000-8000-000000000001\n' > "$r/var/lib/auros/update-agent/failed-units.baseline"
 : > "$r/.stub/failed-units"
-out="$(run_script "$NF" "$r")"
+run_script "$NF" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq "D7 a '#boot-id' line in a baseline is not counted as a failed unit" 0 "$RC"
 assert_has "D7 baseline reads as empty" "failed units at the last green boot: 0" "$out"
 
@@ -538,26 +571,34 @@ PY
     ok "G1 the old bug refreshes the stamp after a rejected image; test A2 catches it"
   fi
 
-  # G2: put the heredoc-over-pipe back and check B1 (the HEALTHY case) fails.
+  # G2: put the heredoc-over-pipe back, FAITHFULLY -- pipe form, json.load(sys.stdin), and no
+  # try/except -- and check that a HEALTHY machine goes red with the traceback the audit reported.
   cp "$RW" "$SC/60.sh"
-  python3 - "$SC/60.sh" <<'PY'
-import sys
-p=sys.argv[1]; s=open(p).read()
-s=s.replace('    python3 - "${status_file}" <<\'PY\' || rc=1',
-            '    printf \'%s\' "${status_json}" | python3 - <<\'PY\' || rc=1',1)
-s=s.replace('    with open(sys.argv[1]) as fh:\n        d = json.load(fh)',
-            '    d = json.load(sys.stdin)',1)
-open(p,"w").write(s)
-PY
+  python3 - "$SC/60.sh" <<'REINTRO'
+import sys, re
+p = sys.argv[1]; s = open(p).read()
+s = s.replace('    python3 - "${status_file}" <<\'PY\' || rc=1',
+              '    printf \'%s\' "${status_json}" | python3 - <<\'PY\' || rc=1', 1)
+s = re.sub(r'try:\n    with open\(sys\.argv\[1\]\) as fh:\n        d = json\.load\(fh\)\n'
+           r'except Exception as e:\n.*?\n    sys\.exit\(1\)\n',
+           'd = json.load(sys.stdin)\n', s, count=1, flags=re.S)
+open(p, "w").write(s)
+REINTRO
   r="$(new_root --healthy)"; printf '%s' "$HEALTHY" > "$r/.stub/bootc-status.json"
   o="$(AUROS_TEST_ROOT="$r" bash "$SC/60.sh" 2>&1)"; rc2=$?
   if [ "$rc2" -ne 0 ]; then
-    ok "G2 the old heredoc bug fails on a HEALTHY machine (exit ${rc2}); test B1 catches it"
+    ok "G2 the old heredoc bug goes RED on a HEALTHY machine (exit ${rc2}); test B1 catches it"
   else
     bad "G2 the old heredoc bug passed the healthy case -- test B1 would not have caught it"
   fi
-  case "$o" in *Traceback*) ok "G2 and it was a Python traceback in the boot status, as reported";;
-    *) bad "G2 expected a traceback from the reintroduced bug, got: $o";; esac
+  case "$o" in
+    *Traceback*) ok "G2 and it is a Python traceback in the boot status, exactly as the audit reported";;
+    *) bad "G2 expected a traceback from the faithfully reintroduced bug, got: $o";;
+  esac
+  case "$o" in
+    *"one rollback deployment retained"*) bad "G2 the reintroduced bug still evaluated its own tests";;
+    *) ok "G2 and neither the composefs test nor the rollback test ever ran";;
+  esac
 
   # G3: remove the empty resets from a copy of the timer drop-in and check E1 fails.
   cp "$TD" "$SC/timer.conf"

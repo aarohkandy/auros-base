@@ -286,6 +286,39 @@ install -d -m 0755 "$AUROS_STATE_DIR"
 printf '%s\n' "$MODE" > "$AUROS_MODE_STAMP"
 chmod 0444 "$AUROS_MODE_STAMP"
 
+# ── what this image CLAIMS, for the checks that are written against `open` ───────────────────────
+#
+# Spec 6A says the four modes are "declarative and switchable per-recipe", and a recipe selects one
+# with a single RUN line. That was true of the FILES and not of the CHECKS: B1 ("reaches a login
+# prompt") and B12 ("installing an application, connecting to Wi-Fi, adding a printer and changing
+# the language are each reachable through the GUI") are written against what an open image does, and
+# the publish gate requires every check for every digest with no per-mode clause. Kiosk has no login
+# prompt by design and locked deliberately removes three of B12's four tasks from the seat -- so
+# three of the four modes could never record a pass, and the subtraction product we sell had no path
+# to a customer.
+#
+# The fix has two halves and this is the half that lives here: every mode declares its own criteria
+# in its mode.env, and the ACTIVE mode's declaration is written to one canonical, machine-readable
+# file on the read-only /usr, where the runtime checks read it. /usr/libexec/auros/assert-zero-terminal
+# (check B12) reads this file and evaluates each task against what the mode claims, asserting
+# absence where the mode claims `none` -- so the check can still go red, in both directions.
+#
+# The other half belongs to the matrix harness and the publish gate, which are not this directory's
+# files. See policy/README.md, "Cross-layer assumptions", for the exact clause they need.
+{
+    printf '# Written by apply-policy at image build time. Read by the runtime checks.\n'
+    printf '# Source of truth: /usr/share/auros/policy/%s/mode.env. Do not edit here.\n' "$MODE"
+    printf 'AUROS_MODE=%s\n'                   "$MODE"
+    printf 'AUROS_MODE_B1=%s\n'                "${AUROS_MODE_B1:-login-prompt}"
+    printf 'AUROS_MODE_B12_INSTALL_APP=%s\n'   "${AUROS_MODE_B12_INSTALL_APP:-seat}"
+    printf 'AUROS_MODE_B12_WIFI=%s\n'          "${AUROS_MODE_B12_WIFI:-seat}"
+    printf 'AUROS_MODE_B12_PRINTER=%s\n'       "${AUROS_MODE_B12_PRINTER:-seat}"
+    printf 'AUROS_MODE_B12_LANGUAGE=%s\n'      "${AUROS_MODE_B12_LANGUAGE:-seat}"
+    printf 'AUROS_MODE_B12_DESKTOP=%s\n'       "${AUROS_MODE_B12_DESKTOP:-yes}"
+} > "$AUROS_POLICY_STATE/claims.env"
+chmod 0444 "$AUROS_POLICY_STATE/claims.env"
+log "claims recorded at $AUROS_POLICY_STATE/claims.env (B1=$AUROS_MODE_B1, B12 install=$AUROS_MODE_B12_INSTALL_APP wifi=$AUROS_MODE_B12_WIFI printer=$AUROS_MODE_B12_PRINTER language=$AUROS_MODE_B12_LANGUAGE)"
+
 # ── the report ───────────────────────────────────────────────────────────────────────────────────
 {
     printf '{\n'
@@ -301,6 +334,14 @@ chmod 0444 "$AUROS_MODE_STAMP"
     printf '  "admin_group": "aurosadmin",\n'
     printf '  "admin_group_members": "%s",\n' "$(auros_json_str "$(getent group aurosadmin | cut -d: -f4)")"
     printf '  "kiosk_compositor": "%s",\n' "$(auros_json_str "$COMPOSITOR")"
+    printf '  "kiosk_vt_switch": "%s",\n' "$(auros_json_str "$([ -r "$AUROS_POLICY_STATE/kiosk-vt-switch" ] && cat "$AUROS_POLICY_STATE/kiosk-vt-switch" || echo "")")"
+    printf '  "claims": {"B1": "%s", "B12_install_app": "%s", "B12_wifi": "%s", "B12_printer": "%s", "B12_language": "%s", "B12_desktop": "%s"},\n' \
+           "$(auros_json_str "${AUROS_MODE_B1:-}")" \
+           "$(auros_json_str "${AUROS_MODE_B12_INSTALL_APP:-}")" \
+           "$(auros_json_str "${AUROS_MODE_B12_WIFI:-}")" \
+           "$(auros_json_str "${AUROS_MODE_B12_PRINTER:-}")" \
+           "$(auros_json_str "${AUROS_MODE_B12_LANGUAGE:-}")" \
+           "$(auros_json_str "${AUROS_MODE_B12_DESKTOP:-}")"
     printf '  "usr_bytes_before": %s,\n' "${USR_BEFORE:-0}"
     printf '  "usr_bytes_after": %s,\n' "${USR_AFTER:-0}"
     printf '  "usr_bytes_reclaimed": %s,\n' "$(( ${USR_BEFORE:-0} - ${USR_AFTER:-0} ))"

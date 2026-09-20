@@ -9,12 +9,27 @@
 #   * This workflow has NO `workflow_dispatch:` trigger. There is no button.
 #   * Its `workflow_call:` accepts NO `inputs:` and NO `secrets:`. A caller cannot parameterise it.
 #   * Nothing in this file reads an input, a repository variable, or an environment variable to decide
-#     whether to publish. The `publish` job's only gate is the exit status of `tools/gate.mjs`.
+#     whether to publish. The `publish` job's only gate is the exit status of
+#     `node meta/tools/gate.mjs <digest> --image <image>`, which is the ONE command-line form that
+#     program has. There are no subcommands and no `--ledger`: the ledger path is derived by gate.mjs
+#     from its own location, precisely so that no line in this file can point it somewhere friendlier.
+#   * RECORDING AND GATING ARE DIFFERENT JOBS WITH DIFFERENT PERMISSIONS, and that is the load-bearing
+#     part. `record` holds `contents: read` and no registry credential; it writes the pass and pushes
+#     it to the control repo. `publish` holds `packages: write`, never sees the fragments or
+#     results.json, and gates on a ledger it re-fetches from `origin/main`. An earlier version of this
+#     file wrote the pass and read it back nine lines later in the same job, off the same disk — the
+#     evidence was manufactured by the job being gated, and `--ledger` "pointing at the durable file"
+#     named the file the previous step had just written. That is a formality, not a gate.
+#   * The gate step is preceded by a NEGATIVE CONTROL that asks the same binary about a digest nobody
+#     recorded and requires exit 1. If the gate says yes to that, or cannot parse the invocation at
+#     all, the run stops before the tag moves. D19: a step that cannot go red is not a check, so this
+#     one goes red on demand, every run.
 #   * No job and no step sets `continue-on-error` (the only occurrence of that string in this file
 #     is this sentence). A step that cannot fail is not a check — D19.
 #   * Every job that could publish `needs:` the gate job, so a skipped or failed gate skips publish.
 #   * The gate is FAIL-CLOSED: a missing gate.mjs, a missing ledger, a missing harness, an unreadable
-#     results.json and an unparseable fragment all stop the publish. Absence of evidence is a fail.
+#     results.json, an unparseable fragment, an unpushed ledger row and a ledger commit that is not an
+#     ancestor of main all stop the publish. Absence of evidence is a fail.
 #
 #   I checked this file for a bypass path and there is none. If you are adding one, you are changing
 #   what the company sells — take it to DECISIONS.md first.
@@ -24,6 +39,14 @@
 #   stage-<run_id>   pushed early, UNSIGNED, so the parallel check jobs have something to pull.
 #                    A customer machine cannot install it: D8's in-image policy is sigstoreSigned for
 #                    the whole `ghcr.io/aarohkandy` scope, and an unsigned image fails that policy.
+#                    SAID PLAINLY, because it is easy to read the paragraph above as a guarantee it is
+#                    not: this push has no `if:` guard, so a same-repo pull request also pushes an
+#                    unsigned, as-yet-unchecked image into the customer-facing package, before the
+#                    static and boot jobs have run. Nothing can install it and nothing follows the
+#                    tag, but it is there and it accumulates until the cleanup job can delete it. The
+#                    fix that removes the accumulation rather than apologising for it is to stage into
+#                    a separate package; that is a change to how the check jobs are fed and is tracked
+#                    rather than half-done here.
 #   <digest>         signed once static + boot are green, because U1-U5 need a real signature to
 #                    exercise the real enforcement path. A signed digest with no tag pointing at it is
 #                    not reachable by any machine that has not been hand-fed the digest.
@@ -701,21 +724,33 @@ jobs:
         with: { name: fragments-update, path: fragments/, if-no-files-found: error }
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
-  publish:
-    name: publish · gated
+  # record — the job that WRITES the evidence. It cannot publish: no `packages: write`, no registry
+  # login, no cosign key, no skopeo. Its only product is a commit in the meta/control repo.
+  #
+  # WHY THIS IS A SEPARATE JOB, because it looks like ceremony and is not.
+  # Recording and gating used to be two steps of the publish job, nine lines apart: step one wrote
+  # the pass into `meta/attest/passed-digests.tsv`, step two read that same file, on the same runner,
+  # out of the same checkout, and called it the gate. The evidence was manufactured by the job being
+  # gated. Passing `--ledger` changed nothing, because it named the file the previous step had just
+  # written. A gate whose input its own subject produces is a formality with a green tick on it.
+  #
+  # So: this job writes, and cannot publish. The publish job reads from a FRESH clone of the control
+  # repo and cannot write. Neither can do the other's half, and the evidence has to survive a push
+  # and a fetch in between — which is also the only form of it that is still there tomorrow.
+  record:
+    name: record · write the pass to the control repo
     needs: [plan, build, static, boot, sign, update]
     if: needs.plan.outputs.publishable == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     permissions:
       contents: read
-      packages: write
+      # DELIBERATELY NO `packages: write`. This job must not be able to reach the registry at all.
     outputs:
-      published: ${{ steps.promote.outputs.published }}
+      ledger_commit: ${{ steps.commit.outputs.ledger_commit }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.CHECKOUT_REF }}
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.META_REPO }}
@@ -761,26 +796,196 @@ jobs:
           echo "--- every check, flat ---"
           jq -r '.profiles[] | .profile as $p | .checks[] | "\($p)\t\(.id)\t\(.status)"' results.json | sort
 
+      - name: The assembled verdict must be a pass, asserted here and not only inside the recorder
+        run: |
+          # Two independent readers of the same document. record-pass.mjs RECOMPUTES the verdict and
+          # ignores this field — which is right, and which also means nothing was ever asserting the
+          # field itself. If these two ever disagree, one of them is broken and we want to know at
+          # the moment it happens rather than to discover which one we were trusting.
+          if ! jq -e '.verdict == "pass"' results.json >/dev/null; then
+            echo "::error::the assembled results.json says verdict=$(jq -r .verdict results.json). Nothing is recorded and nothing is published."
+            jq -r '.profiles[] | .profile as $p | .checks[] | select(.status != "pass") | "  \($p)\t\(.id)\t\(.status)\t\(.detail // "")"' results.json
+            exit 1
+          fi
+          # …and a document with no checks in it would satisfy `all` vacuously, so count them.
+          N=$(jq '[.profiles[].checks[]] | length' results.json)
+          P=$(jq '.profiles | length' results.json)
+          echo "assembled: ${P} profile(s), ${N} check record(s), verdict=pass"
+          [ "$N" -ge 28 ] || { echo "::error::only ${N} check records. jq's all() on an empty list is true, so this would not be evidence of anything."; exit 1; }
+
+      - name: Put the matrix definition where the gate looks for it
+        run: |
+          # tools/gate.mjs resolves its paths from ITS OWN location, never from the working directory
+          # — which is the property that stops the ledger being redirected by an argument. The side
+          # effect is that it looks for the matrix at meta/auros-base/matrix/, and auros-base is
+          # gitignored from the meta repo (D6), so driftCheck() finds nothing and returns "no drift"
+          # without ever comparing anything. Copying the real matrix in makes that check live: the
+          # gate now actually compares checks.yaml and profiles.yaml against its own constants and
+          # refuses every digest when they disagree.
+          mkdir -p meta/auros-base/matrix
+          cp matrix/checks.yaml matrix/profiles.yaml meta/auros-base/matrix/
+          echo "matrix_version in checks.yaml: $(grep -E '^matrix_version:' matrix/checks.yaml)"
+
       - name: Record the pass in the ledger
         run: |
-          # gate.mjs recomputes the verdict from the checks array and ignores results.json's own
-          # `verdict` field, because a field that says "pass" is exactly what a broken or malicious
-          # harness would write. If it disagrees, it writes nothing.
-          node meta/tools/gate.mjs record \
+          # record-pass.mjs recomputes the verdict from the checks array, derives the bound profile
+          # set itself rather than trusting the harness's claim, imports the ledger's column set from
+          # tools/gate.mjs, and shows the row to gate.decide() on a scratch copy before appending.
+          # If the gate would refuse the row, nothing is written.
+          node matrix/run/record-pass.mjs \
             --results results.json \
-            --ledger  meta/attest/passed-digests.tsv \
-            --checks  matrix/checks.yaml
+            --ledger  "$PWD/meta/attest/passed-digests.tsv"
+
+          # Belt and braces: the row must actually be in the file now.
+          grep -qF "${{ needs.build.outputs.digest }}" meta/attest/passed-digests.tsv || {
+            echo "::error::record-pass.mjs exited 0 but wrote no row for ${{ needs.build.outputs.digest }}"; exit 1; }
+
+      - name: Commit the row to the control repo — this is the durable evidence
+        id: commit
+        env:
+          DISPATCH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          # THIS IS NOW FATAL, AND THAT IS A CHANGE. It used to end in "never fail the build over it",
+          # which was defensible only while the publish gate read the local file — i.e. while the
+          # push was decoration. Now the publish job reads the ledger back out of this repository, so
+          # a row that was not pushed is a row no gate will ever see, and a publish that proceeded
+          # anyway would be a publish gated on nothing.
+          #
+          # D18: the default GITHUB_TOKEN is issued for auros-base and cannot write to
+          # aarohkandy/auros. A PAT or GitHub App token is required. Until that secret exists, this
+          # pipeline builds, tests, signs — and does not publish. That is the intended behaviour, not
+          # an outage: see BLOCKED.md B2 and signing/README.md "what is not yet measured".
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::error::AUROS_DISPATCH_TOKEN is not set, so the pass cannot be written to ${META_REPO}."
+            echo "The publish gate reads the COMMITTED ledger from a fresh clone of that repository —"
+            echo "deliberately, so that the job producing the evidence is not the job consuming it."
+            echo "Without the token there is no durable evidence, so there is no publish. (D18, BLOCKED.md B2)"
+            exit 1
+          fi
+          cd meta
+          git config user.name  "auros-ci"
+          git config user.email "auros-ci@users.noreply.github.com"
+          git add attest/passed-digests.tsv
+          if git diff --cached --quiet; then
+            echo "ledger already contains this row at $(git rev-parse HEAD); nothing to commit"
+          else
+            git commit \
+              -m "attest: ${DIGEST} passed matrix v${{ needs.plan.outputs.matrix_version }}" \
+              -m "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          REMOTE="https://x-access-token:${DISPATCH_TOKEN}@github.com/${META_REPO}.git"
+          # A concurrent run may have appended its own row. Rebase and retry rather than clobbering
+          # someone else's evidence; give up loudly rather than forcing.
+          pushed=0
+          for attempt in 1 2 3; do
+            if git push "$REMOTE" HEAD:main; then pushed=1; break; fi
+            echo "push rejected (attempt ${attempt}); rebasing onto origin/main and retrying"
+            git fetch "$REMOTE" main && git rebase FETCH_HEAD || { git rebase --abort || true; break; }
+          done
+          [ "$pushed" = "1" ] || { echo "::error::could not push the ledger row to ${META_REPO}. No durable evidence, no publish."; exit 1; }
+          SHA=$(git rev-parse HEAD)
+          echo "ledger_commit=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "ledger row committed as ${SHA} on ${META_REPO}@main"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ github.run_id }}
+          path: |
+            results.json
+            meta/attest/passed-digests.tsv
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  # publish — the job that READS the evidence and moves the tag. It holds `packages: write` and no
+  # way to write the ledger: it never downloads the fragments, never sees results.json, and the only
+  # copy of the control repo it has is a fresh clone it re-fetches from origin before gating.
+  publish:
+    name: publish · gated on the committed ledger
+    needs: [plan, build, record]
+    if: needs.plan.outputs.publishable == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      published: ${{ steps.promote.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.CHECKOUT_REF }}" }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.META_REPO }}
+          path: meta
+          ref: main
+
+      - name: Re-fetch the ledger from origin and prove it carries the recorded commit
+        env:
+          LEDGER_COMMIT: ${{ needs.record.outputs.ledger_commit }}
+        run: |
+          # `actions/checkout` above already cloned at main, but it may have been scheduled before
+          # the record job's push landed. Fetch again and hard-reset, so the bytes the gate reads are
+          # unambiguously what is on the default branch of the control repo right now.
+          cd meta
+          git fetch --no-tags origin main
+          git reset --hard FETCH_HEAD
+          echo "meta is at $(git rev-parse HEAD) on ${META_REPO}@main"
+
+          [ -n "${LEDGER_COMMIT:-}" ] || { echo "::error::the record job reported no ledger commit"; exit 1; }
+          # `merge-base --is-ancestor` answers the question that matters: is the commit that carries
+          # this digest's row actually reachable from the branch everyone else reads?
+          if ! git merge-base --is-ancestor "$LEDGER_COMMIT" HEAD; then
+            echo "::error::${LEDGER_COMMIT} (the commit that recorded this pass) is not an ancestor of ${META_REPO}@main."
+            echo "Either the push did not land or the branch moved under us. The gate is not run against evidence we cannot locate."
+            exit 1
+          fi
+          echo "ledger commit ${LEDGER_COMMIT} is on main"
+
+      - name: Put the matrix definition where the gate looks for it
+        run: |
+          # Same reason as in the record job: without this, gate.mjs's drift check finds no matrix
+          # and silently returns "no drift", and a gate whose check cannot fail is not a check (D19).
+          mkdir -p meta/auros-base/matrix
+          cp matrix/checks.yaml matrix/profiles.yaml meta/auros-base/matrix/
+
+      - name: Negative control — the gate must still refuse a digest nobody recorded
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+        run: |
+          # D19: "a step that cannot fail is not a check. When adding any gate, the first question is
+          # what would make this go red." This is that question, answered on every single publish,
+          # against the same binary and the same argv shape the real gate uses one step below.
+          #
+          # It catches two different disasters:
+          #   exit 0 — the gate allows a digest with no recorded pass. The gate is broken open.
+          #   exit 2 — the gate could not parse this invocation. That is how the previous version of
+          #            this workflow failed: it called `gate.mjs check --digest …`, a subcommand that
+          #            has never existed, so the step died before the gate ran and the publish was
+          #            fail-closed only by accident. An accident is not a gate.
+          SENTINEL="sha256:$(printf '0%.0s' $(seq 1 64))"
+          set +e
+          node meta/tools/gate.mjs "$SENTINEL" --image "$IMAGE"
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "negative control OK — the gate refused an unrecorded digest, exit 1" ;;
+            0) echo "::error::THE GATE ALLOWED A DIGEST THAT WAS NEVER TESTED (${SENTINEL}). Refusing to publish anything."; exit 1 ;;
+            *) echo "::error::the gate exited ${rc} on a well-formed invocation — it could not decide, so it has not passed anything. Check that this workflow and tools/gate.mjs agree on the command line."; exit 1 ;;
+          esac
 
       - name: THE GATE
+        env:
+          IMAGE: ${{ needs.plan.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
         run: |
-          # Spec §4.3. There is no flag here, and there is nothing upstream of this step that can set
-          # one. If gate.mjs exits non-zero, or is missing, or throws, the tag does not move.
-          node meta/tools/gate.mjs check \
-            --digest  '${{ needs.build.outputs.digest }}' \
-            --results results.json \
-            --ledger  meta/attest/passed-digests.tsv \
-            --checks  matrix/checks.yaml
-          echo "gate: PASS for ${{ needs.build.outputs.digest }}"
+          # Spec §4.3. One command, no flags that can change its answer, reading a ledger whose path
+          # gate.mjs derives from its own location rather than from anything on this line. The
+          # evidence it reads was committed by a different job, with different permissions, and
+          # fetched from origin in the step above. If this exits non-zero the tag does not move.
+          node meta/tools/gate.mjs "$DIGEST" --image "$IMAGE"
+          echo "gate: PASS for ${DIGEST}"
 
       - name: Promote to :hardened
         id: promote
@@ -798,37 +1003,6 @@ jobs:
           skopeo inspect --no-tags "docker://${IMAGE}:hardened" | jq -r '"hardened now points at \(.Digest)"'
           echo "published=true" >> "$GITHUB_OUTPUT"
 
-      - name: Carry the ledger back to the control repo, or say why not
-        env:
-          DISPATCH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN }}
-        run: |
-          # D18's wall again: the default GITHUB_TOKEN is issued for THIS repository and cannot write
-          # to aarohkandy/auros. With a PAT the ledger is durable; without one it is an artifact on
-          # this run, which is still auditable but does not accumulate. Never fail the build over it.
-          if [ -z "${DISPATCH_TOKEN:-}" ]; then
-            echo "::notice::AUROS_DISPATCH_TOKEN absent — the ledger row for this digest lives only as a build artifact (BLOCKED.md B2)."
-            exit 0
-          fi
-          cd meta
-          git config user.name  "auros-ci"
-          git config user.email "auros-ci@users.noreply.github.com"
-          git add attest/passed-digests.tsv
-          if git diff --cached --quiet; then echo "ledger unchanged"; exit 0; fi
-          git commit \
-            -m "attest: ${{ needs.build.outputs.digest }} passed matrix v${{ needs.plan.outputs.matrix_version }}" \
-            -m "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          git push "https://x-access-token:${DISPATCH_TOKEN}@github.com/${META_REPO}.git" HEAD:main \
-            || echo "::warning::could not push the ledger to ${META_REPO}; the artifact on this run is the record"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: results-${{ github.run_id }}
-          path: |
-            results.json
-            meta/attest/passed-digests.tsv
-          if-no-files-found: warn
-
       - name: Summary
         if: always()
         env:
@@ -841,29 +1015,59 @@ jobs:
             echo "- digest: \`${{ needs.build.outputs.digest }}\`"
             echo "- upstream base: \`${{ needs.plan.outputs.base_ref }}\`"
             echo "- matrix version: ${{ needs.plan.outputs.matrix_version }}"
-            echo "- gate: \`tools/gate.mjs check\` exited 0"
+            echo "- evidence: \`${META_REPO}@${{ needs.record.outputs.ledger_commit }}\` — committed by the \`record\` job, fetched from origin by this one"
+            echo "- gate: \`node meta/tools/gate.mjs <digest> --image <image>\` exited 0, after refusing a control digest"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   cleanup:
     name: cleanup staging tags
-    needs: [plan, build, static, boot, sign, update, publish]
+    needs: [plan, build, static, boot, sign, update, record, publish]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions: {}
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - name: Best effort, never fatal
+      - name: Delete this run's staging tag
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN || github.token }}
+          IMAGE: ${{ needs.plan.outputs.image }}
         run: |
-          # The staging tags are unsigned and un-followed, so leaving them costs nothing but clutter.
-          # GITHUB_TOKEN has `packages: write` but NOT `delete:packages`, so this usually cannot
-          # succeed — it is here so that the day a token can, it does. It must never fail the run.
-          for T in "${STAGE_TAG}"; do
-            echo "would remove tag ${T}"
+          # THIS USED TO BE `echo "would remove tag ${T}"`, which is not a cleanup job, it is a
+          # picture of one. D19: a step that cannot fail is not a check, and a step that cannot act
+          # is not an action. So it now actually calls the API, reports exactly what the registry
+          # said, and leaves a warning in the run when it could not delete — rather than a notice
+          # asserting an outcome nobody attempted.
+          PKG="${IMAGE##*/}"                 # ghcr.io/<org>/<name> -> <name>
+          ORG="${IMAGE%/*}"; ORG="${ORG##*/}"
+
+          # Find the package version whose tags include our staging tag. A version id is required;
+          # GHCR has no delete-by-tag endpoint.
+          if ! gh api --paginate \
+                "/orgs/${ORG}/packages/container/${PKG}/versions" > /tmp/versions.json 2>/tmp/versions.err \
+             && ! gh api --paginate \
+                "/users/${ORG}/packages/container/${PKG}/versions" > /tmp/versions.json 2>>/tmp/versions.err; then
+            echo "::warning::could not list versions of ${IMAGE}; the staging tag ${STAGE_TAG} stays. It is unsigned and cannot be installed."
+            sed -n '1,20p' /tmp/versions.err
+            exit 0
+          fi
+
+          ID=$(jq -r --arg t "${STAGE_TAG}" '.[] | select(.metadata.container.tags // [] | index($t)) | .id' /tmp/versions.json | head -1)
+          if [ -z "${ID:-}" ] || [ "$ID" = "null" ]; then
+            echo "no package version is tagged ${STAGE_TAG} — nothing to delete"
+            exit 0
+          fi
+
+          for SCOPE in "orgs/${ORG}" "users/${ORG}"; do
+            if gh api -X DELETE "/${SCOPE}/packages/container/${PKG}/versions/${ID}" >/dev/null 2>/tmp/del.err; then
+              echo "deleted ${IMAGE}:${STAGE_TAG} (version ${ID})"
+              exit 0
+            fi
           done
-          echo "::notice::staging tags stay until a token with delete:packages exists; they are unsigned and cannot be installed."
+          echo "::warning::could not delete ${IMAGE}:${STAGE_TAG} (version ${ID}) — the token lacks delete:packages. The tag stays; it is unsigned and cannot be installed, but it does accumulate."
+          sed -n '1,20p' /tmp/del.err
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   keep-nightly-enabled:

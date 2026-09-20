@@ -303,15 +303,34 @@ poll_until "$U4_DEADLINE" "an update attempt against the unsigned image" -- bash
   grep -qaE "Source image rejected|signature|Signature|SignatureValidationFailed|policy|invalid" "$1" \
   || grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$SERIAL" "$DIG_D" || true
 NOW_U4=$(last_status_field "$AGENT" digest)
-SIG_EVIDENCE=$(grep -aoE 'Source image rejected[^"]*|[Ss]ignature verification failed[^"]*|invalid signature[^"]*|SignatureValidationFailed[^"]*' "$SERIAL" 2>/dev/null | head -1)
+# The message containers/image emits is "Source image rejected: <reason>", where <reason> is one of
+# "A signature was required, but no signature exists", "Signature for identity … is not accepted", or
+# "invalid signature". The last two alternatives catch the reason alone, in case the prefix wrapped.
+SIG_EVIDENCE=$(grep -aoE 'Source image rejected[^"]*|SignatureValidationFailed[^"]*|[Ss]ignature verification failed[^"]*|invalid signature[^"]*|A signature was required, but no signature exists[^"]*|Signature for identity[^"]*is not accepted[^"]*' "$SERIAL" 2>/dev/null | head -1)
 if [ "$NOW_U4" = "$DIG_D" ]; then
   record U4 fail "the VM BOOTED the unsigned image ${DIG_D}. Signature enforcement is not in force. This is exactly the D8 failure: deriving from Aurora leaves a docker \"\" insecureAcceptAnything catch-all, so enforcement succeeds while verifying nothing."
 elif [ "$NOW_U4" != "$PRE_U4" ]; then
   record U4 fail "the booted digest changed from ${PRE_U4} to ${NOW_U4} while an unsigned image was on offer — not to the unsigned image, but the machine did not hold still either"
-elif [ -z "$SIG_EVIDENCE" ] && [ "$(last_status_field "$AGENT" signature)" != containerPolicy ]; then
-  record U4 fail "the booted digest is unchanged (${PRE_U4}), but nothing in the console says the image was rejected for its SIGNATURE. An update that failed because the registry was slow looks identical to one that was refused on policy, and only one of those is the property U4 claims. Refusing to score this as a pass on the strength of an absence."
+elif [ -z "$SIG_EVIDENCE" ]; then
+  # SIGNATURE EVIDENCE IS MANDATORY. There used to be a second clause here — `&& [ "$(last_status_field
+  # "$AGENT" signature)" != containerPolicy ]` — which meant that with NO rejection message on the
+  # console but a booted image whose `signature` field read `containerPolicy`, control fell through to
+  # the pass branch and U4 was recorded PASS with a detail string that literally admitted
+  # "<none on console, but the booted image is still the policy-verified one>".
+  #
+  # `signature=containerPolicy` on the BOOTED deployment is a fact about the image that was installed
+  # EARLIER in this run. It says nothing whatever about why image D did not install. A registry
+  # timeout, a stalled pull, or the update timer simply not firing inside the 600 s deadline all
+  # produce exactly that state — and all of them would have scored as a U4 pass. That was the branch
+  # in which the only check that proves signing works passed vacuously, which is precisely the
+  # failure D8 says U4 exists to rule out.
+  #
+  # The booted image's own signature source is U1's assertion, and it is already made there (U1, above:
+  # the update is a fail if bootc reports anything other than signature=containerPolicy). It is not a
+  # substitute for observing a refusal, so it is no longer allowed to stand in for one.
+  record U4 fail "the booted digest is unchanged (${PRE_U4}), but nothing in the console says the image was rejected for its SIGNATURE. An update that failed because the registry was slow, or because the timer never fired inside ${U4_DEADLINE}s, looks identical to one that was refused on policy — and only one of those is the property U4 claims. Refusing to score this as a pass on the strength of an absence. Read logs/update-serial.log; if the refusal is there under wording this harness does not match, widen SIG_EVIDENCE rather than widening the pass branch."
 else
-  record U4 pass "unsigned image ${DIG_D} refused, booted digest UNCHANGED at ${PRE_U4}, still admitted under signature=$(last_status_field "$AGENT" signature); the guest gave a signature reason: ${SIG_EVIDENCE:-<none on console, but the booted image is still the policy-verified one>}"
+  record U4 pass "unsigned image ${DIG_D} refused, booted digest UNCHANGED at ${PRE_U4}; the guest gave a signature reason on the console: ${SIG_EVIDENCE}"
 fi
 # The criterion also names `bootc upgrade` explicitly. The guest agent cannot be asked to run it
 # (there is no host->guest channel by design), so the unattended timer path above is what we assert.

@@ -22,9 +22,19 @@
 #      evidence is reported but never counted toward the verdict, because a verdict that includes
 #      whatever happened to be green is not a verdict.
 #
-# WHAT THIS WORKFLOW PUBLISHES: ephemeral `gate1-<run_id>` tags only. It never writes `:hardened`,
-# and there is an assertion at the top that fails the run if that ever changes. Those tags are a test
-# fixture; the tag customers follow is moved only by build.yml, only behind tools/gate.mjs.
+# WHAT THIS WORKFLOW PUBLISHES: ephemeral `gate1-<run_id>` tags in a SEPARATE repository,
+# `<baseImage>-fixtures`, signed with a key generated for this run. It never writes `:hardened` and
+# never writes the production repository at all; both are asserted at the end of the job.
+#
+# The earlier version said "ephemeral tags only" and was wrong in the way that matters. The tag was
+# ephemeral; the SIGNATURE was not. It signed untested digests in `ghcr.io/<org>/auros-base` with the
+# production key, and signing/policy.json uses "signedIdentity": {"type":"matchRepository"} — so
+# every one of those digests was something a customer's laptop would happily install. The only thing
+# keeping them off machines was that machines follow `:hardened`, which is tag discipline, i.e. the
+# "convention, not mechanism" spec §3 forbids. A separate repository means matchRepository cannot
+# carry a fixture back into production, and a run-scoped key means the production credential is never
+# on this runner. What is lost: this run does not exercise the production key material, only the
+# mechanism. That is stated in the report rather than glossed.
 #
 # D19: pipefail everywhere.
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -65,7 +75,10 @@ jobs:
       # No `id-token: write`. Signing here is KEYED (signing/policy.json uses keyPath), so there is
       # no OIDC token to mint and no reason to hold the permission to mint one.
     env:
-      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+      # EMPTY, not `secrets.COSIGN_PASSWORD`. This workflow signs with a key it mints for the run
+      # (see "A RUN-SCOPED signing key" below), so the production signing credential is not present
+      # on this runner at all — which is the only way to be sure it cannot sign a fixture.
+      COSIGN_PASSWORD: ''
     steps:
       # ─────────────────────────────────────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
@@ -116,6 +129,18 @@ jobs:
           echo "image=$IMAGE"       >> "$GITHUB_OUTPUT"
           echo "recipes=$RECIPES"   >> "$GITHUB_OUTPUT"
           echo "mirror=${REG}/${ORG}/auros-upstream-mirror" >> "$GITHUB_OUTPUT"
+
+          # ── FIXTURES GO IN THEIR OWN REPOSITORY, AND THIS IS NOT COSMETIC ───────────────────────
+          # This workflow pushes ephemeral `gate1-<run_id>` tags, and the tag is indeed ephemeral.
+          # The SIGNATURE is not. signing/policy.json uses "signedIdentity": {"type":"matchRepository"},
+          # so a signature valid for a digest in `auros-base` is valid for THAT REPOSITORY — which
+          # means a fixture signed into the production repository is a digest every machine in the
+          # field will accept, having never run the check matrix. The only thing then keeping it off
+          # a laptop is that laptops follow `:hardened`, i.e. tag discipline — "convention, not
+          # mechanism", which spec §3 forbids in exactly these words.
+          # So fixtures live in a different repository, where matchRepository cannot carry them back.
+          echo "fixture_image=${IMAGE}-fixtures" >> "$GITHUB_OUTPUT"
+          echo "fixtures publish to ${IMAGE}-fixtures; ${IMAGE} is never written by this workflow"
           mkdir -p "$GITHUB_WORKSPACE/g1"
           : > "$GITHUB_WORKSPACE/g1/report.md"
           : > "$GITHUB_WORKSPACE/g1/verdicts.tsv"
@@ -141,29 +166,42 @@ jobs:
           ssh-keygen -t ed25519 -N '' -f /tmp/g1key -C gate1 >/dev/null
           df -h /
 
-      - name: The signing key the image actually trusts
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      - name: A RUN-SCOPED signing key, baked into the fixture image
         run: |
-          # KEYED, NOT KEYLESS. `signing/policy.json` enforces
+          # THIS WORKFLOW NO LONGER TOUCHES THE PRODUCTION SIGNING KEY, and that is the point.
+          #
+          # It used to hold `secrets.COSIGN_PRIVATE_KEY` and run `cosign sign --key /tmp/auros.key`
+          # against digests in `ghcr.io/<org>/auros-base` — the production repository — for images
+          # that had never run the check matrix. With "signedIdentity": {"type":"matchRepository"},
+          # a production-key signature on ANY digest in that repository is valid for that repository.
+          # The tags were ephemeral; the signatures were permanent and universally trusted. Nothing
+          # but tag discipline stood between those digests and a school's laptop, and tag discipline
+          # is a convention, which spec §3 says is not allowed to be the mechanism.
+          #
+          # What Gate 1 actually needs to prove is the MECHANISM: that an image carrying key K, with
+          # our policy.json and registries.d, accepts an image signed by K and refuses one that is
+          # unsigned or signed by anyone else. A key minted for this run proves exactly that. It does
+          # not exercise the production key material, and the report says so rather than implying it.
+          #
+          # KEYED, NOT KEYLESS, still: policy.json enforces
           # sigstoreSigned + keyPath=/usr/lib/pki/containers/auros.pub, so a keyless signature
           # carrying a Fulcio certificate is one the VM will not match. Signing keyless here would
           # make Leg A fail (the good image refused) and Leg B "pass" for the wrong reason — the
           # worst possible combination, because the report would read as a working lock.
-          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
-            echo "::error::COSIGN_PRIVATE_KEY is not set. Gate 1 cannot be evaluated: every image would be unsigned, Leg A would fail and Leg B would pass vacuously. See auros-base/signing/keys/README.md — minting the keypair is a §9-reserved human action."
-            exit 1
-          fi
-          printf '%s' "$COSIGN_PRIVATE_KEY" > /tmp/auros.key
+          COSIGN_PASSWORD="" cosign generate-key-pair --output-key-prefix /tmp/auros
           chmod 600 /tmp/auros.key
+          # The image trusts the key it SHIPS. Overwriting the public half in this checkout is what
+          # makes the fixture VM trust the run key and nothing else — including, deliberately, not
+          # trusting the production key, so a production-signed image cannot install on the fixture.
+          cp /tmp/auros.pub signing/keys/auros.pub
           cosign public-key --key /tmp/auros.key > /tmp/derived.pub
           diff -q <(tr -d ' \n' < /tmp/derived.pub) <(tr -d ' \n' < signing/keys/auros.pub) >/dev/null || {
-            echo "::error::COSIGN_PRIVATE_KEY does not match signing/keys/auros.pub — the VM would refuse every image and the run would prove nothing"; exit 1; }
-          # COSIGN_FLAGS is a public string, so $GITHUB_ENV is fine for it. COSIGN_PASSWORD is not,
-          # and is set once at job level instead — writing a secret into $GITHUB_ENV persists it in a
-          # file on the runner for the rest of the job, which is a wider blast radius than it needs.
+            echo "::error::the generated key pair does not round-trip; the VM would refuse every image and the run would prove nothing"; exit 1; }
+          # COSIGN_FLAGS is a public string, so $GITHUB_ENV is fine for it. COSIGN_PASSWORD is empty
+          # for a throwaway key and is set at job level; a real secret is never written to that file,
+          # because it persists on the runner for the rest of the job.
           echo "COSIGN_FLAGS=${{ steps.cosign.outputs.flag }}" >> "$GITHUB_ENV"
-          echo "signing key verified against the key the image ships"
+          echo "run-scoped signing key generated; signing/keys/auros.pub in this checkout now holds its public half"
 
       - name: Helper — one way to talk to the VM, so every step talks to it the same way
         run: |
@@ -189,14 +227,20 @@ jobs:
       - name: Build and publish V1
         id: v1
         env:
-          IMAGE: ${{ steps.cfg.outputs.image }}
+          IMAGE: ${{ steps.cfg.outputs.fixture_image }}
         run: |
           ./tools/resolve-upstream.sh assert --mirror '${{ steps.cfg.outputs.mirror }}'
           ./tools/resolve-upstream.sh mirror --mirror '${{ steps.cfg.outputs.mirror }}'
           BASE_REF=$(./tools/resolve-upstream.sh assert --quiet --mirror '${{ steps.cfg.outputs.mirror }}' \
                      | grep '^base_ref=' | cut -d= -f2-)
 
-          sudo podman build --build-arg "BASE_IMAGE=${BASE_REF}" -t localhost/g1:v1 -f Containerfile .
+          # No `--build-arg BASE_IMAGE=…`: the Containerfile declares no such ARG and its FROM is a
+          # literal on purpose, so that flag was a no-op that podman warned about and nobody read.
+          # BASE_REF now gates the build instead of decorating it.
+          CF_FROM=$(grep -m1 -E '^FROM[[:space:]]' Containerfile | awk '{print $2}')
+          [ "$CF_FROM" = "$BASE_REF" ] || {
+            echo "::error::Containerfile FROM (${CF_FROM}) is not the resolved base reference (${BASE_REF})"; exit 1; }
+          sudo podman build -t localhost/g1:v1 -f Containerfile .
           # D2/D11 — flatten, same as the real publish path, so the pull sizes we observe are real.
           sudo podman run --rm --privileged --security-opt label=type:unconfined_t \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
@@ -213,7 +257,7 @@ jobs:
       - name: Install V1 to a disk image and boot it
         id: boot
         env:
-          IMAGE: ${{ steps.cfg.outputs.image }}
+          IMAGE: ${{ steps.cfg.outputs.fixture_image }}
         run: |
           cat > /tmp/config.toml <<EOF
           [[customizations.user]]
@@ -299,7 +343,7 @@ jobs:
       - name: Leg A · push a trivial change to the base
         id: v2
         env:
-          IMAGE: ${{ steps.cfg.outputs.image }}
+          IMAGE: ${{ steps.cfg.outputs.fixture_image }}
         run: |
           # "A trivial change to the base": one new file, nothing else. It produces a new base digest,
           # and a new base digest under the tag the machine follows is precisely what Gate 1 measures
@@ -416,7 +460,7 @@ jobs:
         env:
           DISPATCH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN }}
           RECIPES: ${{ steps.cfg.outputs.recipes }}
-          IMAGE: ${{ steps.cfg.outputs.image }}
+          IMAGE: ${{ steps.cfg.outputs.fixture_image }}
         run: |
           # Half one: the real thing. D18 — the default GITHUB_TOKEN is issued for THIS repository
           # and cannot POST to another repo's /dispatches. Without a PAT this half is NOT PROVEN,
@@ -455,7 +499,7 @@ jobs:
       - name: Leg B · offer a broken base and require refusal
         id: legB
         env:
-          IMAGE: ${{ steps.cfg.outputs.image }}
+          IMAGE: ${{ steps.cfg.outputs.fixture_image }}
         run: |
           BEFORE=$(vm-digest || echo "")
           echo "booted before: $BEFORE"
@@ -523,7 +567,7 @@ jobs:
         id: report
         if: always()
         env:
-          IMAGE: ${{ steps.cfg.outputs.image }}
+          IMAGE: ${{ steps.cfg.outputs.fixture_image }}
         run: |
           A='${{ steps.legA.outputs.result }}'
           MODE='${{ steps.legA.outputs.mode }}'
@@ -578,6 +622,14 @@ jobs:
             echo ""
             echo "Read this part. A gate whose limits are not written down gets quoted as if it had none."
             echo ""
+            echo "- **The production signing key was not exercised.** Every image in this run was signed with a"
+            echo "  key pair generated for this run, and the fixture image ships that key's public half, so"
+            echo "  U4a/U4b above prove the D8 *mechanism* — our \`policy.json\`, our \`registries.d\`, our"
+            echo "  \`keyPath\` — and nothing about the key in \`COSIGN_PRIVATE_KEY\`. That is deliberate:"
+            echo "  signing fixtures with the production key put a permanently-valid signature on untested"
+            echo "  digests in the repository customers install from, since \`matchRepository\` makes such a"
+            echo "  signature good for the whole repository no matter which tag points at it. Whether the"
+            echo "  production key signs correctly is proven by \`build.yml\`'s S8, on the real publish path."
             echo "- **Cross-repo propagation:** \`${{ steps.downstream.outputs.dispatch }}\`."
             if [ '${{ steps.downstream.outputs.dispatch }}' = 'no-credential' ]; then
               echo "  D18 — the default \`GITHUB_TOKEN\` is issued for this repository and cannot POST to"
@@ -631,6 +683,18 @@ jobs:
             exit 1
           fi
           echo ":hardened untouched, as required"
+
+          # AND THE STRONGER HALF, because the tag was never the thing at risk. With
+          # "signedIdentity": {"type":"matchRepository"}, a signature minted against ANY digest in
+          # the production repository is valid for that repository — so an untested fixture signed
+          # there is installable forever, whatever the tags say. This run signs a key it generated
+          # itself, into ${IMAGE}-fixtures, and this assertion is what makes that a fact rather than
+          # an intention: the production repository must carry no tag from this run.
+          if skopeo inspect --no-tags "docker://${IMAGE}:${GATE_TAG}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE}:${GATE_TAG} exists. This workflow wrote to the PRODUCTION repository. Fixtures belong in ${IMAGE}-fixtures, signed with the run-scoped key — a production-key signature on an untested digest is installable on every machine in the field regardless of where the tag points."
+            exit 1
+          fi
+          echo "${IMAGE} carries no ${GATE_TAG} — fixtures stayed in ${IMAGE}-fixtures"
 
       - name: Collect evidence
         if: always()

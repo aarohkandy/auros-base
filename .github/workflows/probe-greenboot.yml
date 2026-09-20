@@ -1,0 +1,38 @@
+# One question, answered with evidence instead of a guess: what does greenboot 0.16.4 actually ship?
+#
+# The base build fails asserting /usr/libexec/greenboot/greenboot-grub2-set-counter exists. That path
+# is from an older layout. Rather than relax the assertion — auto-rollback is a headline safety
+# property and check U3 depends on it — find out what the package really contains, once.
+name: probe-greenboot
+on: { workflow_dispatch: {} }
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  layout:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: What does greenboot ship on this base?
+        run: |
+          cat > Containerfile <<'EOF'
+          FROM ghcr.io/ublue-os/aurora:stable
+          RUN dnf5 install -y greenboot && \
+              { echo "=== rpm -q ==="; rpm -q greenboot; \
+                echo "=== rpm -ql greenboot ==="; rpm -ql greenboot; \
+                echo "=== anything named *counter* ==="; rpm -ql greenboot | grep -i counter || echo "(none)"; \
+                echo "=== systemd units ==="; rpm -ql greenboot | grep -E '\.(service|target|timer|path)$' || echo "(none)"; \
+                echo "=== executables ==="; rpm -ql greenboot | grep -E '^/usr/(libexec|lib|bin|sbin)/' || echo "(none)"; \
+                echo "=== grub fragments anywhere in the image ==="; ls -la /usr/lib/bootupd/grub2-static/configs.d/ 2>/dev/null || echo "(no configs.d)"; \
+                echo "=== is a counter fragment present from anywhere? ==="; grep -rls 'boot_counter' /usr/lib/bootupd /etc/grub.d /usr/lib/systemd 2>/dev/null || echo "(none)"; \
+                echo "=== greenboot-default-health-checks available? ==="; dnf5 repoquery --quiet greenboot-default-health-checks 2>/dev/null | head -3 || echo "(not found)"; \
+              } > /greenboot-layout.txt 2>&1
+          EOF
+          sudo podman build -t gbprobe -f Containerfile .
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sudo podman run --rm gbprobe cat /greenboot-layout.txt | tee layout.txt | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with: { name: greenboot-layout, path: layout.txt }

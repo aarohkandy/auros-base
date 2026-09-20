@@ -79,26 +79,91 @@ auros_read_list() {
 auros_disable_weak_deps() {
     # Turn Recommends off for the whole build, not just for our own transactions, because the
     # transaction that undoes our removal is the RECIPE's install step, which we do not control.
-    local conf=/etc/dnf/dnf.conf
+    # Overridable ONLY so that policy/tests/policy-lib.test.sh can drive this function against a
+    # fixture and prove it goes red when the key lands in the wrong INI section. Nothing in the
+    # build sets it; the default is the real file.
+    local conf=${AUROS_DNF_CONF:-/etc/dnf/dnf.conf}
     local marker='# >>> auros-policy'
     [ -f "$conf" ] || { warn "$conf not found; weak deps not disabled globally"; return 0; }
     if grep -qF "$marker" "$conf"; then
         log "weak dependencies already disabled globally in $conf"
+        auros_verify_weak_deps "$conf"
         return 0
     fi
-    # SHARED FILE. We append a marked block under the existing [main] section and touch nothing else.
-    # If the hardening layer also edits this file, both blocks coexist.
-    cat >> "$conf" <<'EOC'
 
-# >>> auros-policy
-# install_weak_deps=False for the whole build. Recommends: is the mechanism that silently drags a
-# removed package back in on the next transaction -- including transactions in a customer recipe's
-# own layer, which is why this is set globally rather than passed per-command. Check S3 is what
-# catches it when this fails.
-install_weak_deps=False
-# <<< auros-policy
-EOC
-    log "disabled weak dependencies globally in $conf"
+    # SHARED FILE, and INI SECTIONS ARE POSITIONAL -- which is why this inserts rather than appends.
+    #
+    # This used to `cat >>` the block onto the END of dnf.conf. dnf.conf is an INI file: a key
+    # belongs to whatever section header precedes it. If any repo section or a [main]-unrelated
+    # section follows [main] -- and nothing stops the hardening layer, a package drop-in or a future
+    # Fedora default from adding one -- then install_weak_deps=False lands in THAT section and is
+    # silently ignored. A later `dnf install` in the recipe layer then pulls Recommends back in and
+    # reinstates the desktop we deleted. That is exactly the silent no-op this file's own header
+    # (mechanism 2, "fail QUIETLY, which is the part that matters") warns about, committed by the
+    # handler for it.
+    #
+    # So: insert immediately under the literal `[main]` header, and if there is no [main] at all,
+    # create one at the top of the file. Then CHECK, the way auros_unmark_groups does -- "try, then
+    # check, then say so out loud" rather than "do it and believe it".
+    local tmp="${conf}.auros-new"
+    if grep -qE '^[[:space:]]*\[main\][[:space:]]*$' "$conf"; then
+        awk '
+            BEGIN { done = 0 }
+            {
+                print
+                if (!done && $0 ~ /^[[:space:]]*\[main\][[:space:]]*$/) {
+                    print "# >>> auros-policy"
+                    print "# install_weak_deps=False for the whole build. Recommends: is the mechanism that silently"
+                    print "# drags a removed package back in on the next transaction -- including transactions in a"
+                    print "# customer recipe'"'"'s own layer, which is why this is set globally rather than passed"
+                    print "# per-command. It is inserted directly under [main] because an INI key belongs to the"
+                    print "# section above it: appended at the end of the file it would land in whatever section"
+                    print "# happened to be last and be ignored without a word. Check S3 is what catches it."
+                    print "install_weak_deps=False"
+                    print "# <<< auros-policy"
+                    done = 1
+                }
+            }
+        ' "$conf" > "$tmp"
+    else
+        warn "$conf has no [main] section; creating one at the top rather than appending a key with no section"
+        {
+            printf '[main]\n'
+            printf '# >>> auros-policy\n'
+            printf '# See auros_disable_weak_deps in policy-lib.sh. This [main] header was created by us\n'
+            printf '# because the file had none, and a key with no section above it belongs to nothing.\n'
+            printf 'install_weak_deps=False\n'
+            printf '# <<< auros-policy\n'
+            cat "$conf"
+        } > "$tmp"
+    fi
+    cat "$tmp" > "$conf"
+    rm -f "$tmp"
+    log "disabled weak dependencies globally in $conf (inserted under [main], not appended)"
+    auros_verify_weak_deps "$conf"
+}
+
+# Ask dnf what it actually resolved, rather than trusting that the edit landed where we meant it to.
+# dnf5 answers with `--dump-main-config`; dnf4 with `dnf config-manager --dump`. If neither verb is
+# available we say so instead of reporting a silent success -- an honest "not verified" in the build
+# log is worth more than a `|| true`.
+auros_verify_weak_deps() {
+    local conf="$1" dnf out=""
+    dnf="$(auros_pkgmgr)"
+    [ "$dnf" = none ] && { warn "no dnf available; cannot verify that install_weak_deps took effect in $conf"; return 0; }
+    if out="$("$dnf" --dump-main-config 2>/dev/null)" && [ -n "$out" ]; then
+        :
+    elif out="$("$dnf" config-manager --dump 2>/dev/null)" && [ -n "$out" ]; then
+        :
+    else
+        warn "neither '$dnf --dump-main-config' nor '$dnf config-manager --dump' produced output; install_weak_deps is NOT VERIFIED on this image. If Recommends are still on, a later dnf install in the recipe layer can reinstate a package we removed, and check S3 is what will catch it."
+        return 0
+    fi
+    if printf '%s' "$out" | grep -qiE '^[[:space:]]*install_weak_deps[[:space:]]*=[[:space:]]*(0|false|no)[[:space:]]*$'; then
+        log "verified: $dnf resolves install_weak_deps to False"
+    else
+        warn "MISMATCH: we wrote install_weak_deps=False into $conf but $dnf resolves it to '$(printf '%s' "$out" | grep -iE '^[[:space:]]*install_weak_deps' | head -1 | tr -d '[:space:]')'. Recommends are still on for this build, so a removed package can come back on the next transaction. Check S3 asserts the removal set from outside and will go red if it does."
+    fi
 }
 
 # auros_remove_packages <remove.list> <keep.list>

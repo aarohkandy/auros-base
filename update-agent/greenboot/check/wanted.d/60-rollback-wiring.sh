@@ -14,7 +14,10 @@
 # So: warn here, and assert it hard where it is safe to assert it --
 #   * build/30-update-agent.sh fails the build if 08_greenboot.cfg is not in the bootupd
 #     grub2-static configs.d that bootupd assembles into /boot/grub2/grub.cfg
-#   * check U3 proves the rollback end to end in a VM before anything ships
+#   * check U3 is where the rollback would be proved end to end in a VM before anything ships --
+#     but as of 2026-09-20 U3 has NEVER REACHED A VERDICT (matrix/run/run-update.sh never creates
+#     /run/auros-check-matrix, so the harness VM's autologin session makes the agent decline to
+#     reboot). So that proof does not exist yet. See update-agent/README.md.
 #   * auros-update logs the same warning before it stages anything
 #
 # D9: greenboot's rollback does not work on the composefs/UKI backend -- upstream has not wired
