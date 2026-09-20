@@ -1,0 +1,107 @@
+# RUNNER CAPABILITY PROBE — not part of the build. Answers, with evidence rather than assumption,
+# whether a free GitHub-hosted runner can do the three things Gate 1 depends on:
+#   1. hold a multi-gigabyte Fedora KDE image plus a qcow2 on its disk
+#   2. run QEMU with hardware acceleration (/dev/kvm)
+#   3. resolve and pull the upstream Universal Blue base
+#
+# Every load-bearing number in PLAN.md about CI is currently a claim from research. This turns the
+# important ones into measurements. Runs on demand only.
+name: probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Disk before any reclamation
+        run: |
+          echo "### disk before" >> $GITHUB_STEP_SUMMARY
+          df -h / /mnt 2>/dev/null | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: KVM present and usable?
+        run: |
+          echo "## KVM" >> $GITHUB_STEP_SUMMARY
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm | tee -a $GITHUB_STEP_SUMMARY
+            echo "kvm group members: $(getent group kvm || echo none)" | tee -a $GITHUB_STEP_SUMMARY
+            echo "current user: $(id)" | tee -a $GITHUB_STEP_SUMMARY
+            # The documented fix when the runner user is not in the kvm group.
+            sudo apt-get update -qq && sudo apt-get install -y -qq qemu-kvm cpu-checker >/dev/null 2>&1 || true
+            echo "kvm-ok: $(kvm-ok 2>&1 | tr '\n' ' ')" | tee -a $GITHUB_STEP_SUMMARY
+            if [ -w /dev/kvm ]; then echo "WRITABLE: yes" | tee -a $GITHUB_STEP_SUMMARY
+            else
+              echo 'KERNEL_VERSION=$(uname -r)' >/dev/null
+              sudo usermod -aG kvm "$USER" || true
+              echo 'KVM=$(stat -c "%a" /dev/kvm)' >/dev/null
+              sudo chmod 666 /dev/kvm || true
+              [ -w /dev/kvm ] && echo "WRITABLE after chmod: yes" | tee -a $GITHUB_STEP_SUMMARY || echo "WRITABLE: NO — this is a hard blocker for the boot checks" | tee -a $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "NO /dev/kvm — boot checks would run under TCG emulation, which is roughly 10-20x slower." | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Tooling versions actually present
+        run: |
+          echo "## tooling" >> $GITHUB_STEP_SUMMARY
+          for t in podman docker skopeo qemu-system-x86_64 jq cosign go; do
+            printf "%-22s %s\n" "$t" "$(command -v $t >/dev/null && ($t --version 2>&1 | head -1) || echo MISSING)" | tee -a $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Resolve upstream base digest and size
+        run: |
+          echo "## upstream ghcr.io/ublue-os/aurora:stable" >> $GITHUB_STEP_SUMMARY
+          sudo apt-get install -y -qq skopeo >/dev/null 2>&1 || true
+          set -x
+          skopeo inspect --no-tags docker://ghcr.io/ublue-os/aurora:stable > /tmp/aurora.json 2>/tmp/aurora.err || cat /tmp/aurora.err
+          if [ -s /tmp/aurora.json ]; then
+            jq -r '"digest: \(.Digest)\ncreated: \(.Created)\nos/arch: \(.Os)/\(.Architecture)"' /tmp/aurora.json | tee -a $GITHUB_STEP_SUMMARY
+            jq -r '.Labels | to_entries | map(select(.key|test("version|release|name|title";"i"))) | .[] | "\(.key)=\(.value)"' /tmp/aurora.json | head -12 | tee -a $GITHUB_STEP_SUMMARY
+          fi
+          # Compressed pull size — the number that decides whether nightly updates are viable on school wifi.
+          skopeo inspect --raw docker://ghcr.io/ublue-os/aurora:stable > /tmp/manifest.json 2>/dev/null || true
+          if [ -s /tmp/manifest.json ]; then
+            TOTAL=$(jq '[.layers[].size] | add // 0' /tmp/manifest.json)
+            COUNT=$(jq '.layers | length' /tmp/manifest.json)
+            echo "layers: $COUNT" | tee -a $GITHUB_STEP_SUMMARY
+            echo "compressed pull size: $(numfmt --to=iec $TOTAL 2>/dev/null || echo $TOTAL)" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Free disk the standard way, then measure
+        run: |
+          echo "## disk reclamation" >> $GITHUB_STEP_SUMMARY
+          BEFORE=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          AFTER=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          echo "root free: ${BEFORE}G -> ${AFTER}G (reclaimed $((AFTER-BEFORE))G)" | tee -a $GITHUB_STEP_SUMMARY
+          df -h / /mnt | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Can we actually pull the base? (the real test)
+        run: |
+          echo "## pull" >> $GITHUB_STEP_SUMMARY
+          /usr/bin/time -v podman pull ghcr.io/ublue-os/aurora:stable 2>&1 | tail -25 | tee -a $GITHUB_STEP_SUMMARY || true
+          podman images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | tee -a $GITHUB_STEP_SUMMARY
+          echo "### disk after pull" >> $GITHUB_STEP_SUMMARY
+          df -h / | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: What does a trivial derived build cost?
+        run: |
+          echo "## derived build" >> $GITHUB_STEP_SUMMARY
+          printf 'FROM ghcr.io/ublue-os/aurora:stable\nRUN echo probe > /etc/auros-probe\n' > /tmp/Containerfile
+          /usr/bin/time -f 'build wall time: %E' podman build -t probe -f /tmp/Containerfile /tmp 2>&1 | tail -12 | tee -a $GITHUB_STEP_SUMMARY || true
+          echo "### disk after build" >> $GITHUB_STEP_SUMMARY
+          df -h / | tee -a $GITHUB_STEP_SUMMARY
+          echo "### is bootc lint available in the image?" >> $GITHUB_STEP_SUMMARY
+          podman run --rm probe bootc container lint 2>&1 | head -20 | tee -a $GITHUB_STEP_SUMMARY || echo "bootc container lint unavailable or failed" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Headroom verdict
+        if: always()
+        run: |
+          FREE=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          echo "## VERDICT" >> $GITHUB_STEP_SUMMARY
+          echo "free on / after pulling and building: ${FREE}G" >> $GITHUB_STEP_SUMMARY
+          echo "bootc-image-builder needs to write a qcow2 roughly the size of the installed tree." >> $GITHUB_STEP_SUMMARY
+          if [ "$FREE" -lt 20 ]; then echo "TIGHT — the qcow2 step likely needs /mnt, not /." >> $GITHUB_STEP_SUMMARY; else echo "OK — headroom for a qcow2 on /." >> $GITHUB_STEP_SUMMARY; fi

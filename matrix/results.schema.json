@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aarohkandy/auros-base/matrix/results.schema.json",
+  "title": "Auros VM check matrix results",
+  "description": "Emitted by the check matrix harness, keyed by image digest. tools/gate.mjs reads this and the attest ledger, and refuses any publish whose digest lacks a full pass. Fails closed: anything that does not validate against this schema is treated as a FAIL, never as an unknown.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["digest", "image", "matrix_version", "started_at", "finished_at", "run_url", "profiles", "verdict"],
+  "properties": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "The exact content digest tested. A tag is not acceptable here — a tag can be moved after the test passed, which would let an untested image inherit a passing record."
+    },
+    "image": { "type": "string", "description": "Full image reference without the tag, e.g. ghcr.io/aarohkandy/auros-base" },
+    "recipe": { "type": ["string", "null"], "description": "Customer recipe name, or null when testing the base itself" },
+    "matrix_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "From matrix/checks.yaml. A pass recorded under an older matrix is NOT evidence of a pass under the current one, so the gate compares this and refuses on mismatch."
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "run_url": { "type": "string", "description": "The CI run anyone can reopen. A result nobody can audit is not evidence." },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One entry per hardware profile bound to this image. Every profile must pass; a partial pass is a fail.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["profile", "checks"],
+        "properties": {
+          "profile": { "type": "string" },
+          "checks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "status"],
+              "properties": {
+                "id": { "type": "string", "pattern": "^[SBUR][0-9]+$" },
+                "status": {
+                  "enum": ["pass", "fail", "skip"],
+                  "description": "skip is NOT a pass. The gate counts a skipped required check as a failure. A check is only legitimately skipped when it does not apply to this profile, and skip_reason must say which."
+                },
+                "skip_reason": { "type": "string" },
+                "detail": { "type": "string", "description": "Observed value, for a human reading a failure at 2am" },
+                "duration_ms": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "verdict": {
+      "enum": ["pass", "fail"],
+      "description": "pass ONLY when every required check passed on every bound profile. This field is a convenience for humans; tools/gate.mjs recomputes it from the checks array and ignores this value, because a field that says 'pass' is exactly what a broken or malicious harness would write."
+    },
+    "removal_report": {
+      "type": ["object", "null"],
+      "description": "Summary of what this image deleted. Present for recipe builds.",
+      "additionalProperties": false,
+      "properties": {
+        "packages_removed": { "type": "integer", "minimum": 0 },
+        "bytes_reclaimed": { "type": "integer", "minimum": 0 },
+        "pull_size_delta_bytes": {
+          "type": "integer",
+          "description": "Measured difference in COMPRESSED PULL SIZE versus the base image. This is the number that makes subtraction true on the wire rather than only on disk (DECISIONS.md D2). Negative means smaller. It is measured, never estimated."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,205 @@
+# AUROS VM CHECK MATRIX — the definition of "passed"
+#
+# This file IS the gate. `tools/gate.mjs` refuses any digest that does not have a recorded pass for
+# every check here, on every profile bound to it. There is no flag, environment variable or argument
+# that overrides it (spec §4.3).
+#
+# Rules for editing this file:
+#   - Every check is BINARY. "mostly worked" is a fail. A check whose criterion cannot be evaluated
+#     mechanically does not belong here.
+#   - `matrix_version` is recorded in the ledger alongside each pass. Bumping it INVALIDATES every
+#     previously recorded pass, because a pass under an older, weaker matrix is not evidence of a pass
+#     under this one. Bump it whenever you add a check or tighten a criterion.
+#   - Adding a check is cheap. Removing one requires an entry in DECISIONS.md saying who decided and why.
+
+matrix_version: 1
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# STATIC — run against the OCI image. No VM. Fast, and catches most regressions.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+static:
+  - id: S1
+    name: Base is pinned by digest
+    why: >
+      A tag is a moving target. If the FROM line resolves by tag, two builds a day apart are different
+      operating systems wearing the same name, and "same recipe in, same image out" becomes untrue.
+    criterion: resolved FROM digest == the digest recorded in base.lock
+    fails_on: any tag-only reference, or a mismatch of a single character
+
+  - id: S2
+    name: Container lint
+    criterion: "`bootc container lint` exits 0"
+    why: Catches images that are structurally incapable of being a bootable host.
+
+  - id: S3
+    name: Prune assertions
+    why: >
+      This is the check that stops upstream from silently un-pruning the product. The base is rebuilt
+      nightly; upstream may add a dependency that drags a removed package back in. Without this check a
+      kiosk image ships with a desktop in it and nobody notices until a customer sees it.
+    criterion: for every package in the recipe's resolved removal set, `rpm -q <pkg>` reports not installed
+    fails_on: a single survivor
+    note: >
+      Some mornings this will be red through no fault of ours. That is the correct behaviour and must not
+      be treated as flakiness or retried away.
+
+  - id: S4
+    name: Keep assertions
+    criterion: every `install:` package is present; every Flatpak ref resolves on Flathub
+    why: The inverse of S3 — proves we delivered what was asked for, not merely that we deleted things.
+
+  - id: S5
+    name: Removal report is real
+    criterion: >
+      removal-report.json exists, is non-empty, and its package set equals the recipe's resolved removal
+      closure; every entry carries a real measured byte count
+    why: >
+      "We removed 214 packages" is a claim we put in front of customers. It has to come from a
+      measurement, not from counting the lines in the recipe.
+
+  - id: S6
+    name: Size budget
+    criterion: final image <= declared budget; regression > 10% vs the previous published digest fails
+    why: Subtraction is the product. An image that silently grows is the product quietly failing.
+
+  - id: S7
+    name: Determinism
+    criterion: >
+      built twice in one CI run from identical inputs, the two builds produce the same CONTENT DIGEST
+    why: >
+      Spec §6B asked for "byte-identical image out". Against a moving upstream that is not attainable
+      (PLAN.md §3.3) — RPM database ordering, build IDs and file timestamps all vary. The property that
+      actually delivers what §6B wanted is same-recipe + same-pinned-base ⇒ same content digest, and
+      unlike byte-identity it is testable. We gate on the testable one and we say so in the docs.
+
+  - id: S8
+    name: Signature is discoverable, not merely valid
+    criterion: >
+      `cosign verify` passes AND `skopeo inspect` finds the legacy `.sig` tag on the registry
+    why: >
+      Both halves are required. cosign 3.x defaults to new-format OCI 1.1 referrer bundles that
+      containers/image cannot see, so `cosign verify` keeps passing while the machine that has to
+      install the image cannot find a signature at all. That failure is SILENT. A green `cosign verify`
+      is not sufficient evidence that a customer's laptop can verify us.
+
+  - id: S9
+    name: Policy shape
+    criterion: >
+      policy=kiosk ⇒ no plasmashell, no gnome-shell and no display-manager binary exists in the image.
+      policy=locked|managed ⇒ the mode's policy units are present.
+    why: >
+      The spec defines kiosk as "no desktop shell exists in the image at all". That is a statement about
+      the filesystem, so it is checkable against the filesystem rather than against a config file.
+
+  - id: S10
+    name: Protected set intact
+    criterion: >
+      bootc, the update timer, greenboot, the signature policy, NetworkManager and systemd are all
+      present and enabled
+    why: >
+      A recipe that prunes its own update path produces a machine we can never patch again — which is
+      precisely the abandoned laptop we sell against. This check makes that outcome impossible to ship
+      even if validation is bypassed.
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# BOOT — QEMU, once per hardware profile bound to the recipe.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+boot:
+  - id: B1
+    name: Reaches a login prompt
+    criterion: display manager active / greeter detected within 120 s of power-on
+  - id: B2
+    name: Not degraded
+    criterion: "`systemctl is-system-running` == running"
+    fails_on: "`degraded` — a degraded boot is a fail, not a warning"
+  - id: B3
+    name: Boots twice
+    criterion: B1 and B2 both hold across two consecutive cold boots
+    why: First-boot provisioning can mask a second-boot failure.
+  - id: B4
+    name: Locale and keyboard
+    criterion: "`localectl` output == the recipe's declared values, exactly"
+    why: >
+      This is the check that makes "in their language" true. A Marathi recipe that boots in English is
+      not a partial success, it is the product not working.
+  - id: B5
+    name: Policy is in force at runtime
+    criterion: >
+      the mode's runtime assertion script passes — e.g. locked ⇒ an unprivileged user cannot install a
+      package and cannot obtain sudo
+    fails_on: configured-but-not-effective
+    why: >
+      A policy file that is present but not enforced is worse than no policy, because we would tell a
+      school their machines are locked down when they are not.
+  - id: B6
+    name: Network
+    criterion: NetworkManager active, DHCP lease on virtio-net, default route present, DNS resolves
+  - id: B7
+    name: Audio stack
+    criterion: pipewire + wireplumber active; `wpctl` enumerates at least one sink
+  - id: B8
+    name: Graphics
+    criterion: compositor running on virtio-gpu; Wayland session; no compositor crash in the journal
+  - id: B9
+    name: Flatpaks
+    criterion: Flathub remote present; every recipe app installs exit-0 and its .desktop file exists
+  - id: B10
+    name: Suspend and resume
+    criterion: QEMU S3 suspend + wakeup returns to `running` with no new failed units
+    honesty: >
+      APPROXIMATION ONLY. This proves the software path. It does not prove a real machine's firmware
+      resumes. Real suspend is physical-only and belongs in compat.tsv with source=physical.
+  - id: B11
+    name: Journal is clean
+    criterion: zero SELinux denials, zero kernel oops or taint, zero failed units
+  - id: B12
+    name: Zero-terminal audit
+    criterion: >
+      from a fresh user session, installing an application, connecting to Wi-Fi, adding a printer and
+      changing the language are each reachable through the GUI, verified by asserting the responsible
+      .desktop entries and GUI components exist and launch
+    why: >
+      Directive D4 — "feel like personalized Windows rather than linux which needs you to memorize books
+      of commands". If a promise requires a terminal, it stops being a promise. This check keeps that
+      honest instead of aspirational.
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# UPDATE AND ROLLBACK — the heart of Gates 1 and 2. If only one section survives, keep this one.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+update:
+  - id: U1
+    name: Upgrade applies unattended
+    criterion: >
+      after the base changes, the VM pulls, stages and reboots with NO human action, and
+      `bootc status --json` reports the booted digest == the new digest, within 20 minutes
+    why: This is literally the Gate 1 exit condition.
+  - id: U2
+    name: Previous deployment retained
+    criterion: "`bootc status` lists 2 deployments; the prior image is still on disk"
+    why: Rollback is only real if the thing to roll back to was never deleted.
+  - id: U3
+    name: Automatic rollback
+    criterion: >
+      given an image with a failing greenboot required.d check, after repeated failed boots the machine
+      returns to the previous deployment, reaches a login prompt, and the booted digest == the OLD digest
+    why: >
+      A school has one overworked IT person and no out-of-band console. An update that bricks a machine
+      is not recoverable by the customer, so it has to be recoverable by the machine.
+  - id: U4
+    name: Refuses a bad image
+    criterion: >
+      offered an unsigned or wrongly-signed image, `bootc upgrade` exits non-zero and the booted digest
+      is UNCHANGED
+    why: The second half of the Gate 1 exit condition, and the only check that proves signing does work.
+  - id: U5
+    name: Offline tolerant
+    criterion: registry unreachable ⇒ no change, no breakage, retry later
+    why: School Wi-Fi.
+
+restore:
+  - id: R1
+    name: Migration archive restores and re-verifies
+    criterion: >
+      first boot with a migration archive restores every file, re-verifies count and per-file hash
+      against the source manifest, and reports the count to the user on the desktop
+    fails_on: any discrepancy that is swallowed rather than shown

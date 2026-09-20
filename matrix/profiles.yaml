@@ -1,0 +1,91 @@
+# AUROS HARDWARE PROFILES — QEMU machine definitions bound to recipes by `hardware_profile:`
+#
+# THE HONESTY RULE, and it is the most important thing in this file:
+#
+#   A QEMU profile has no real Wi-Fi chipset, no trackpad, no backlight, no webcam and no firmware.
+#   It therefore CANNOT produce an honest verdict for those columns of hardware/compat.tsv.
+#
+#   Every row these profiles generate is written with source=vm and leaves the physical-only columns
+#   EMPTY. Not "?", not "ok" — empty, because empty means "we did not test this", which is the truth.
+#   No customer quote is ever generated from a vm row.
+#
+#   Filling those columns from VM runs would manufacture exactly the unearned confidence that spec §4
+#   exists to prevent, and we would then quote real schools from it.
+
+profiles:
+  - id: uefi-modern
+    summary: Baseline. What a 2016-2018 machine looks like.
+    firmware: OVMF (UEFI, Secure Boot off)
+    cpu: host-passthrough via KVM
+    ram_mb: 8192
+    disk_gb: 128
+    gpu: virtio-gpu
+    proves: The image boots and behaves on unremarkable modern-ish hardware.
+
+  - id: uefi-secureboot
+    summary: Secure Boot enabled with Microsoft's keys, as shipped by most OEMs.
+    firmware: OVMF + Secure Boot, MS KEK/db enrolled
+    tpm: swtpm 2.0
+    ram_mb: 8192
+    disk_gb: 128
+    proves: >
+      The image boots with Secure Boot on. This matters because Fedora's shim is signed by Microsoft's
+      THIRD-PARTY UEFI CA, which some Lenovo and Dell business firmware ships disabled — and because
+      images carrying custom kernel modules additionally require interactive MOK enrollment at boot,
+      which is not something a school IT person should meet unprepared.
+    does_not_prove: That a specific vendor's firmware trusts the third-party CA. Physical-only.
+
+  - id: bios-legacy
+    summary: 2012-era BIOS-only machines.
+    firmware: SeaBIOS
+    ram_mb: 4096
+    disk_gb: 64
+    proves: The image is installable and bootable at all on the oldest cohort we target.
+
+  - id: low-ram
+    summary: The RAM floor.
+    ram_mb: 4096
+    disk_gb: 64
+    io: throttled to approximate a 5400rpm spinning disk
+    proves: >
+      KDE plus the recipe's Flatpaks is actually USABLE at the floor, not merely bootable. A machine that
+      boots in six minutes and swaps constantly is a machine the school stops using in week two, and we
+      would have sold them nothing.
+
+  - id: old-cpu
+    summary: Pre-AVX2 silicon (Nehalem / Sandy Bridge class).
+    cpu: Nehalem
+    ram_mb: 4096
+    proves: >
+      No illegal-instruction regressions. Upstream occasionally raises the baseline ISA; this profile is
+      how we find that out before 180 laptops do.
+
+  - id: small-disk
+    summary: The disk floor.
+    disk_gb: 64
+    proves: >
+      Install plus TWO bootc deployments plus the recipe's Flatpaks fit with >=15% free. Two deployments
+      is not optional — it is what makes U2/U3 rollback possible, so the disk floor is set by the safety
+      property, not by the image size.
+
+  - id: tpm12
+    summary: TPM 1.2, as found across the 2012-2015 cohort.
+    tpm: swtpm 1.2
+    firmware: OVMF
+    proves: >
+      Reproduces the BitLocker risk directly rather than assuming it. Microsoft lists "changing the BIOS
+      or firmware boot device order" as a recovery trigger on TPM 1.2, which is exactly what the migration
+      installer does when it sets one-time boot. swtpm emulates 1.2, so this is testable instead of a
+      guess — and the failure it catches would otherwise strand a user at a recovery-key prompt on the
+      ABORT path, which is the worst possible place to strand someone.
+
+# What no profile in this file can establish, and which is therefore physical-only in compat.tsv:
+not_provable_in_vm:
+  - real Wi-Fi chipset association and roaming
+  - trackpad gestures and palm rejection
+  - brightness and volume function keys
+  - true firmware suspend and resume
+  - webcam
+  - battery life and thermals
+  - GPU acceleration on GMA-era integrated graphics
+  - whether a given vendor's firmware honours BootNext
