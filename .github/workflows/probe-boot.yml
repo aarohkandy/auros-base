@@ -43,8 +43,10 @@ jobs:
         run: |
           cat > Containerfile <<'EOF'
           FROM ghcr.io/ublue-os/aurora:stable
-          RUN echo "auros-probe" > /etc/auros-probe && \
-              ostree container commit
+          # NOTE: `ostree container commit` is NOT used. On this base it fails with
+          # "Not in an ostree-based container environment" — it belongs to the older rpm-ostree
+          # flow and is obsolete for bootc images. `bootc container lint` is the validation step.
+          RUN echo "auros-probe" > /etc/auros-probe
           EOF
           time sudo podman build -t localhost/auros-probe:latest -f Containerfile .
           sudo podman images
