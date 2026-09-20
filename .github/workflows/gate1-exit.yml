@@ -51,7 +51,7 @@ defaults:
 env:
   META_REPO: aarohkandy/auros
   GATE_TAG: gate1-${{ github.run_id }}
-  COSIGN_VERSION: v3.1.3          # D25, pinned exactly; D17 explains why the pin is not cosmetic
+  # cosign's version is NOT set here — `signing/cosign.lock` owns it and says so in its first line.
   BUDGET_SECONDS: '1200'          # the spec says 20 minutes. This is that number and nothing else.
 
 jobs:
@@ -62,7 +62,10 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write              # keyless cosign
+      # No `id-token: write`. Signing here is KEYED (signing/policy.json uses keyPath), so there is
+      # no OIDC token to mint and no reason to hold the permission to mint one.
+    env:
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     steps:
       # ─────────────────────────────────────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
@@ -72,9 +75,20 @@ jobs:
           repository: ${{ env.META_REPO }}
           path: meta
           ref: main
-      - uses: sigstore/cosign-installer@v3.7.0
+      - name: Read signing/cosign.lock
+        id: cosign
+        run: |
+          set -a; . signing/cosign.lock; set +a
+          : "${COSIGN_VERSION:?signing/cosign.lock has no COSIGN_VERSION}"
+          echo "version=${COSIGN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "flag=${COSIGN_BUNDLE_FORMAT_FLAG:-}" >> "$GITHUB_OUTPUT"
+          WANT="sigstore/cosign-installer@v4.1.2"
+          [ "${COSIGN_INSTALLER_ACTION:-$WANT}" = "$WANT" ] || {
+            echo "::error::signing/cosign.lock names ${COSIGN_INSTALLER_ACTION}; this workflow pins ${WANT}"; exit 1; }
+
+      - uses: sigstore/cosign-installer@v4.1.2
         with:
-          cosign-release: ${{ env.COSIGN_VERSION }}
+          cosign-release: ${{ steps.cosign.outputs.version }}
 
       - name: Guard — record where :hardened points, so we can prove we never moved it
         id: guard
@@ -127,6 +141,30 @@ jobs:
           ssh-keygen -t ed25519 -N '' -f /tmp/g1key -C gate1 >/dev/null
           df -h /
 
+      - name: The signing key the image actually trusts
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          # KEYED, NOT KEYLESS. `signing/policy.json` enforces
+          # sigstoreSigned + keyPath=/usr/lib/pki/containers/auros.pub, so a keyless signature
+          # carrying a Fulcio certificate is one the VM will not match. Signing keyless here would
+          # make Leg A fail (the good image refused) and Leg B "pass" for the wrong reason — the
+          # worst possible combination, because the report would read as a working lock.
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "::error::COSIGN_PRIVATE_KEY is not set. Gate 1 cannot be evaluated: every image would be unsigned, Leg A would fail and Leg B would pass vacuously. See auros-base/signing/keys/README.md — minting the keypair is a §9-reserved human action."
+            exit 1
+          fi
+          printf '%s' "$COSIGN_PRIVATE_KEY" > /tmp/auros.key
+          chmod 600 /tmp/auros.key
+          cosign public-key --key /tmp/auros.key > /tmp/derived.pub
+          diff -q <(tr -d ' \n' < /tmp/derived.pub) <(tr -d ' \n' < signing/keys/auros.pub) >/dev/null || {
+            echo "::error::COSIGN_PRIVATE_KEY does not match signing/keys/auros.pub — the VM would refuse every image and the run would prove nothing"; exit 1; }
+          # COSIGN_FLAGS is a public string, so $GITHUB_ENV is fine for it. COSIGN_PASSWORD is not,
+          # and is set once at job level instead — writing a secret into $GITHUB_ENV persists it in a
+          # file on the runner for the rest of the job, which is a wider blast radius than it needs.
+          echo "COSIGN_FLAGS=${{ steps.cosign.outputs.flag }}" >> "$GITHUB_ENV"
+          echo "signing key verified against the key the image ships"
+
       - name: Helper — one way to talk to the VM, so every step talks to it the same way
         run: |
           sudo tee /usr/local/bin/vm >/dev/null <<'SH'
@@ -167,8 +205,7 @@ jobs:
               --output containers-storage:localhost/g1:v1c
           sudo podman push --digestfile /tmp/d1 localhost/g1:v1c "docker://${IMAGE}:${GATE_TAG}"
           D1=$(cat /tmp/d1)
-          FLAGS=""; cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && FLAGS="--new-bundle-format=false"
-          COSIGN_YES=true cosign sign $FLAGS "${IMAGE}@${D1}"
+          COSIGN_YES=true cosign sign $COSIGN_FLAGS --key /tmp/auros.key "${IMAGE}@${D1}"
           echo "d1=$D1" >> "$GITHUB_OUTPUT"
           echo "V1 = $D1"
           sudo podman rmi localhost/g1:v1 >/dev/null 2>&1 || true
@@ -282,8 +319,7 @@ jobs:
           sudo podman build -t localhost/g1:v2 -f /tmp/Containerfile.v2 /tmp
           sudo podman push --digestfile /tmp/d2 localhost/g1:v2 "docker://${IMAGE}:${GATE_TAG}"
           D2=$(cat /tmp/d2)
-          FLAGS=""; cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && FLAGS="--new-bundle-format=false"
-          COSIGN_YES=true cosign sign $FLAGS "${IMAGE}@${D2}"
+          COSIGN_YES=true cosign sign $COSIGN_FLAGS --key /tmp/auros.key "${IMAGE}@${D2}"
           # S8's half that matters: can a containers/image consumer — i.e. the VM — SEE the signature?
           SIGTAG="${D2/:/-}.sig"
           skopeo inspect --raw "docker://${IMAGE}:${SIGTAG}" >/dev/null \
@@ -454,8 +490,7 @@ jobs:
           # signature it is, not merely that a signature exists. A policy that accepts any signature
           # is an unlocked door with a lock painted on it.
           COSIGN_PASSWORD="" cosign generate-key-pair --output-key-prefix /tmp/impostor
-          FLAGS=""; cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && FLAGS="--new-bundle-format=false"
-          COSIGN_PASSWORD="" COSIGN_YES=true cosign sign $FLAGS --key /tmp/impostor.key "${IMAGE}@${D3}"
+          COSIGN_PASSWORD="" COSIGN_YES=true cosign sign $COSIGN_FLAGS --key /tmp/impostor.key "${IMAGE}@${D3}"
           set +e
           vm 'bootc upgrade' > /tmp/upg2.txt 2>&1
           RC2=$?

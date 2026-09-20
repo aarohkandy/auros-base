@@ -44,17 +44,33 @@ echo "mirror-upstream:"
 echo "  source      ${SRC}"
 echo "  destination ${DST}"
 
-if skopeo inspect --no-tags "docker://${DST}" >/dev/null 2>&1; then
+# Credentials are passed EXPLICITLY rather than relied upon from an auth file.
+#
+# We learned this the hard way: the workflow ran `sudo skopeo login` with XDG_RUNTIME_DIR inherited,
+# which wrote /run/user/1001/containers/auth.json owned by root, and the later unprivileged
+# `skopeo copy` then got "permission denied" reading its OWN auth file. Explicit creds do not care who
+# owns what, and they make this script work identically under sudo, under a runner, and on a laptop.
+CREDS=()
+if [ -n "${AUROS_REGISTRY_USER:-}" ] && [ -n "${AUROS_REGISTRY_TOKEN:-}" ]; then
+  CREDS=(--dest-creds "${AUROS_REGISTRY_USER}:${AUROS_REGISTRY_TOKEN}")
+  echo "  using explicit destination credentials for ${AUROS_REGISTRY_USER}"
+else
+  echo "  no AUROS_REGISTRY_USER/TOKEN set — falling back to the ambient auth file"
+fi
+
+if skopeo inspect --no-tags "${CREDS[@]+"${CREDS[@]/--dest-creds/--creds}"}" "docker://${DST}" >/dev/null 2>&1; then
   echo "  already mirrored — nothing to do"
 else
   echo "  copying (--all: every arch and the attached signatures, not just the one we happen to run)"
-  skopeo copy --all "docker://${SRC}" "docker://${DST}"
+  skopeo copy --all "${CREDS[@]+"${CREDS[@]}"}" "docker://${SRC}" "docker://${DST}"
 fi
 
 # Prove the mirror is byte-identical. A mirror that silently re-compressed or dropped a layer would be a
 # different operating system wearing the same digest field, which is worse than no mirror at all.
+RCREDS=()
+[ ${#CREDS[@]} -gt 0 ] && RCREDS=(--creds "${AUROS_REGISTRY_USER}:${AUROS_REGISTRY_TOKEN}")
 SRC_DIGEST=$(skopeo inspect --no-tags "docker://${SRC}" | jq -r .Digest)
-DST_DIGEST=$(skopeo inspect --no-tags "docker://${DST}" | jq -r .Digest)
+DST_DIGEST=$(skopeo inspect --no-tags "${RCREDS[@]+"${RCREDS[@]}"}" "docker://${DST}" | jq -r .Digest)
 if [ "$SRC_DIGEST" != "$DST_DIGEST" ]; then
   echo "mirror-upstream: FATAL — mirrored digest ${DST_DIGEST} != source ${SRC_DIGEST}" >&2
   echo "  The mirror is not a faithful copy. Do not build against it." >&2

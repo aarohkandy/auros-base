@@ -169,24 +169,41 @@ Three things in there are load-bearing:
 * `cosign-installer` is pinned to a tag in `cosign.lock` too, so a compromised action release
   cannot quietly swap the binary.
 
-### The canary images — check U4's negative controls
+### Which images U4 is offered — the harness's, not ours
 
-`canary/` builds a `FROM scratch` image of a few hundred bytes and CI pushes it to
-`<registry>/<org>/auros-canary` under three tags:
+`matrix/run/run-update.sh` already derives signed and unsigned variants of the **real base** and
+serves them under the production reference string `ghcr.io/<org>/auros-base@sha256:…` (it maps
+`ghcr.io` to a local guestfwd address and marks that registry insecure — which changes the
+*transport* and not the *signature policy*). That is a better negative control than anything this
+directory could invent, because it is the actual product image with the signature removed.
 
-| tag | signed with | must be |
-|---|---|---|
-| `:signed` | the production key | **ACCEPTED** — the positive control |
-| `:unsigned` | nothing | **REFUSED** |
-| `:wrongkey` | a throwaway key generated during the run | **REFUSED** |
+So `verify-enforcement.sh` takes them as arguments:
 
-It lives in `auros-canary`, not `auros-base`, and it must never appear in a recipe's `FROM` line.
-It is inside the enforced namespace on purpose: refusing an image from *outside* our scope would
-prove nothing about our images.
+```
+verify-enforcement.sh --signed REF --unsigned REF --wrongkey REF
+```
+
+Every reference must be **inside the enforced scope**, and the script refuses to run if one is
+not. An unsigned image served from `10.0.2.100:5000/...` would be matched by the
+`transports.docker[""]` catch-all rather than by our rule, so refusing it would prove nothing at
+all. `run-update.sh` documents that trap at the top of the file; this script asserts it rather
+than assuming it.
+
+### `canary/` — the standalone fallback, not the preferred path
+
+`canary/` builds a `FROM scratch` image of a few hundred bytes for running this check **outside**
+the matrix, when no harness refs are available. CI need not build it if the harness supplies refs.
+If it is built, it is pushed to `<registry>/<org>/auros-canary` as `:signed`, `:unsigned` and
+`:wrongkey`, and:
+
+* it must be **inside** the enforced namespace — refusing an image from outside our scope proves
+  nothing about our images;
+* it must never appear in a recipe's `FROM` line. It lives in `auros-canary`, not `auros-base`,
+  and carries `org.auros.never-use-as-base=true`.
 
 `:unsigned` is not a violation of *"an unsigned image can never reach a customer"* — it is not a
-product image, it cannot boot, it is labelled `org.auros.never-use-as-base=true`, and no recipe
-can reach it. It is the only way to prove the lock is locked.
+product image, it cannot boot, and no recipe can reach it. It is the only way to prove the lock is
+locked.
 
 ---
 
@@ -205,10 +222,10 @@ So the script is ordered: preconditions → **positive control** → negatives �
 | | |
 |---|---|
 | **0** | root, `bootc`, `python3`, a policy-applying puller; key is a real PEM; `policy.json` has no unknown keys, a non-insecure default, a scoped `sigstoreSigned` rule with `matchRepository`; `registries.d` enables attachments for exactly our scope with nothing more specific overriding it; **booted signature mode is `containerPolicy`**; canary is inside the enforced scope |
-| **1** | **positive control** — `:signed` must be **accepted** |
-| **2** | `:unsigned`, *inside our namespace*, must be **refused** — this is the D8 test: if the catch-all were winning it would be accepted |
-| **3** | `:wrongkey` must be **refused** — proves the machine checks *which* key, not merely that a signature exists |
-| **4** | `bootc switch` to `:unsigned` exits non-zero, the **booted digest is unchanged**, and **nothing was left staged** |
+| **1** | **positive control** — the signed image must be **accepted** |
+| **2** | the unsigned image, *inside our namespace*, must be **refused** — this is the D8 test: if the catch-all were winning it would be accepted |
+| **3** | the wrong-key image must be **refused** — proves the machine checks *which* key, not merely that a signature exists |
+| **4** | `bootc switch` to the unsigned image exits non-zero, the **booted digest is unchanged**, and **nothing was left staged** |
 
 **Exit codes: `0` pass, `1` fail, `2` INCONCLUSIVE.** A failed precondition or a failed positive
 control is **2, never 0**. The gate must treat 2 as a failure — `matrix/README.md` already
@@ -217,9 +234,21 @@ establishes that a skip is not a pass, and this is the same rule.
 Step 4 mutates a real machine, so it is gated on `/run/auros-check-matrix` (created by the
 harness) or `--i-am-a-disposable-test-vm`. Without either it exits **2 with a loud message** — it
 does **not** silently skip, because a check that skips itself is the exact failure this file
-exists to prevent. Step 3's separate existence matters too: step 2 only proves the machine wants
-*a* signature; without step 3, a policy that accepted any valid sigstore signature would pass, and
-anyone with a Fulcio certificate could push an update to the fleet.
+exists to prevent.
+
+The same rule applies to step 3. If no `--wrongkey` reference is offered, the script reports
+**inconclusive, not pass** — even though steps 1, 2 and 4 all passed. Step 2 only proves the
+machine wants *a* signature; without step 3, a policy that accepted any valid sigstore signature
+would look identical, and anyone able to sign anything could push an update to the fleet.
+`gate1-exit.yml` covers that case from the host side as **U4b**; if that is where it is being
+proven, this step still reports rather than quietly disappearing.
+
+This script is a **complement to** the host-side U4 in `run-update.sh`, not a replacement. It adds
+the thing the host cannot see: `run-update.sh` scores U4 a *failure* when the booted digest is
+unchanged but "nothing in the console says the image was rejected for its SIGNATURE", because an
+update that failed on a slow registry looks identical to one refused on policy. Running from
+inside the guest, this script captures the policy engine's own refusal text and asserts the
+configuration that produced it.
 
 The script is installed at `/usr/libexec/auros/verify-enforcement.sh`, with the scope and canary
 repository written to `/etc/auros/signing/` at build time — so the check runs on the machine it is

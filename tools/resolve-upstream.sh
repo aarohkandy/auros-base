@@ -25,16 +25,17 @@
 #   assert    S1. Offline. Exit 2 if the Containerfile is not pinned to base.lock's digest.
 #   drift     Compare base.lock against what the tag resolves to now. Exit 0 = same, 10 = moved.
 #   update    Rewrite base.lock (and a literal digest in the Containerfile) to the current tag digest.
-#   mirror    D21. Ensure the pinned digest exists in OUR namespace, so the pin stays pullable after
-#             upstream garbage-collects it. Idempotent; a no-op when the mirror already has it.
 #
 # Options:
 #   --lock PATH            default <repo>/base.lock
 #   --containerfile PATH   default <repo>/Containerfile
-#   --mirror IMAGE         our mirror repo; default $AUROS_MIRROR_IMAGE, or MIRROR_IMAGE= in base.lock
+#   --mirror IMAGE         our mirror repo, so `assert` recognises a FROM that points at it;
+#                          default $AUROS_MIRROR_IMAGE, or MIRROR_IMAGE= in base.lock
 #   --quiet                suppress the human narration, keep the KEY=VALUE output
 #
-# D21, because it is the reason `mirror` exists and it is not obvious:
+# D21, because it is the reason `assert` accepts two different base images and that is not obvious.
+# POPULATING the mirror is `tools/mirror-upstream.sh`, which is purpose-built for it and is not this
+# script's job; all that happens here is recognising a FROM line that points at it. The background:
 #   ublue-os/aurora runs a GHCR cleanup weekly with older-than 90 days / keep-n-tagged 7. So the digest
 #   in base.lock is DELETED by upstream after ~90 days or 7 newer stable tags, whichever comes first.
 #   Pinning by digest protects us from a tag moving. It does not protect us from the blob going away.
@@ -262,134 +263,13 @@ cmd_assert() {
   say "S1 PASS — base is pinned by digest and the Containerfile and base.lock agree (via ${via})."
 }
 
-cmd_mirror() {
-  # D21. Guarantees the pinned digest is pullable from a repo we control, forever.
-  need skopeo
-  local image locked mirror tag
-  image="$(lock_get UPSTREAM_IMAGE)"
-  locked="$(lock_get UPSTREAM_DIGEST)"
-  mirror="$(mirror_image)"
-  [ -n "$mirror" ] || die "mirror: no mirror image. Pass --mirror, set AUROS_MIRROR_IMAGE, or add
-       MIRROR_IMAGE= to base.lock. D21 is not optional — without it the pin rots in ~90 days."
-
-  # A digest is not a tag, so the copy needs somewhere to land. `sha256-<hex>` is the same shape
-  # cosign uses for its attachments, and it makes the mirror browsable by a human.
-  tag="${locked/:/-}"
-
-  if skopeo inspect --raw "docker://${mirror}@${locked}" >/dev/null 2>&1; then
-    emit mirrored true
-    emit mirror_ref "${mirror}@${locked}"
-    say "mirror: ${locked} is already in ${mirror} — nothing to do"
-    return 0
-  fi
-
-  say "mirror: copying ${image}@${locked} -> ${mirror}:${tag}"
-  if ! skopeo copy --all "docker://${image}@${locked}" "docker://${mirror}:${tag}"; then
-    die "mirror: could not copy the pinned digest from upstream.
-       If this says manifest unknown, upstream has ALREADY deleted it (D21) and the mirror does not
-       have it either. That is not recoverable by retrying: pick a new upstream digest with
-       'resolve-upstream.sh update', which re-resolves the tag, and mirror that one immediately."
-  fi
-
-  # Verify by digest, not by the copy's exit status. `skopeo copy --all` preserves the manifest
-  # digest; if it somehow did not, the mirror is a different image and FROM would resolve to
-  # something we never tested.
-  local got
-  got="$(skopeo inspect --no-tags "docker://${mirror}:${tag}" | jq -r .Digest)"
-  [ "$got" = "$locked" ] || die "mirror: copied image has digest ${got}, expected ${locked}.
-       The mirror is NOT a byte-identical copy and must not be built from."
-
-  emit mirrored true
-  emit mirror_ref "${mirror}@${locked}"
-  say "mirror: ${mirror}@${locked} verified"
-}
-
-cmd_drift() {
-  local image tag locked
-  image="$(lock_get UPSTREAM_IMAGE)"; tag="$(lock_get UPSTREAM_TAG)"; locked="$(lock_get UPSTREAM_DIGEST)"
-  resolve_tag "$image" "$tag"
-  emit locked_digest   "$locked"
-  emit upstream_digest "$RESOLVED_DIGEST"
-  emit upstream_created "$RESOLVED_CREATED"
-  emit upstream_pull_size_bytes "$RESOLVED_PULL_BYTES"
-  if [ "$RESOLVED_DIGEST" = "$locked" ]; then
-    emit moved false
-    say "no drift — ${image}:${tag} still resolves to ${locked}"
-    return 0
-  fi
-  emit moved true
-  say "DRIFT — ${image}:${tag} moved"
-  say "  was: ${locked}"
-  say "  now: ${RESOLVED_DIGEST} (created ${RESOLVED_CREATED})"
-  return 10
-}
-
-cmd_update() {
-  local image tag locked
-  image="$(lock_get UPSTREAM_IMAGE)"; tag="$(lock_get UPSTREAM_TAG)"; locked="$(lock_get UPSTREAM_DIGEST)"
-  resolve_tag "$image" "$tag"
-
-  if [ "$RESOLVED_DIGEST" = "$locked" ]; then
-    emit moved false
-    emit changed false
-    say "update: nothing to do — already pinned to ${locked}"
-    return 0
-  fi
-
-  local now
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  # Rewrite in place, key by key, preserving the comment header. A regenerated file would lose the
-  # explanation of why the digest is there, which is the most useful thing in it.
-  local tmp; tmp="$(mktemp)"
-  sed -E \
-    -e "s|^UPSTREAM_DIGEST=.*|UPSTREAM_DIGEST=${RESOLVED_DIGEST}|" \
-    -e "s|^UPSTREAM_RESOLVED_AT=.*|UPSTREAM_RESOLVED_AT=${now}|" \
-    -e "s|^UPSTREAM_CREATED=.*|UPSTREAM_CREATED=${RESOLVED_CREATED}|" \
-    -e "s|^UPSTREAM_ARCH=.*|UPSTREAM_ARCH=${RESOLVED_ARCH}|" \
-    -e "s|^UPSTREAM_PULL_SIZE_BYTES=.*|UPSTREAM_PULL_SIZE_BYTES=${RESOLVED_PULL_BYTES}|" \
-    "$LOCK" > "$tmp"
-  mv "$tmp" "$LOCK"
-  say "update: base.lock ${locked} -> ${RESOLVED_DIGEST}"
-
-  # Keep the Containerfile in step, but only where the digest is written literally. Under the
-  # build-arg convention with no default, CI passes the ref and there is nothing in the file to edit.
-  local cf_changed=false
-  if [ -f "$CONTAINERFILE" ]; then
-    if grep -qE "${image}@${DIGEST_RE}" "$CONTAINERFILE"; then
-      local tmp2; tmp2="$(mktemp)"
-      sed -E "s|${image}@${DIGEST_RE}|${image}@${RESOLVED_DIGEST}|g" "$CONTAINERFILE" > "$tmp2"
-      mv "$tmp2" "$CONTAINERFILE"
-      cf_changed=true
-      say "update: Containerfile base reference rewritten to ${RESOLVED_DIGEST}"
-    else
-      say "update: Containerfile has no literal digest to rewrite (build-arg convention) — CI passes it"
-    fi
-  else
-    say "update: no Containerfile present yet; only base.lock was updated"
-  fi
-
-  emit moved true
-  emit changed true
-  emit containerfile_changed "$cf_changed"
-  emit old_digest "$locked"
-  emit upstream_digest "$RESOLVED_DIGEST"
-  emit upstream_created "$RESOLVED_CREATED"
-  emit upstream_arch "$RESOLVED_ARCH"
-  # BLOCKED.md B6: this is a pull PER MACHINE when a low layer changes. A 180-machine site on one
-  # uplink is a ~630 GB event. It is emitted on every update so the number in front of a customer is
-  # always one we measured today, not one we remember from September.
-  emit upstream_pull_size_bytes "$RESOLVED_PULL_BYTES"
-}
-
 case "$CMD" in
   resolve) cmd_resolve ;;
   assert)  cmd_assert ;;
   drift)   cmd_drift ;;
   update)  cmd_update ;;
-  mirror)  cmd_mirror ;;
   ""|-h|--help|help)
     sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0 ;;
-  *) die "unknown command '${CMD}' (resolve | assert | drift | update | mirror)" ;;
+  *) die "unknown command '${CMD}' (resolve | assert | drift | update)" ;;
 esac

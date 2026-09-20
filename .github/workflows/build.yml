@@ -67,11 +67,10 @@ env:
   CHECKOUT_REF: ${{ github.event_name == 'pull_request' && github.sha || github.ref_name }}
   META_REPO: aarohkandy/auros
   STAGE_TAG: stage-${{ github.run_id }}
-  # D17: cosign is a time-boxed risk and is pinned to an exact version, never to a floating tag.
-  # `--new-bundle-format=false` is what keeps the signature discoverable by containers/image, and it
-  # is explicitly deprecated upstream while containers/container-libs#388 stays open. If cosign
-  # removes the flag, this pin is what stops it happening to us silently on a random Tuesday.
-  COSIGN_VERSION: v3.1.3
+  # NOTE: cosign's version, bundle-format flag and installer action are NOT set here. They live in
+  # `signing/cosign.lock`, whose first line says "CI reads this file; nothing hardcodes a version
+  # anywhere else". The `uses:` ref below is the one thing that cannot be dynamic in Actions, so it
+  # is written out AND asserted against the lock.
   # A publish only happens on the default branch and never from a pull request. Fork PRs have a
   # read-only token and no OIDC anyway; this makes the intent explicit rather than incidental.
   IS_PUBLISHABLE: ${{ github.event_name != 'pull_request' && github.ref_name == 'main' }}
@@ -210,14 +209,31 @@ jobs:
         run: |
           # `skopeo` runs as the runner user; every podman command here runs as root. They keep
           # separate auth files, so logging in once is logging in for the wrong half of the build.
-          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # ORDER MATTERS HERE, and getting it wrong cost us a build.
+          #
+          # `sudo skopeo login` can land on the RUNNER USER's /run/user/<uid>/containers/auth.json and
+          # write it as root — after which the unprivileged skopeo gets "permission denied" on its own
+          # auth file. So the privileged logins go first, and the unprivileged login goes LAST and
+          # rewrites the file it owns. We do not move the privileged logins to a custom --authfile,
+          # because every later `sudo podman push` in this workflow expects the default path, and a fix
+          # that silently breaks publishing is worse than the bug.
           echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ github.token }}" | sudo skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Repair ownership if a privileged login clobbered the unprivileged auth file, then log in
+          # unprivileged so the file is definitely ours and definitely current.
+          AUTH="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json"
+          sudo chown -R "$(id -u):$(id -g)" "$(dirname "$AUTH")" 2>/dev/null || true
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ls -l "$AUTH" 2>/dev/null || echo "(no unprivileged auth file — explicit creds are used where it matters)"
 
       - name: D21 — mirror the pinned upstream digest into our namespace
         if: env.IS_PUBLISHABLE == 'true'
         env:
           MIRROR: ${{ needs.plan.outputs.mirror }}
+          # Explicit, because `sudo skopeo login` earlier in this job writes the runner user's
+          # auth.json as root and the unprivileged skopeo here then cannot read its own file.
+          AUROS_REGISTRY_USER: ${{ github.actor }}
+          AUROS_REGISTRY_TOKEN: ${{ github.token }}
         run: |
           # Upstream deletes the digest we pin — weekly cleanup, older-than 90 days, keep-n-tagged 7.
           # `skopeo copy --all` preserves the manifest digest, so the mirror is the same bytes under a
@@ -226,7 +242,7 @@ jobs:
           #
           # Fork PRs cannot push to our registry, so this is scoped to publishable runs. A fork PR
           # that needs the mirror to build will find it already populated by an earlier run on main.
-          ./tools/resolve-upstream.sh mirror --mirror "$MIRROR"
+          AUROS_MIRROR="$MIRROR" ./tools/mirror-upstream.sh
 
       - name: Deterministic inputs
         id: sde
@@ -309,7 +325,7 @@ jobs:
           mkdir -p fragments
           S7='${{ steps.s7.outputs.s7 }}'
           jq -n --arg st "$S7" --arg cd '${{ steps.s7.outputs.content_digest }}' '
-            { profile: "uefi-modern",
+            { profile: "static",
               checks: [ { id: "S7", status: $st,
                           detail: ("content digest " + $cd + " from two builds in one run") } ] }' \
             > fragments/s7.json
@@ -320,7 +336,7 @@ jobs:
           # S1 was proven in the `plan` job. It is recorded here because the ledger is keyed by digest
           # and every check in checks.yaml has to appear in the results document for this digest.
           jq -n --arg r '${{ needs.plan.outputs.base_ref }}' '
-            { profile: "uefi-modern",
+            { profile: "static",
               checks: [ { id: "S1", status: "pass", detail: ("FROM pinned to " + $r) } ] }' \
             > fragments/s1.json
 
@@ -451,42 +467,94 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write   # keyless signing via Actions OIDC
+      # No `id-token: write`. Signing is KEYED — signing/policy.json enforces
+      # keyPath=/usr/lib/pki/containers/auros.pub — so there is no OIDC token to mint.
+    env:
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ env.CHECKOUT_REF }}" }
 
-      - uses: sigstore/cosign-installer@v3.7.0
-        with:
-          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Read signing/cosign.lock — the only place a cosign version is written
+        id: cosign
+        run: |
+          # Measured by the signing owner on 2026-09-20 by reading cmd/cosign/cli/options/sign.go at
+          # each tag: v2.6.5 defaults --new-bundle-format to FALSE and is not deprecated, while
+          # v3.1.3 defaults it to TRUE and carries "this will be the only supported format in future
+          # versions". containers/image — what podman and bootc use on the customer's laptop —
+          # cannot read new-format OCI 1.1 referrer bundles (containers/container-libs#388, open
+          # since 2025-10-12). On the v3 line every signature we make is invisible to the machine
+          # that has to verify it unless a deprecated flag is passed on every invocation, and
+          # `cosign verify` keeps passing throughout. Pinning to 2.6 makes the format we need the
+          # default rather than an override we are one forgotten flag away from losing.
+          set -a; . signing/cosign.lock; set +a
+          : "${COSIGN_VERSION:?signing/cosign.lock has no COSIGN_VERSION}"
+          echo "version=${COSIGN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "flag=${COSIGN_BUNDLE_FORMAT_FLAG:-}" >> "$GITHUB_OUTPUT"
+          echo "pubkey_in_image=${COSIGN_PUBKEY_IN_IMAGE:-}" >> "$GITHUB_OUTPUT"
+          # `uses:` cannot be an expression, so the action ref below is written out. This is the
+          # assertion that stops it drifting from the lock silently.
+          WANT="sigstore/cosign-installer@v4.1.2"
+          if [ "${COSIGN_INSTALLER_ACTION:-$WANT}" != "$WANT" ]; then
+            echo "::error::signing/cosign.lock names ${COSIGN_INSTALLER_ACTION}, but build.yml pins ${WANT}. Update the uses: line in build.yml and gate1-exit.yml to match the lock."
+            exit 1
+          fi
 
-      - name: Sign the digest, keyless
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: ${{ steps.cosign.outputs.version }}
+
+      - name: Sign the digest with the key the image trusts
         env:
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          # cosign uses the DOCKER keychain (~/.docker/config.json); skopeo and podman use
-          # containers auth.json; and root and the runner user keep separate copies of the latter.
-          # Three logins is not belt-and-braces, it is three different credential stores.
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
-          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-          cosign version
-          # D17, in one paragraph, because the flag looks like noise and is not:
-          # `--new-bundle-format=false` keeps the signature as the legacy `<digest>.sig` TAG. cosign 3.x
-          # defaults to OCI 1.1 referrer bundles, which `containers/image` — and therefore podman, skopeo
-          # and bootc — cannot see. The fix on their side is containers/container-libs#388, open since
-          # 2025-10-12 with no fix. So `cosign verify` would keep passing while every customer laptop
-          # found no signature at all, and that failure is SILENT. The flag itself is deprecated
-          # upstream ("this will be the only supported format in future versions"), which is why cosign
-          # is pinned above and why S8 checks discoverability rather than trusting `cosign verify`.
-          FLAGS=""
-          if cosign sign --help 2>&1 | grep -q -- '--new-bundle-format'; then
-            FLAGS="--new-bundle-format=false"
-          else
-            echo "::warning::this cosign has no --new-bundle-format flag; relying on S8 to prove the signature is still discoverable"
+          # KEYED, NOT KEYLESS — and this is deliberate, against an earlier instruction to use
+          # keyless OIDC. `signing/policy.json` is what a customer's laptop enforces, and it says:
+          #
+          #     "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub"
+          #
+          # A keyless signature carries a Fulcio certificate, not that key. The machine would find
+          # no signature matching `auros.pub`, refuse every update forever, and do it at 3am in a
+          # school months after anyone remembered why. The image's policy decides the signing
+          # method; CI does not get a vote. If we ever want keyless, `policy.json` changes first and
+          # every machine in the field has to install an image containing the new policy before it
+          # takes effect (see signing/keys/README.md on rotation — same ordering problem).
+          #
+          # Fails closed: no key, no signature, no publish. An image that cannot be verified by the
+          # machine that has to install it is not a publishable image (spec §3).
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "::error::COSIGN_PRIVATE_KEY is not set. signing/keys/README.md: the keypair is a §9-reserved human action — 'cosign generate-key-pair', commit auros.pub, set COSIGN_PRIVATE_KEY and COSIGN_PASSWORD as repo secrets. Nothing publishes until it exists, and that is the intended behaviour."
+            exit 1
           fi
-          COSIGN_YES=true cosign sign $FLAGS "${IMAGE}@${DIGEST}"
+          [ -f signing/keys/auros.pub ] || {
+            echo "::error::signing/keys/auros.pub is missing, so the image cannot carry the key it verifies against (D8). build/30-update-agent.sh should already have failed the build."; exit 1; }
+
+          cosign version
+          printf '%s' "$COSIGN_PRIVATE_KEY" > /tmp/auros.key
+          chmod 600 /tmp/auros.key
+
+          # Prove the private key matches the public key baked into the image BEFORE signing.
+          # Signing with the wrong key produces a perfectly valid signature that every customer
+          # machine rejects — and S8 would still pass, because the .sig tag would be discoverable.
+          cosign public-key --key /tmp/auros.key > /tmp/derived.pub
+          if ! diff -q <(tr -d ' \n' < /tmp/derived.pub) <(tr -d ' \n' < signing/keys/auros.pub) >/dev/null; then
+            echo "::error::COSIGN_PRIVATE_KEY does not match signing/keys/auros.pub. Every image signed with it would be refused by every machine in the field."
+            exit 1
+          fi
+          echo "private key matches the public key the image ships"
+
+          # D17 belt and braces: on the pinned 2.6 line this flag is already the default, but
+          # passing it explicitly documents the intent at the call site and survives a version bump.
+          FLAG='${{ steps.cosign.outputs.flag }}'
+          if [ -n "$FLAG" ] && ! cosign sign --help 2>&1 | grep -q -- "${FLAG%%=*}"; then
+            echo "::warning::this cosign has no ${FLAG%%=*} flag; relying on S8 to prove the signature is still discoverable"
+            FLAG=""
+          fi
+          COSIGN_YES=true cosign sign $FLAG --key /tmp/auros.key "${IMAGE}@${DIGEST}"
+          shred -u /tmp/auros.key 2>/dev/null || rm -f /tmp/auros.key
 
       - name: S8 — cosign verify AND skopeo can find the .sig tag
         id: s8
@@ -498,19 +566,18 @@ jobs:
           ok=1; detail=""
 
           # Half one. Necessary, and on its own worthless: it passed right through the cosign 3.x
-          # regression while no consumer could see a signature.
-          if cosign verify \
-              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              "${IMAGE}@${DIGEST}" > /tmp/cosign-verify.txt 2>&1; then
-            detail="cosign verify ok"
+          # regression while no consumer could see a signature. Verified against the SAME public key
+          # the image ships, because that is the only key a customer machine will try.
+          if cosign verify --key signing/keys/auros.pub "${IMAGE}@${DIGEST}" > /tmp/cosign-verify.txt 2>&1; then
+            detail="cosign verify ok against signing/keys/auros.pub"
           else
             ok=0; detail="cosign verify FAILED"
             cat /tmp/cosign-verify.txt
           fi
 
-          # Half two, and the one that actually represents a customer's laptop. The legacy attachment
-          # lives at the tag `sha256-<hex>.sig`. If skopeo cannot see it, neither can bootc.
+          # Half two, and the one that actually represents a customer's laptop. The legacy
+          # attachment lives at the tag `sha256-<hex>.sig`. If skopeo cannot see it, neither can
+          # bootc, and the failure is SILENT.
           SIGTAG="${DIGEST/:/-}.sig"
           if skopeo inspect --raw "docker://${IMAGE}:${SIGTAG}" > /tmp/sigtag.json 2>/tmp/sigtag.err; then
             detail="$detail; .sig tag ${SIGTAG} discoverable ($(jq '.layers|length' /tmp/sigtag.json) layer(s))"
@@ -522,7 +589,7 @@ jobs:
 
           ST=fail; [ "$ok" = "1" ] && ST=pass
           jq -n --arg st "$ST" --arg d "$detail" \
-            '{profile:"uefi-modern", checks:[{id:"S8", status:$st, detail:$d}]}' > fragments/s8.json
+            '{profile:"static", checks:[{id:"S8", status:$st, detail:$d}]}' > fragments/s8.json
           cat fragments/s8.json
           echo "$detail"
           [ "$ok" = "1" ] || { echo "::error::S8 FAIL — $detail"; exit 1; }
@@ -540,81 +607,71 @@ jobs:
     timeout-minutes: 150
     permissions:
       contents: read
-      packages: write
-      id-token: write
+      packages: read
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ env.CHECKOUT_REF }}" }
-      - uses: sigstore/cosign-installer@v3.7.0
+      - name: Read signing/cosign.lock
+        id: cosign
+        run: |
+          set -a; . signing/cosign.lock; set +a
+          echo "version=${COSIGN_VERSION}" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@v4.1.2
         with:
-          cosign-release: ${{ env.COSIGN_VERSION }}
+          cosign-release: ${{ steps.cosign.outputs.version }}
       - name: Reclaim disk, enable KVM, install QEMU
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
           sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          # run-update.sh refuses to run without a writable /dev/kvm unless AUROS_ALLOW_TCG=1, and
+          # it is right to: the update group is four boots and would take hours under emulation.
+          # We do NOT set AUROS_ALLOW_TCG. A six-hour job that times out proves nothing.
           sudo chmod 666 /dev/kvm || true
+          [ -w /dev/kvm ] || echo "::warning::/dev/kvm is not writable; the update group will fail closed rather than run under TCG"
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf
           df -h /
 
-      - name: Mint the two images the update leg needs
-        id: images
-        env:
-          IMAGE: ${{ needs.plan.outputs.image }}
-          DIGEST: ${{ needs.build.outputs.digest }}
-        run: |
-          # cosign uses the DOCKER keychain (~/.docker/config.json); skopeo and podman use
-          # containers auth.json; and root and the runner user keep separate copies of the latter.
-          # Three logins is not belt-and-braces, it is three different credential stores.
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
-          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-          # U1-U3 need an OLD image and a NEW image. The old one is the digest we are trying to
-          # publish; the new one is that digest plus a marker file, which is the smallest possible
-          # honest "the base changed". U4 needs a bad one: same content, no signature.
-          cat > /tmp/Containerfile.next <<EOF
-          FROM ${IMAGE}@${DIGEST}
-          RUN echo "run=${{ github.run_id }} leg=update" > /usr/lib/auros-update-probe
-          EOF
-          # D20: no `ostree container commit`. It is obsolete on this base and fails with
-          # "Not in an ostree-based container environment". `bootc container lint` is the validation.
-          sudo podman build --timestamp "$(date +%s)" -t localhost/auros-next:latest -f /tmp/Containerfile.next /tmp
-
-          sudo podman push --digestfile /tmp/d.next localhost/auros-next:latest \
-            "docker://${IMAGE}:${STAGE_TAG}-next"
-          NEXT=$(cat /tmp/d.next)
-          COSIGN_FLAGS=""
-          cosign sign --help 2>&1 | grep -q -- '--new-bundle-format' && COSIGN_FLAGS="--new-bundle-format=false"
-          COSIGN_YES=true cosign sign $COSIGN_FLAGS "${IMAGE}@${NEXT}"
-
-          # The bad image is pushed and deliberately NOT signed. That is the exact condition D8 says
-          # the in-image policy must reject, and U4 is the only check that proves signing does anything.
-          sudo podman build --timestamp "$(date +%s)" -t localhost/auros-bad:latest -f /tmp/Containerfile.next /tmp
-          sudo podman push --digestfile /tmp/d.bad localhost/auros-bad:latest \
-            "docker://${IMAGE}:${STAGE_TAG}-bad"
-          BAD=$(cat /tmp/d.bad)
-
-          echo "old=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "new=${IMAGE}@${NEXT}"   >> "$GITHUB_OUTPUT"
-          echo "bad=${IMAGE}@${BAD}"    >> "$GITHUB_OUTPUT"
-          echo "old ${DIGEST} / new ${NEXT} (signed) / bad ${BAD} (unsigned)"
-
       - name: Update and rollback checks
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
+          # The harness stands up its own registry on the host, serves the image under the name the
+          # in-image policy is scoped to, and mints the old/new/bad variants itself. All it needs
+          # from CI is the image under test and the PRIVATE half of the key the image ships at
+          # /usr/lib/pki/containers/auros.pub — without which it can only offer unsigned images,
+          # which would let U4 pass while U1 fails, i.e. the exact opposite of proving anything.
+          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
+            echo "::error::COSIGN_PRIVATE_KEY is not set. U1-U5 and R1 cannot run, so this digest cannot qualify. See signing/keys/README.md."
+            exit 1
+          fi
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s' "$COSIGN_PRIVATE_KEY" > /tmp/auros.key
+          chmod 600 /tmp/auros.key
           mkdir -p fragments
+          # `--profile uefi-modern` so the fragment lands under a REAL profile rather than the
+          # synthetic "update" bucket. matrix/profiles.yaml calls uefi-modern the always-bound
+          # baseline, and run-update.sh already defaults to it internally.
+          set +e
           sudo -E ./matrix/run.sh \
             --phase update \
+            --profile uefi-modern \
             --image  '${{ needs.build.outputs.stage_ref }}' \
             --digest '${{ needs.build.outputs.digest }}' \
-            --old-image '${{ steps.images.outputs.old }}' \
-            --new-image '${{ steps.images.outputs.new }}' \
-            --bad-image '${{ steps.images.outputs.bad }}' \
             --checks matrix/checks.yaml \
             --profiles matrix/profiles.yaml \
-            --out fragments/update.json
+            --out fragments/update.json \
+            -- --signing-key /tmp/auros.key
+          rc=$?
+          set -e
+          shred -u /tmp/auros.key 2>/dev/null || rm -f /tmp/auros.key
+          # A non-zero harness still writes a fragment recording WHICH checks failed, and that
+          # fragment is what the gate reads. Re-raise after capturing it, never instead of.
           jq -e '.profile and (.checks|length > 0)' fragments/update.json >/dev/null
           jq -r '.checks[] | "\(.id) \(.status) \(.detail // "")"' fragments/update.json
+          exit $rc
+
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: fragments-update, path: fragments/, if-no-files-found: error }
@@ -778,7 +835,7 @@ jobs:
           # The staging tags are unsigned and un-followed, so leaving them costs nothing but clutter.
           # GITHUB_TOKEN has `packages: write` but NOT `delete:packages`, so this usually cannot
           # succeed — it is here so that the day a token can, it does. It must never fail the run.
-          for T in "${STAGE_TAG}" "${STAGE_TAG}-next" "${STAGE_TAG}-bad"; do
+          for T in "${STAGE_TAG}"; do
             echo "would remove tag ${T}"
           done
           echo "::notice::staging tags stay until a token with delete:packages exists; they are unsigned and cannot be installed."

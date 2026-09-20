@@ -81,6 +81,33 @@ surface a week later as *"the machines feel wrong"*, with nothing in any log. Th
 `open/assert.sh`, which asserts both that our groups are gone **and** that the file still exists with
 its other content.
 
+### The kdeglobals ordering hazard — confirmed, not hypothetical
+
+`build/40-windows-feel.sh` installs `/etc/xdg/kdeglobals` **as a whole file**, and it runs at step 40,
+*after* this layer at step 20. So in a base build it removes the three KDE Kiosk groups apply-policy
+merged in.
+
+**In practice this does not bite, and it is worth being precise about why:**
+
+- The base image is `open`, which writes no KDE restriction groups at all. Nothing is lost.
+- A customer recipe activates its mode in its **own derived layer**, which runs after every base
+  build script including 40. Our merge then preserves `[KDE]` and `SingleClick=false` untouched — the
+  direction that matters is safe, and `open/assert.sh` asserts the shared file survived.
+
+**It does bite in one place:** building a single-mode base with `AUROS_POLICY=locked`, which is the
+path this README suggests for running B5 in CI. `20-policy.sh` prints a loud warning in exactly that
+case and names the fix: re-run `apply-policy` as the last step, or build the mode in a derived layer
+like a recipe does.
+
+Note what is *not* affected even then: polkit, sudoers, PAM, dconf and the unit masks all survive,
+because none of them shares a file with another layer. The enforcement is intact; only the
+KDE-application restrictions would be missing. That is the right way round, and it is why the
+enforcement was never put in kdeglobals in the first place.
+
+*(Owned by another task, so flagged rather than edited: `40-windows-feel.sh` merging its groups
+instead of installing the file wholesale — or simply running before 20 — would remove the hazard
+entirely.)*
+
 ### A note on `/etc` and ostree
 
 Most of the above lives in `/etc`, which ostree three-way-merges on upgrade. That is what makes a
@@ -296,10 +323,10 @@ Recorded rather than assumed silently, because these files are owned by other ta
 | Assumption | Owner | If it is wrong |
 |---|---|---|
 | The Containerfile COPYs `policy/` to `/tmp/auros-build/policy` before running `build/*.sh` | Containerfile | `20-policy.sh` falls back to `$SELF/../policy`, and fails loudly naming both paths if neither exists |
-| The update timer is `bootc-fetch-apply-updates.timer` | A4 (update agent) | The assertions look for whichever of three candidate timers is *active* and name the one they found; none active is a **fail**, never a skip |
+| The update timers are `bootc-fetch-apply-updates.timer` **and** `uupd.timer` | A4 (update agent) | Confirmed against `build/30-update-agent.sh`: Aurora ships `uupd.timer` as well as bootc's own timer. The assertions attempt to stop **every** active timer among four candidates, not the first — a mode that blocks one and not the other lets a user half-disable updates. None active is a **fail**, never a skip |
 | Something puts the school's IT account into the `aurosadmin` group | first-boot setup | `apply-policy` prints a loud multi-line warning at build time; `AUROS_ADMIN_USERS="name"` sets it at build time instead |
 | A GRUB superuser password is set | A2 (hardening) | Physical access defeats every mode here; recorded as a note in `locked/assert.sh` and in *Honest limits* above |
-| `/etc/xdg/kdeglobals` is also written by the Windows-familiarity layer | A10 | We merge three named groups and never rewrite the file; `open/assert.sh` asserts the file survived |
+| `/etc/xdg/kdeglobals` is also written by the Windows-familiarity layer | A10 / `40-windows-feel.sh` | **Confirmed, and it is an ordering hazard rather than an assumption** — see *The kdeglobals ordering hazard* below |
 | Check **B1** ("reaches a login prompt") has a kiosk clause | matrix | **Kiosk cannot pass B1 as written** — there is no login prompt, by design. B1 needs `kiosk ⇒ the kiosk session is active and the application process is running`. `kiosk/assert.sh` already asserts exactly that. Flagged, not edited: `checks.yaml` is not this task's file |
 
 ---

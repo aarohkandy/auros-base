@@ -1,106 +1,97 @@
 #!/usr/bin/bash
-#
 # 30-update-agent.sh -- the safety-critical layer of auros-base.
 #
-# Installs three things that are one thing:
-#   A. the update agent      -- bootc's timer, greenboot, and the health checks that decide
-#                               whether a boot was good enough to keep
-#   B. signature enforcement -- D8: the key, registries.d, and a policy that actually verifies
-#   C. the U4 harness        -- verify-enforcement.sh, in the image, so the check runs on the
-#                               machine it is a claim about
+# Runs inside the image build from auros-base/Containerfile, in numeric order. Idempotent,
+# -euo pipefail, and says what it did.
 #
-# They are one script because they are one property: a machine that updates itself unattended is
-# only safe if it can refuse a bad image and recover from a broken one. Either half alone is
-# worse than neither.
+# ── THREE THINGS THAT ARE ONE THING ──────────────────────────────────────────────────────────────
 #
-# Idempotent. Every assertion is fail-closed: this script would rather fail the build than
-# produce an image that looks configured and is not. That preference is the entire point of the
-# file -- read D8 and note that the failure it describes is invisible from inside the image.
+#   A. the update agent      bootc's own timer, greenboot, and the health checks that decide
+#                            whether a boot was good enough to keep
+#   B. signature enforcement D8: key, registries.d, policy and install config that actually verify
+#   C. the U4 harness        verify-enforcement.sh, in the image, so the check runs on the machine
+#                            it is a claim about
 #
-# Convention: run by ../Containerfile in numeric order; its input files were COPYed to
-# /tmp/auros-build/ beforehand.
-
+# They live in one script because they are one property: a machine that updates itself unattended
+# is only safe if it can refuse a bad image and recover from a broken one. Either half alone is
+# worse than neither -- unattended updates with no rollback is a fleet-wide brick waiting for a bad
+# night, and rollback with no signature check is a fleet that will faithfully recover into whatever
+# anyone pushes to the registry.
+#
+# ── FAIL-CLOSED, EVERYWHERE ──────────────────────────────────────────────────────────────────────
+#
+# Every assertion here would rather fail the build than produce an image that looks configured and
+# is not. Read D8 and notice that the failure it describes is INVISIBLE from inside the image: the
+# files are present, the flag is accepted, the command exits 0, and nothing is verified. The whole
+# design principle of this file is that such a state must be unreachable at build time, because it
+# is undetectable later.
 set -euo pipefail
 
-say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-info() { printf '    %s\n' "$*"; }
-die()  { printf '\n!!! 30-update-agent.sh: %s\n\n' "$*" >&2; exit 1; }
+. /tmp/auros-build/build/00-common.sh
 
-# ---------------------------------------------------------------------------------------------
-# Inputs
-# ---------------------------------------------------------------------------------------------
-# AUROS_SCOPE is the registry namespace that signature enforcement applies to. D1 puts the
-# namespace in exactly one file (auros.config.json) and has everything else derive from it, so
-# this is passed in by the Containerfile as a build arg rather than hardcoded here. The default
-# is the documented one; if the Containerfile does not pass it, a rename would silently leave
-# this layer enforcing the old namespace, so we echo what we used.
-AUROS_SCOPE="${AUROS_SCOPE:-ghcr.io/aarohkandy}"
+UA="${AUROS_BUILD_DIR}/update-agent"
+SIGN="${AUROS_BUILD_DIR}/signing"
+[ -d "$UA/greenboot" ]   || die "$UA is missing or is not update-agent/ -- the Containerfile must COPY update-agent/ to $AUROS_BUILD_DIR/"
+[ -f "$SIGN/policy.json" ] || die "$SIGN is missing or is not signing/ -- the Containerfile must COPY signing/ to $AUROS_BUILD_DIR/"
+
+# ── The enforced namespace ───────────────────────────────────────────────────────────────────────
+# D1 puts the namespace in exactly one file (auros.config.json) so that a rename is one file plus a
+# registry re-tag. auros.config.json lives in the meta repo and is not in this build context, so
+# rather than hardcode a second copy of the name, this derives it from the source repo URL that
+# 00-common.sh already wrote into the image. A rename therefore propagates here on its own.
+# AUROS_SCOPE in the environment overrides, which is how CI builds against a scratch namespace.
+auros_scope_default() {
+  local rel="$AUROS_PREFIX/release" repo org
+  if [ -r "$rel" ]; then
+    repo="$(grep -E '^AUROS_SOURCE_REPO=' "$rel" | head -1 | cut -d= -f2- || true)"
+    org="$(printf '%s' "$repo" | sed -n 's#^https://github\.com/\([^/]*\)/.*#\1#p')"
+  fi
+  printf 'ghcr.io/%s' "${org:-aarohkandy}"
+}
+AUROS_SCOPE="${AUROS_SCOPE:-$(auros_scope_default)}"
 AUROS_CANARY_REPO="${AUROS_CANARY_REPO:-${AUROS_SCOPE}/auros-canary}"
 
-find_src() {
-    local name="$1" c
-    for c in "/tmp/auros-build/${name}" "/tmp/auros-build/auros-base/${name}" "/tmp/auros-build"; do
-        [[ -d "${c}" ]] && { printf '%s' "${c}"; return 0; }
-    done
-    return 1
-}
-UA_SRC="$(find_src update-agent)" || die "cannot find update-agent/ under /tmp/auros-build"
-SIGN_SRC="$(find_src signing)"    || die "cannot find signing/ under /tmp/auros-build"
-[[ -d "${UA_SRC}/greenboot" ]]    || die "${UA_SRC} does not look like update-agent/ (no greenboot/)"
-[[ -f "${SIGN_SRC}/policy.json" ]] || die "${SIGN_SRC} does not look like signing/ (no policy.json)"
+step "update agent and signature enforcement"
+found "enforced scope:    $AUROS_SCOPE"
+found "canary repository: $AUROS_CANARY_REPO"
 
-say "30-update-agent.sh"
-info "update-agent sources: ${UA_SRC}"
-info "signing sources:      ${SIGN_SRC}"
-info "enforced scope:       ${AUROS_SCOPE}"
-info "canary repository:    ${AUROS_CANARY_REPO}"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A1. assert the platform auto-rollback depends on (D9)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# greenboot's rollback is a GRUB boot counter, wired through ostree-finalize-staged.service and
+# bootupd's static GRUB config. On the composefs/UKI backend upstream has never wired boot-loader
+# entry counting, so greenboot rollback DOES NOT WORK THERE AT ALL. D9 makes staying on
+# ostree + GRUB/bootupd a deliberate constraint rather than a default -- and a constraint nobody
+# asserts is only a preference. These are the assertions that make it a constraint.
 
-DNF=dnf5; command -v dnf5 >/dev/null 2>&1 || DNF=dnf
-command -v "${DNF}" >/dev/null 2>&1 || die "neither dnf5 nor dnf is available"
+have_cmd bootc || die "bootc is not in this image -- this is not a bootc base and nothing below applies"
+found "bootc: $(bootc --version 2>/dev/null || echo present)"
 
-# =============================================================================================
-say "A1. Assert the platform this layer depends on (D9)"
-# =============================================================================================
-# greenboot's rollback is implemented by a GRUB boot counter, wired through
-# ostree-finalize-staged.service and bootupd's static GRUB config. On the composefs/UKI backend
-# upstream has not wired boot-loader entry counting at all, so greenboot rollback DOES NOT WORK
-# there. D9 makes staying on ostree + GRUB/bootupd a deliberate constraint rather than a default,
-# and a constraint nobody asserts is a preference. These are the assertions.
+[ -f /usr/lib/systemd/system/ostree-finalize-staged.service ] || die \
+  "ostree-finalize-staged.service is absent. greenboot's greenboot-grub2-set-counter.service is RequiredBy that unit, so without it the boot counter is never staged and auto-rollback (check U3) silently does not exist. If this base has moved to the composefs backend, D9 applies and that is a decision for the human, not something to work around here."
+did "ostree backend confirmed -- the boot counter can be staged"
 
-command -v bootc >/dev/null 2>&1 || die "bootc is not in this image; this is not a bootc base"
-info "bootc: $(bootc --version 2>/dev/null || echo present)"
+[ -d /usr/lib/bootupd/grub2-static ] || die \
+  "/usr/lib/bootupd/grub2-static is absent. bootupd concatenates every *.cfg in its configs.d into /boot/grub2/grub.cfg at install time, and that is the only path by which greenboot's boot-counter logic reaches GRUB."
+did "bootupd static GRUB config present"
 
-[[ -f /usr/lib/systemd/system/ostree-finalize-staged.service ]] \
-    || die "ostree-finalize-staged.service is absent. greenboot's greenboot-grub2-set-counter.service is RequiredBy that unit, so without it the boot counter is never set and auto-rollback (check U3) silently does not exist. If this base has moved to the composefs backend, D9 applies and that is a decision for the human, not something to work around here."
-info "ostree-finalize-staged.service present -- ostree backend, boot counter can be staged"
-
-[[ -d /usr/lib/bootupd/grub2-static ]] \
-    || die "/usr/lib/bootupd/grub2-static is absent; bootupd's static GRUB config is what assembles greenboot's boot-counter fragment into /boot/grub2/grub.cfg at install time"
-info "bootupd static GRUB config directory present"
-
-# =============================================================================================
-say "A2. Install greenboot -- NOT preinstalled on Aurora (D9)"
-# =============================================================================================
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A2. install greenboot -- NOT preinstalled on Aurora (D9)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # Verified absent from ublue-os/aurora, bluefin, main, and the Fedora bootc standard/minimal
-# manifests; it ships only in the Fedora bootc IoT manifest. Auto-rollback is a headline safety
-# property -- a school has one overworked IT person and no out-of-band console -- so this is an
-# explicit install, not an assumption.
+# manifests; it ships only in the Fedora bootc IoT manifest.
 #
-# We install `greenboot` and deliberately NOT `greenboot-default-health-checks`. That subpackage
-# ships 01_repository_dns_check.sh as a REQUIRED check, which fails when DNS is unreachable. A
-# required check that fails rolls the machine back. A school whose broadband drops overnight
-# would find every laptop rolled back in the morning, and then rolled back again, which lands on
-# the fallback deployment and needs a technician. U5 says an offline machine is a no-op. Our own
-# 10-network-stack.sh asserts the network STACK, never connectivity, for exactly this reason.
+# We install `greenboot` and DELIBERATELY NOT `greenboot-default-health-checks`. That subpackage
+# ships 01_repository_dns_check.sh as a REQUIRED check, and a required check that fails rolls the
+# machine back. A school whose broadband drops overnight would find every laptop rolled back in the
+# morning, then rolled back again from there -- which is the fallback boot and needs a technician
+# per machine. U5 says an offline machine is a no-op. Our own 10-network-stack.sh asserts the
+# network STACK and never connectivity, for exactly this reason.
 
-if rpm -q greenboot >/dev/null 2>&1; then
-    info "greenboot already installed: $(rpm -q greenboot)"
-else
-    "${DNF}" install -y greenboot || die "could not install greenboot"
-    info "installed $(rpm -q greenboot)"
-fi
-if rpm -q greenboot-default-health-checks >/dev/null 2>&1; then
-    info "NOTE: greenboot-default-health-checks is present (not installed by us). Its 01_repository_dns_check.sh is a REQUIRED check that fails when DNS is down -- review before shipping."
+pkg_ensure greenboot
+
+if have_pkg greenboot-default-health-checks; then
+  warn "greenboot-default-health-checks is installed (not by us). Its 01_repository_dns_check.sh is a REQUIRED check that fails when DNS is unreachable, which would roll a machine back over a school's broadband outage. Review before shipping."
 fi
 
 for f in /usr/libexec/greenboot/greenboot \
@@ -109,288 +100,324 @@ for f in /usr/libexec/greenboot/greenboot \
          /usr/lib/systemd/system/greenboot-healthcheck.service \
          /usr/lib/systemd/system/greenboot-grub2-set-counter.service \
          /usr/lib/systemd/system/redboot-auto-reboot.service; do
-    [[ -e "${f}" ]] || die "greenboot is installed but ${f} is missing; the package layout changed"
+  [ -e "$f" ] || die "greenboot installed but $f is missing -- the package layout changed, re-read greenboot.spec before continuing"
 done
+did "greenboot payload verified"
 
 GB_FRAGMENT=/usr/lib/bootupd/grub2-static/configs.d/08_greenboot.cfg
-[[ -f "${GB_FRAGMENT}" ]] \
-    || die "${GB_FRAGMENT} is missing. bootupd concatenates every *.cfg in that directory into /boot/grub2/grub.cfg at install time; without this fragment GRUB has no boot_counter logic and auto-rollback does not happen, while every other part of greenboot looks correctly installed. This is precisely the kind of silent gap check U3 exists to catch -- fail here instead."
-grep -q 'boot_counter' "${GB_FRAGMENT}" || die "${GB_FRAGMENT} exists but contains no boot_counter logic"
-info "GRUB boot-counter fragment present and contains boot_counter"
+[ -f "$GB_FRAGMENT" ] || die \
+  "$GB_FRAGMENT is missing. Without it GRUB has no boot_counter logic, auto-rollback does not happen, and EVERY OTHER PART of greenboot still looks correctly installed. That is precisely the silent gap check U3 exists to catch -- fail here, where it is cheap."
+grep -q 'boot_counter' "$GB_FRAGMENT" || die "$GB_FRAGMENT exists but has no boot_counter logic in it"
+did "GRUB boot-counter fragment present"
 
-# =============================================================================================
-say "A3. Retry count -- make 'fails twice => rollback' literally what happens"
-# =============================================================================================
-# MEASURED SEMANTICS (greenboot-grub2-set-counter + grub2/08_greenboot.cfg, read 2026-09-20):
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A3. retry count -- make 'fails twice ⇒ rollback' literally what happens"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# MEASURED SEMANTICS, from greenboot-grub2-set-counter and grub2/08_greenboot.cfg:
 #
-#   On staging an update, greenboot writes boot_counter=$GREENBOOT_MAX_BOOT_ATTEMPTS and
-#   boot_success=0. On each boot, GRUB: if boot_counter is 0 or -1 -> set default=1, i.e. boot
-#   the ROLLBACK deployment; otherwise decrement it.
+#   staging an update writes boot_counter=$GREENBOOT_MAX_BOOT_ATTEMPTS and boot_success=0.
+#   each boot, GRUB: if boot_counter is 0 or -1 -> set default=1 (the ROLLBACK deployment);
+#                    otherwise decrement it.
 #
-#   So MAX=N gives the new image N attempts, and the rollback happens on boot N+1.
+#   So MAX=N gives the new image N attempts and rolls back on boot N+1.
 #
-#   THE REAL UPSTREAM DEFAULT IS 3 -- three attempts at the new image, rollback on the fourth
-#   boot. That is the documented default and it is what you get if this block is removed.
+#   THE REAL UPSTREAM DEFAULT IS 3 -- three attempts, rollback on the fourth boot. That is what you
+#   get if this block is deleted.
 #
-# Spec 6A says "rolls back automatically if the new image fails to reach a login prompt twice".
-# Two attempts means GREENBOOT_MAX_BOOT_ATTEMPTS=2. Not 3, which would be three attempts, and
-# not 1, which gives a single attempt and would roll a machine back over one unlucky boot.
+# Spec §6A says "rolls back automatically if the new image fails to reach a login prompt twice".
+# Twice is 2. Not 3, and not 1 -- 1 would roll a machine back over a single unlucky boot.
 
 CONF=/etc/greenboot/greenboot.conf
-[[ -f "${CONF}" ]] || die "${CONF} is missing after installing greenboot"
-# Idempotent: drop any uncommented setting, then append ours.
-sed -i '/^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=/d' "${CONF}"
-cat >> "${CONF}" <<'EOF'
+[ -f "$CONF" ] || die "$CONF is missing after installing greenboot"
+sed -i '/^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=/d' "$CONF"
+cat >> "$CONF" <<'EOF'
 
-# AUROS: spec 6A -- "rolls back automatically if the new image fails to reach a login prompt
+# AUROS: spec §6A -- "rolls back automatically if the new image fails to reach a login prompt
 # twice". Upstream's default is 3 (three attempts, rollback on the fourth boot). Two attempts is
 # what "twice" means. Do not raise this without changing the sentence we sell.
 GREENBOOT_MAX_BOOT_ATTEMPTS=2
 EOF
-n="$(grep -cE '^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=2$' "${CONF}" || true)"
-[[ "${n}" == "1" ]] || die "expected exactly one GREENBOOT_MAX_BOOT_ATTEMPTS=2 in ${CONF}, found ${n}"
-grep -q 'DISABLED_HEALTHCHECKS=' "${CONF}" \
-    || die "${CONF} no longer defines DISABLED_HEALTHCHECKS; greenboot sources this file under 'set -u' and expands that array unquoted-safe, so an undefined one breaks every health check"
-info "GREENBOOT_MAX_BOOT_ATTEMPTS=2 (upstream default is 3)"
+auros_stamp "$CONF"
+printf '%s\n' "$CONF" >> "$AUROS_WRITTEN_LIST"
+n="$(grep -cE '^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=2$' "$CONF" || true)"
+[ "$n" = "1" ] || die "expected exactly one GREENBOOT_MAX_BOOT_ATTEMPTS=2 in $CONF, found $n"
+# greenboot sources this file under `set -u` and expands DISABLED_HEALTHCHECKS as an array. If our
+# edit ever removed that definition, every health check would abort before running -- which
+# greenboot would report as a failure, on every boot, forever.
+grep -q 'DISABLED_HEALTHCHECKS=' "$CONF" || die "$CONF no longer defines DISABLED_HEALTHCHECKS"
+did "GREENBOOT_MAX_BOOT_ATTEMPTS=2 (upstream default is 3)"
+record greenboot-max-boot-attempts 2
 
-# =============================================================================================
-say "A4. The update timer -- verified by name, not assumed"
-# =============================================================================================
-# MEASURED, and this is the finding that matters most in this section:
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A4. the update timer -- verified by name, not assumed"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# MEASURED, and this is the most consequential finding in this step:
 #
-#   Aurora's systemd preset (system_files/shared/usr/lib/systemd/system-preset/89-aurora.preset)
-#   enables `uupd.timer`, NOT bootc's own timer. uupd runs `bootc upgrade --quiet --progress-fd 3`
-#   -- it STAGES and never reboots -- once a day at 04:00.
+#   Aurora's preset (system_files/shared/usr/lib/systemd/system-preset/89-aurora.preset) enables
+#   `uupd.timer`, NOT bootc's timer. uupd runs `bootc upgrade --quiet --progress-fd 3` -- it STAGES
+#   and never reboots -- once a day at 04:00.
 #
-#   bootc's own bootc-fetch-apply-updates.timer IS in the image (it ships in the bootc RPM) but
-#   is not preset-enabled, so it is inert.
+#   bootc's own bootc-fetch-apply-updates.timer IS present (it ships in the bootc RPM) and is NOT
+#   preset-enabled, so it is inert.
 #
-# If we had assumed bootc's timer was running, this image would stage updates and never apply
-# them, U1 would fail, and the cause would look like a bootc bug rather than a preset.
+# Had we assumed bootc's timer was running, this image would stage updates and never apply them,
+# check U1 would fail, and the cause would look like a bootc bug rather than a systemd preset.
 #
-# We enable bootc's timer and override its ExecStart. We leave uupd.timer alone: it also updates
-# Flatpaks, which is where the customer's applications live (spec 3), and its `bootc upgrade` is
-# harmless -- bootc serialises on its own lock and auros-update exits clean when it loses.
+# We enable bootc's timer and override its ExecStart. uupd.timer is left alone: it also updates
+# Flatpaks, which is where the customer's applications live (spec §3). The two can collide on
+# bootc's lock; auros-update retries once and then exits clean, so a collision costs one skipped
+# cycle and never a failed unit.
 
 TIMER_UNIT=/usr/lib/systemd/system/bootc-fetch-apply-updates.timer
 SVC_UNIT=/usr/lib/systemd/system/bootc-fetch-apply-updates.service
-[[ -f "${TIMER_UNIT}" && -f "${SVC_UNIT}" ]] || die \
-"bootc-fetch-apply-updates.{timer,service} are not at /usr/lib/systemd/system/. bootc has renamed
- or moved its update unit. DO NOT guess a replacement: our drop-ins would attach to nothing and
- the image would ship with no update path at all, which check S10 would catch only if it also
- learned the new name. Find the current unit, update this script and the greenboot check
- 30-update-timer-enabled.sh together, and record it in DECISIONS.md."
-info "vendor units present: bootc-fetch-apply-updates.{timer,service}"
-grep -q 'bootc upgrade' "${SVC_UNIT}" || die "${SVC_UNIT} no longer runs 'bootc upgrade'; re-read it before overriding"
+{ [ -f "$TIMER_UNIT" ] && [ -f "$SVC_UNIT" ]; } || die \
+  "bootc-fetch-apply-updates.{timer,service} are not in /usr/lib/systemd/system/. bootc has renamed or moved its update unit. DO NOT guess a replacement: our drop-ins would attach to nothing and this image would ship with no update path at all. Find the current unit name, change this script AND the greenboot check 30-update-timer-enabled.sh together, and record it in DECISIONS.md."
+grep -q 'bootc upgrade' "$SVC_UNIT" || die "$SVC_UNIT no longer runs 'bootc upgrade' -- re-read it before overriding its ExecStart"
+did "vendor units present and still run bootc upgrade"
 
-install -d -m 0755 /usr/libexec/auros
-install -D -m 0755 "${UA_SRC}/libexec/auros-update" /usr/libexec/auros/auros-update
-info "installed /usr/libexec/auros/auros-update"
+install_file "$UA/libexec/auros-update" "$AUROS_LIBEXEC/auros-update" 0755
 
 for d in bootc-fetch-apply-updates.service.d bootc-fetch-apply-updates.timer.d greenboot-healthcheck.service.d; do
-    [[ -d "${UA_SRC}/systemd/${d}" ]] || die "missing drop-in source ${UA_SRC}/systemd/${d}"
-    install -d -m 0755 "/usr/lib/systemd/system/${d}"
-    install -m 0644 -t "/usr/lib/systemd/system/${d}/" "${UA_SRC}/systemd/${d}/"*.conf
-    info "drop-in: /usr/lib/systemd/system/${d}/"
+  [ -d "$UA/systemd/$d" ] || die "missing drop-in source $UA/systemd/$d"
+  for c in "$UA/systemd/$d"/*.conf; do
+    install_file "$c" "/usr/lib/systemd/system/$d/$(basename "$c")" 0644
+  done
 done
-grep -q '^ExecStart=$' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf \
-    || die "the service drop-in does not clear ExecStart first; systemd would APPEND our command to bootc's and the machine would run both"
 
-# =============================================================================================
-say "A5. Health checks"
-# =============================================================================================
+# systemd APPENDS to a vendor ExecStart unless the drop-in clears it first. Without the empty
+# `ExecStart=` line the machine would run bootc's `--apply` command AND ours, which means it would
+# reboot out from under a logged-in user in exactly the case our wrapper exists to prevent.
+grep -qx 'ExecStart=' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf \
+  || die "the service drop-in does not clear ExecStart= first; systemd would run both bootc's command and ours"
+did "ExecStart replaced, not appended"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A5. health checks"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # greenboot's runner globs '*.sh' and sorts by name; required.d runs in STRICT mode, so the first
-# failure stops the rest. The numeric prefixes are that order, cheapest and most fundamental
-# first. /etc/greenboot is where greenboot looks and where a site can add its own; in a bootc
-# image /etc is three-way merged on upgrade, so image-provided files here keep tracking the image
-# on machines that have not edited them.
+# failure stops the rest. The numeric prefixes are that order: most fundamental first.
+#
+# /etc/greenboot is where greenboot looks, and where a site can add or override a check without us
+# cutting a new image. On a bootc host /etc is three-way merged on upgrade, so machines that have
+# not edited these keep tracking the image.
 
 for dir in check/required.d check/wanted.d green.d red.d; do
-    install -d -m 0755 "/etc/greenboot/${dir}"
-    shopt -s nullglob
-    files=( "${UA_SRC}/greenboot/${dir}/"*.sh )
-    shopt -u nullglob
-    (( ${#files[@]} > 0 )) || die "no scripts found in ${UA_SRC}/greenboot/${dir}"
-    for f in "${files[@]}"; do
-        bash -n "${f}" || die "${f} is not valid bash"
-        install -D -m 0755 "${f}" "/etc/greenboot/${dir}/$(basename "${f}")"
-        info "greenboot ${dir}/$(basename "${f}")"
-    done
+  found "$dir:"
+  shopt -s nullglob
+  files=( "$UA/greenboot/$dir"/*.sh )
+  shopt -u nullglob
+  [ ${#files[@]} -gt 0 ] || die "no scripts in $UA/greenboot/$dir"
+  for f in "${files[@]}"; do
+    bash -n "$f" || die "$f is not valid bash -- a health check that cannot parse fails on every boot"
+    install_file "$f" "/etc/greenboot/$dir/$(basename "$f")" 0755
+  done
 done
 
-install -d -m 0755 /etc/auros/update-agent
-install -D -m 0644 "${UA_SRC}/etc/auros/update-agent/failed-units.ignore" /etc/auros/update-agent/failed-units.ignore
-install -D -m 0644 "${UA_SRC}/etc/auros/update-agent/apply-policy"        /etc/auros/update-agent/apply-policy
-install -D -m 0644 "${UA_SRC}/tmpfiles/auros-update-agent.conf"           /usr/lib/tmpfiles.d/auros-update-agent.conf
-info "state dir declared via tmpfiles (NOT mkdir'd: /var in a Containerfile is only a first-boot default)"
+install_file "$UA/etc/auros/update-agent/failed-units.ignore" /etc/auros/update-agent/failed-units.ignore 0644
+install_file "$UA/etc/auros/update-agent/apply-policy"        /etc/auros/update-agent/apply-policy        0644
+# State lives in /var, declared via tmpfiles.d rather than mkdir'd: content written to /var in a
+# Containerfile is only a first-boot default. More to the point, a baseline of "what was working
+# before" stored inside the image would be replaced by the very update it exists to judge.
+install_file "$UA/tmpfiles/auros-update-agent.conf" /usr/lib/tmpfiles.d/auros-update-agent.conf 0644
 
-# Sanity: the required checks must be exactly the four we reason about in the README. A fifth
-# one appearing without the README changing means somebody added a rollback trigger silently.
-req_count="$(find /etc/greenboot/check/required.d -name '*.sh' | wc -l | tr -d ' ')"
-[[ "${req_count}" == "4" ]] || die "expected 4 required health checks, found ${req_count}. Every required check is a rollback trigger; adding one is a safety decision and belongs in update-agent/README.md and DECISIONS.md, not in a quiet commit."
-info "4 required checks, 3 wanted checks"
+# EVERY REQUIRED CHECK IS A ROLLBACK TRIGGER. Adding one is a safety decision, not a refactor, so
+# the count is asserted here and reasoned about in update-agent/README.md. If this fails, the right
+# response is to write down why the new check is worth a rollback -- not to change the number.
+req="$(find /etc/greenboot/check/required.d -name '*.sh' | wc -l | tr -d ' ')"
+[ "$req" = "4" ] || die "expected 4 required health checks, found $req. Every required check can roll a machine back; adding one belongs in update-agent/README.md and DECISIONS.md, not in a quiet commit."
+did "4 required checks (rollback triggers), 3 wanted checks (reported only)"
 
-# =============================================================================================
-say "B1. Signature enforcement -- D8"
-# =============================================================================================
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "B1. signature enforcement -- D8"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # Deriving from Aurora gives us NOTHING here. The base policy ends in a docker
-# "": [{"type":"insecureAcceptAnything"}] catch-all, so `bootc switch
-# --enforce-container-sigpolicy` succeeds while verifying nothing. Everything below ships INSIDE
-# the image because a customer's laptop has no other source for it.
+# "": [{"type":"insecureAcceptAnything"}] catch-all, so `bootc switch --enforce-container-sigpolicy`
+# succeeds while verifying nothing. All four pieces below must be true and EACH ONE ALONE LOOKS
+# LIKE SUCCESS.
 
-KEY_SRC="${SIGN_SRC}/keys/auros.pub"
-[[ -s "${KEY_SRC}" ]] || die \
-"signing/keys/auros.pub is missing or empty.
+KEY_SRC="$SIGN/keys/auros.pub"
+[ -s "$KEY_SRC" ] || die \
+"signing/keys/auros.pub is missing or empty. This build is REFUSED rather than completed.
 
- This build is REFUSED rather than completed, on purpose. An image built without the public key
- would carry a policy that references /usr/lib/pki/containers/auros.pub, find nothing there, and
- refuse every update for the rest of the machine's life -- in a school, months later, with no
- terminal and no out-of-band console. Spec 3: an unsigned or untested image can never reach a
- customer; a build that cannot verify signatures should not produce an image at all.
+   An image built without the key would carry a policy referencing /usr/lib/pki/containers/auros.pub,
+   find nothing there, and refuse every update for the rest of that machine's life -- in a school,
+   months later, with no terminal and no out-of-band console. Spec §3: an unsigned or untested image
+   can never reach a customer; a build that cannot verify signatures should not produce an image.
 
- Generating the key pair is a human action -- it mints a long-lived organisational credential.
- See auros-base/signing/keys/README.md."
-grep -q 'BEGIN PUBLIC KEY' "${KEY_SRC}" || die "${KEY_SRC} is not a PEM public key"
-if grep -q 'BEGIN .*PRIVATE KEY' "${KEY_SRC}"; then
-    die "${KEY_SRC} contains a PRIVATE key. Refusing to bake a private key into an image that ships to customers."
+   Generating the key pair is a human action -- it mints a long-lived organisational credential.
+   See auros-base/signing/keys/README.md, and signing/RISKS.md R3."
+grep -q 'BEGIN PUBLIC KEY' "$KEY_SRC" || die "$KEY_SRC is not a PEM public key"
+if grep -q 'BEGIN .*PRIVATE KEY' "$KEY_SRC"; then
+  die "$KEY_SRC contains a PRIVATE key. Refusing to bake a signing key into an image that ships to customers."
 fi
+install_file "$KEY_SRC" /usr/lib/pki/containers/auros.pub 0644
+found "key in /usr (immutable, replaced by an image update) rather than /etc (machine-local)"
 
-install -d -m 0755 /usr/lib/pki/containers
-install -D -m 0644 "${KEY_SRC}" /usr/lib/pki/containers/auros.pub
-info "public key -> /usr/lib/pki/containers/auros.pub (immutable /usr, not /etc)"
+# ── policy.json ──────────────────────────────────────────────────────────────────────────────────
+sed "s|@AUROS_SCOPE@|${AUROS_SCOPE}|g" "$SIGN/policy.json" | install_text /etc/containers/policy.json 0644
 
-# --- policy.json -----------------------------------------------------------------------------
-install -d -m 0755 /etc/containers
-sed "s|@AUROS_SCOPE@|${AUROS_SCOPE}|g" "${SIGN_SRC}/policy.json" > /etc/containers/policy.json
-chmod 0644 /etc/containers/policy.json
-
-# containers/image parses this with ParanoidUnmarshalJSONObject, which errors on ANY unrecognised
-# key -- including a "$comment". A policy that fails to load is a machine that cannot pull
-# anything, including its own updates. Re-implement that strictness here so it is caught in CI.
-python3 - /etc/containers/policy.json "${AUROS_SCOPE}" <<'PY' || die "policy.json failed validation"
+# containers/image parses this with ParanoidUnmarshalJSONObject, which ERRORS on any unrecognised
+# key rather than ignoring it -- a "$comment" would stop the policy loading, and a policy that does
+# not load is a machine that cannot pull anything, including its own updates. This re-implements
+# that strictness so it is caught in CI and never on a laptop.
+python3 - /etc/containers/policy.json "$AUROS_SCOPE" <<'PY' || die "policy.json failed validation -- see the line above"
 import json,sys
 path,scope=sys.argv[1],sys.argv[2]
-p=json.load(open(path))
+def bad(m):
+    print("  ✗ policy.json: %s" % m, file=sys.stderr); sys.exit(1)
+try: p=json.load(open(path))
+except Exception as e: bad("does not parse: %s" % e)
 extra=set(p)-{"default","transports"}
-assert not extra, "unknown top-level keys %s (containers/image rejects these, it does not ignore them)" % sorted(extra)
-assert p.get("default"), "no global default"
-assert not any(r.get("type")=="insecureAcceptAnything" for r in p["default"]), \
-    "global default is insecureAcceptAnything; bootc's enforce-container-sigpolicy guard reads the GLOBAL DEFAULT ONLY and would reject this"
+if extra: bad("unknown top-level keys %s -- containers/image REJECTS these, it does not ignore them" % sorted(extra))
+if not p.get("default"): bad("no global default")
+if any(r.get("type")=="insecureAcceptAnything" for r in p["default"]):
+    bad("global default is insecureAcceptAnything; bootc's enforce-container-sigpolicy guard reads the GLOBAL DEFAULT ONLY and would reject this image")
 docker=(p.get("transports") or {}).get("docker") or {}
 rules=docker.get(scope)
-assert rules, "no transports.docker entry for %s -- this is the D8 failure reproduced in our own file" % scope
+if not rules: bad("no transports.docker entry for %s -- that IS the D8 failure, reproduced in our own file" % scope)
 ss=[r for r in rules if r.get("type")=="sigstoreSigned"]
-assert ss, "the %s entry is not sigstoreSigned" % scope
+if not ss: bad("the %s entry exists but is not sigstoreSigned" % scope)
 r=ss[0]
-assert (r.get("signedIdentity") or {}).get("type") in ("matchRepository","exactRepository"), \
-    "signedIdentity must be matchRepository/exactRepository; cosign signatures carry only a repository and the default matchExact would reject EVERY signature we make"
+si=(r.get("signedIdentity") or {}).get("type")
+if si not in ("matchRepository","exactRepository"):
+    bad("signedIdentity is %r; cosign signatures carry only a repository and the default matchExact would reject EVERY signature we make -- which would also make U4's negative test pass for the wrong reason" % si)
 kp=r.get("keyPath") or (r.get("keyPaths") or [None])[0]
-assert kp=="/usr/lib/pki/containers/auros.pub", "unexpected keyPath %r" % kp
-for req in (r for rs in docker.values() for r in rs):
-    assert set(req)<= {"type","keyPath","keyPaths","keyData","keyDatas","fulcio","pki",
-                       "rekorPublicKeyPath","rekorPublicKeyPaths","rekorPublicKeyData",
-                       "rekorPublicKeyDatas","signedIdentity"}, "unknown requirement key in %r" % req
-print("    policy.json OK: %s -> sigstoreSigned(%s), catch-all %s" % (
-    scope, kp, "present for other registries" if "" in docker else "absent"))
+if kp!="/usr/lib/pki/containers/auros.pub": bad("unexpected keyPath %r" % kp)
+known={"type","keyPath","keyPaths","keyData","keyDatas","fulcio","pki","rekorPublicKeyPath",
+       "rekorPublicKeyPaths","rekorPublicKeyData","rekorPublicKeyDatas","signedIdentity"}
+for req in (q for rs in docker.values() for q in rs):
+    u=set(req)-known
+    if u: bad("unknown requirement key(s) %s" % sorted(u))
+print("  ✓ %s -> sigstoreSigned(%s, %s); catch-all %s for other registries" % (
+    scope, kp, si, "kept" if "" in docker else "absent"))
 PY
 
-# --- registries.d ----------------------------------------------------------------------------
-# Without this the sigstoreSigned rule is inert: containers/image never looks for an attachment,
-# finds no signature, and refuses every pull of our own images.
-install -d -m 0755 /etc/containers/registries.d
-sed "s|@AUROS_SCOPE@|${AUROS_SCOPE}|g" "${SIGN_SRC}/registries.d/auros.yaml" > /etc/containers/registries.d/auros.yaml
-chmod 0644 /etc/containers/registries.d/auros.yaml
+# ── registries.d ─────────────────────────────────────────────────────────────────────────────────
+# Without this the sigstoreSigned rule is INERT: containers/image never looks for an attachment,
+# finds no signature, and refuses every pull of our own images -- which would look like a registry
+# outage rather than a configuration error.
+sed "s|@AUROS_SCOPE@|${AUROS_SCOPE}|g" "$SIGN/registries.d/auros.yaml" | install_text /etc/containers/registries.d/auros.yaml 0644
 
-# Two rules from containers-registries.d(5) that silently disable us if violated:
-#   1. only the MOST-PRECISELY matching scope is used -- anything more specific hides ours
+# Two rules from containers-registries.d(5) that disable us silently if violated:
+#   1. only the MOST-PRECISELY matching scope is used -- anything more specific hides ours entirely
 #   2. at most one instance of any key under `docker` ACROSS ALL FILES -- a duplicate is an error
 for other in /etc/containers/registries.d/*.yaml /etc/containers/registries.d/*.yml; do
-    [[ -e "${other}" ]] || continue
-    [[ "${other}" == /etc/containers/registries.d/auros.yaml ]] && continue
-    if grep -qE "^[[:space:]]*['\"]?${AUROS_SCOPE}['\"]?:" "${other}"; then
-        die "${other} also defines the scope ${AUROS_SCOPE}. containers-registries.d(5) forbids the same key in two files and the merge will fail."
-    fi
-    if grep -qE "^[[:space:]]*['\"]?${AUROS_SCOPE}/" "${other}"; then
-        die "${other} defines a scope MORE SPECIFIC than ${AUROS_SCOPE}. Only the most-precisely matching scope is used, so our use-sigstore-attachments setting would be ignored entirely and signature verification would quietly stop working."
-    fi
+  [ -e "$other" ] || continue
+  if [ "$other" = /etc/containers/registries.d/auros.yaml ]; then continue; fi
+  if grep -qE "^[[:space:]]*['\"]?${AUROS_SCOPE}['\"]?:" "$other"; then
+    die "$other also defines the scope $AUROS_SCOPE. containers-registries.d(5) forbids the same key in two files; the merge fails and no signature is ever read."
+  fi
+  if grep -qE "^[[:space:]]*['\"]?${AUROS_SCOPE}/" "$other"; then
+    die "$other defines a scope MORE SPECIFIC than $AUROS_SCOPE. Only the most-precisely matching scope is used, so our use-sigstore-attachments setting would be ignored entirely and signature verification would quietly stop working."
+  fi
 done
-info "registries.d: use-sigstore-attachments enabled for ${AUROS_SCOPE}, no conflicting scope"
+did "use-sigstore-attachments enabled for $AUROS_SCOPE, no conflicting or more-specific scope"
 
-# --- install-time enforcement ----------------------------------------------------------------
-install -d -m 0755 /usr/lib/bootc/install
-install -D -m 0644 "${SIGN_SRC}/install/30-auros.toml" /usr/lib/bootc/install/30-auros.toml
-grep -q '^enforce-container-sigpolicy[[:space:]]*=[[:space:]]*true' /usr/lib/bootc/install/30-auros.toml \
-    || die "30-auros.toml does not set enforce-container-sigpolicy = true; without it bootc records the deployment as signature mode 'insecure' and NOTHING is verified, however correct policy.json looks"
-info "install config: enforce-container-sigpolicy = true (merged after Aurora's 20-aurora.toml)"
+# ── install-time enforcement ─────────────────────────────────────────────────────────────────────
+# Merged after Aurora's 20-aurora.toml (alphanumeric order). Without this, bootc records the
+# deployment as signature mode "insecure" and IGNORES policy.json entirely, however correct
+# policy.json looks. That row has no external symptom at all.
+install_file "$SIGN/install/30-auros.toml" /usr/lib/bootc/install/30-auros.toml 0644
+grep -qE '^enforce-container-sigpolicy[[:space:]]*=[[:space:]]*true' /usr/lib/bootc/install/30-auros.toml \
+  || die "30-auros.toml does not set enforce-container-sigpolicy = true"
+did "install config sets enforce-container-sigpolicy = true"
 
-# =============================================================================================
-say "C. The U4 harness, in the image"
-# =============================================================================================
-install -D -m 0755 "${SIGN_SRC}/verify-enforcement.sh" /usr/libexec/auros/verify-enforcement.sh
-install -d -m 0755 /etc/auros/signing
-printf '%s\n' "${AUROS_SCOPE}"       > /etc/auros/signing/scope
-printf '%s\n' "${AUROS_CANARY_REPO}" > /etc/auros/signing/canary-repo
-chmod 0644 /etc/auros/signing/scope /etc/auros/signing/canary-repo
-info "check U4 -> /usr/libexec/auros/verify-enforcement.sh"
-info "  scope=${AUROS_SCOPE} canary=${AUROS_CANARY_REPO}"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "C. check U4, in the image"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+install_file "$SIGN/verify-enforcement.sh" "$AUROS_LIBEXEC/verify-enforcement.sh" 0755
+printf '%s\n' "$AUROS_SCOPE"       | install_text /etc/auros/signing/scope       0644
+printf '%s\n' "$AUROS_CANARY_REPO" | install_text /etc/auros/signing/canary-repo 0644
 
-# =============================================================================================
-say "D. Enable the units -- Fedora's default preset is 'disable', so this is NOT automatic"
-# =============================================================================================
-# greenboot ships no preset file of its own. On Fedora the trailing preset rule is `disable *`,
-# so %systemd_post leaves every greenboot unit DISABLED. An image with greenboot installed and
-# not enabled has all the files, passes a naive "is greenboot installed" check, and performs no
-# health checks and no rollback whatsoever. This block is the difference between U3 working and
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "D. enable the units -- Fedora's default preset is 'disable', so this is NOT automatic"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# greenboot ships NO systemd preset of its own, and Fedora's trailing preset rule is `disable *`.
+# So %systemd_post leaves every greenboot unit DISABLED. An image with greenboot installed and not
+# enabled has every file in place, passes any naive "is greenboot installed?" check, and performs
+# no health checks and no rollback whatsoever. This block is the difference between U3 working and
 # U3 being a story we tell.
+#
+# WHY NOT 00-common.sh's enable_unit(): it resolves only WantedBy=, and dies on a unit that has
+# none. Four of greenboot's units are RequiredBy-only --
+# greenboot-grub2-set-counter.service is `RequiredBy=ostree-finalize-staged.service`, which is
+# precisely the link that stages the boot counter (D9). Handled here rather than by changing
+# 00-common.sh, which belongs to another task; worth folding in later.
 
-UNITS=(
-    bootc-fetch-apply-updates.timer
-    greenboot-healthcheck.service
-    greenboot-task-runner.service
-    greenboot-status.service
-    greenboot-grub2-set-counter.service
-    greenboot-grub2-set-success.service
-    greenboot-rpm-ostree-grub2-check-fallback.service
-    redboot-auto-reboot.service
-    redboot-task-runner.service
-)
-for u in "${UNITS[@]}"; do
-    [[ -f "/usr/lib/systemd/system/${u}" ]] || die "unit ${u} does not exist in this image"
-    systemctl enable "${u}" >/dev/null 2>&1 || die "could not enable ${u}"
-    info "enabled ${u}"
+auros_enable() {
+  local u="$1" f="" cand t linked=0
+  for cand in "/usr/lib/systemd/system/$u" "/etc/systemd/system/$u"; do
+    if [ -f "$cand" ]; then f="$cand"; break; fi
+  done
+  [ -n "$f" ] || die "unit $u does not exist in this image"
+
+  _systemctl_offline enable --no-reload "$u" || true
+
+  local kind dir
+  for kind in WantedBy:wants RequiredBy:requires; do
+    for t in $(sed -n "s/^${kind%%:*}=//p" "$f" | tr ' ' '\n' | grep -v '^$' || true); do
+      dir="${kind##*:}"
+      if [ -e "/etc/systemd/system/$t.$dir/$u" ] || [ -e "/usr/lib/systemd/system/$t.$dir/$u" ]; then
+        linked=1; continue
+      fi
+      # /usr, not /etc: on a bootc host an image update replaces /usr wholesale, while /etc is
+      # machine-local and three-way merged. A default that belongs to the image belongs in /usr,
+      # and an administrator can still override it with a mask in /etc.
+      mkdir -p "/usr/lib/systemd/system/$t.$dir"
+      ln -sfn "../$u" "/usr/lib/systemd/system/$t.$dir/$u"
+      [ -e "/usr/lib/systemd/system/$t.$dir/$u" ] || die "could not enable $u for $t ($dir)"
+      linked=1
+      found "linked $u into $t.$dir (offline systemctl enable did not)"
+    done
+  done
+
+  [ "$linked" -eq 1 ] || die "$u declares neither WantedBy nor RequiredBy -- it cannot be enabled"
+  did "enabled $u"
+  record enabled-unit "$u"
+}
+
+for u in bootc-fetch-apply-updates.timer \
+         greenboot-healthcheck.service \
+         greenboot-task-runner.service \
+         greenboot-status.service \
+         greenboot-grub2-set-counter.service \
+         greenboot-grub2-set-success.service \
+         greenboot-rpm-ostree-grub2-check-fallback.service \
+         redboot-auto-reboot.service \
+         redboot-task-runner.service; do
+  auros_enable "$u"
 done
 
-# Assert the enablement symlinks are really there. `systemctl enable` in a container can no-op
-# for a unit with no [Install] section and still exit 0.
-check_link() {
-    local want="$1"
-    compgen -G "${want}" >/dev/null || die "expected enablement symlink ${want} was not created"
+# Enablement is verified against the FILESYSTEM, not against systemctl's exit code: `systemctl
+# enable` in a container can no-op and still exit 0. These four are the links that each make one
+# specific safety property real, and any of them missing is a silent loss of that property.
+assert_link() {
+  [ -e "/etc/systemd/system/$1" ] || [ -e "/usr/lib/systemd/system/$1" ] \
+    || die "enablement link $1 was not created -- $2"
 }
-check_link '/etc/systemd/system/timers.target.wants/bootc-fetch-apply-updates.timer'
-check_link '/etc/systemd/system/multi-user.target.wants/greenboot-healthcheck.service'
-check_link '/etc/systemd/system/boot-complete.target.requires/greenboot-healthcheck.service'
-check_link '/etc/systemd/system/ostree-finalize-staged.service.requires/greenboot-grub2-set-counter.service'
-check_link '/etc/systemd/system/redboot.target.wants/redboot-auto-reboot.service'
-info "enablement symlinks verified -- including set-counter wired into ostree-finalize-staged (D9)"
+assert_link 'timers.target.wants/bootc-fetch-apply-updates.timer'                        "the machine would never fetch an update"
+assert_link 'multi-user.target.wants/greenboot-healthcheck.service'                      "no health check would ever run, and every boot would be declared good"
+assert_link 'boot-complete.target.requires/greenboot-healthcheck.service'                "boot-complete.target would be reached without the checks passing"
+assert_link 'ostree-finalize-staged.service.requires/greenboot-grub2-set-counter.service' "the GRUB boot counter would never be staged and auto-rollback (U3) would not happen (D9)"
+assert_link 'redboot.target.wants/redboot-auto-reboot.service'                           "a failed boot would be recorded and then ignored"
+did "all five load-bearing enablement links verified on disk"
 
-# =============================================================================================
-say "Summary"
-# =============================================================================================
-cat <<EOF
-    update path      bootc-fetch-apply-updates.timer (bootc's own unit, enabled by us;
-                     Aurora preset-enables uupd.timer instead and leaves this one inert)
-                     boot+3min, then every 6h, 10min jitter -- U1's 20-minute window vs B6's
-                     shared-uplink thundering herd
-    apply rule       always stage; reboot only when no active user session (apply-policy=when-idle)
-    rollback         greenboot + GRUB boot_counter, GREENBOOT_MAX_BOOT_ATTEMPTS=2
-                     => two failed boots, rollback on the third. Upstream default is 3.
-                     Exactly ONE rollback deployment is retained (D10).
-    health checks    4 required (network stack, graphical target, update timer, no new failed
-                     units) + 3 wanted (signature enforcement, rollback wiring, update freshness)
-    signing          key    /usr/lib/pki/containers/auros.pub
-                     policy /etc/containers/policy.json  (default: reject; ${AUROS_SCOPE} sigstoreSigned)
-                     regd   /etc/containers/registries.d/auros.yaml (use-sigstore-attachments)
-                     install /usr/lib/bootc/install/30-auros.toml (enforce-container-sigpolicy)
-    check U4         /usr/libexec/auros/verify-enforcement.sh
-EOF
-say "30-update-agent.sh done"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "summary"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+found "update path   bootc-fetch-apply-updates.timer (bootc's own unit, enabled by us; Aurora"
+found "              preset-enables uupd.timer instead and leaves this one inert)"
+found "              boot+3min, then every 6h, 10min jitter -- U1's 20-minute window vs B6's"
+found "              3.5 GB-per-machine shared uplink"
+found "apply rule    always stage; reboot only with no active user session (apply-policy=when-idle)"
+found "rollback      greenboot + GRUB boot_counter, GREENBOOT_MAX_BOOT_ATTEMPTS=2"
+found "              two failed boots, rollback on the third. Upstream default is 3."
+found "              exactly ONE rollback deployment is retained (D10)"
+found "health        4 required (network stack, graphical target, update timer, no new failed"
+found "              units) + 3 wanted (signature enforcement, rollback wiring, freshness)"
+found "signing       key     /usr/lib/pki/containers/auros.pub"
+found "              policy  /etc/containers/policy.json (default reject; $AUROS_SCOPE sigstoreSigned)"
+found "              regd    /etc/containers/registries.d/auros.yaml (use-sigstore-attachments)"
+found "              install /usr/lib/bootc/install/30-auros.toml (enforce-container-sigpolicy)"
+found "check U4      $AUROS_LIBEXEC/verify-enforcement.sh"
+did "update agent and signature enforcement installed"

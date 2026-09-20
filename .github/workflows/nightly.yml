@@ -153,8 +153,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-    secrets: inherit
+    secrets: inherit   # build.yml needs COSIGN_PRIVATE_KEY / COSIGN_PASSWORD; signing is keyed, not keyless
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   propagate:

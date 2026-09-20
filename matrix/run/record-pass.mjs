@@ -21,7 +21,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { loadChecks, loadProfiles, requiredFor, DEFAULT_UPDATE_PROFILE, META_REPO } from './lib/matrix.mjs';
+import { loadChecks, loadProfiles, requiredFor, DEFAULT_UPDATE_PROFILE, META_REPO, MATRIX_DIR } from './lib/matrix.mjs';
 import { validate } from './lib/validate.mjs';
 
 const a = {};
@@ -55,7 +55,7 @@ const known = loadProfiles();
 let results;
 try { results = JSON.parse(readFileSync(a.results, 'utf8')); }
 catch (e) { die(`${a.results} does not parse: ${e.message}`); }
-const schema = JSON.parse(readFileSync(join(dirname(new URL(import.meta.url).pathname), '..', 'results.schema.json'), 'utf8'));
+const schema = JSON.parse(readFileSync(join(MATRIX_DIR, 'results.schema.json'), 'utf8'));
 const schemaErrors = validate(schema, results);
 if (schemaErrors.length) {
   console.error('record-pass: results.json does not validate:');

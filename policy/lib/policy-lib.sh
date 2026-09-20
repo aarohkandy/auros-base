@@ -11,7 +11,10 @@
 AUROS_STATE_DIR=${AUROS_STATE_DIR:-/usr/lib/auros}
 AUROS_POLICY_STATE="$AUROS_STATE_DIR/policy"
 AUROS_MODE_STAMP="$AUROS_STATE_DIR/policy-mode"
-AUROS_MANIFEST="$AUROS_POLICY_STATE/installed.manifest"
+# NOT named AUROS_MANIFEST: build/00-common.sh exports AUROS_MANIFEST as the in-image build-step
+# record (/usr/lib/auros/build-steps.tsv). Sharing that name would make auros_uninstall_previous
+# delete every path listed in ANOTHER layer's manifest on the next mode switch.
+AUROS_POLICY_MANIFEST="$AUROS_POLICY_STATE/installed.manifest"
 AUROS_MASKED_UNITS="$AUROS_POLICY_STATE/masked.units"
 AUROS_REPORT="$AUROS_POLICY_STATE/applied.json"
 AUROS_KDEGLOBALS=${AUROS_KDEGLOBALS:-/etc/xdg/kdeglobals}
@@ -24,9 +27,13 @@ AUROS_KDE_SENTINEL_BEGIN='# >>> auros-policy: KDE Kiosk restrictions (managed by
 AUROS_KDE_SENTINEL_END='# <<< auros-policy'
 
 # ── logging ──────────────────────────────────────────────────────────────────────────────────────
-log()  { printf '[20-policy] %s\n' "$*"; }
-warn() { printf '[20-policy] WARNING: %s\n' "$*" >&2; }
-die()  { printf '[20-policy] FATAL: %s\n' "$*" >&2; exit 1; }
+# Same shape as build/00-common.sh's logging, because this output is streamed verbatim by the
+# website's build console (spec section 7) and two formats in one stream reads as two products.
+# Defined here rather than sourced from 00-common.sh because apply-policy also runs from a CUSTOMER
+# RECIPE's layer, where /tmp/auros-build has already been deleted by 90-cleanup.sh.
+log()  { printf 'auros[policy] %s\n' "$*"; }
+warn() { printf 'auros[policy]  ! %s\n' "$*" >&2; }
+die()  { printf 'auros[policy]  x %s\n' "$*" >&2; exit 1; }
 
 # ── package manager detection ────────────────────────────────────────────────────────────────────
 # Aurora is an ostree container. Depending on the day and the upstream, removing a package from it is
@@ -375,30 +382,96 @@ auros_dconf_clear() {
     log "cleared the auros dconf database"
 }
 
-# ── systemd ──────────────────────────────────────────────────────────────────────────────────────
-auros_unit_exists() { systemctl list-unit-files "$1" >/dev/null 2>&1 && systemctl list-unit-files "$1" 2>/dev/null | grep -q "^$1"; }
+# ── systemd, OFFLINE ─────────────────────────────────────────────────────────────────────────────
+#
+# There is no running systemd inside an image build, so `systemctl enable` and `systemctl mask` do
+# not do what they look like they do. A policy layer whose masking silently no-ops is the exact
+# "configured but not effective" failure check B5 exists to catch -- and the symptom would be a
+# kiosk machine with a working Ctrl+Alt+F2, found by a student rather than by CI.
+#
+# So: try the two offline spellings, then FALL BACK TO CREATING THE SYMLINKS ourselves, then VERIFY
+# on the filesystem. "enabled" and "masked" are filesystem states, not daemon opinions.
+#
+# build/00-common.sh has equivalent functions. These are deliberately not shared with it: apply-policy
+# also runs from a customer recipe's layer, where 90-cleanup.sh has already deleted /tmp/auros-build
+# and 00-common.sh is not on the image. Two implementations of a filesystem fact are safer here than
+# one implementation that is sometimes absent.
+
+_auros_systemctl_offline() {
+    SYSTEMD_OFFLINE=1 systemctl --root=/ "$@" >/dev/null 2>&1 && return 0
+    SYSTEMD_OFFLINE=1 systemctl "$@" >/dev/null 2>&1 && return 0
+    return 1
+}
+
+auros_unit_file() {
+    local u="$1" f
+    for f in "/etc/systemd/system/$u" "/usr/lib/systemd/system/$u" "/lib/systemd/system/$u"; do
+        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    return 1
+}
+auros_unit_exists() { auros_unit_file "$1" >/dev/null 2>&1; }
 
 auros_unit_enable() {
-    if auros_unit_exists "$1"; then
-        systemctl enable "$1" >/dev/null 2>&1 && log "enabled $1" || warn "could not enable $1"
-    else
-        log "unit $1 is not on this image; nothing to enable"
+    local u="$1" f t linked=0
+    if ! f="$(auros_unit_file "$u")"; then
+        log "unit $u is not on this image; nothing to enable"
+        return 0
     fi
+    _auros_systemctl_offline enable --no-reload "$u" || true
+    for t in $(sed -n 's/^WantedBy=//p' "$f" | tr ' ' '\n' | grep -v '^$'); do
+        if [ -e "/etc/systemd/system/$t.wants/$u" ] || [ -e "/usr/lib/systemd/system/$t.wants/$u" ]; then
+            linked=1; continue
+        fi
+        # /usr, not /etc: on a bootc host an image update replaces /usr wholesale while /etc is
+        # machine-local and three-way merged, so a default that belongs to the image belongs in /usr.
+        # An administrator can still override it with a masking symlink in /etc.
+        mkdir -p "/usr/lib/systemd/system/$t.wants"
+        ln -sfn "../$u" "/usr/lib/systemd/system/$t.wants/$u"
+        [ -e "/usr/lib/systemd/system/$t.wants/$u" ] || die "could not enable $u for $t"
+        linked=1
+        log "enabled $u for $t by symlink (offline systemctl did not do it)"
+    done
+    [ "$linked" -eq 1 ] || die "$u has no WantedBy target, so it cannot be enabled. A unit that can only be started by hand is not an enabled unit, and on a kiosk machine there is nobody to start it by hand."
+    log "enabled $u"
 }
+
 auros_unit_disable() {
-    if auros_unit_exists "$1"; then
-        systemctl disable "$1" >/dev/null 2>&1 && log "disabled $1" || log "$1 was not enabled"
-    fi
+    local u="$1"
+    auros_unit_exists "$u" || return 0
+    _auros_systemctl_offline disable --no-reload "$u" || true
+    log "disabled $u"
 }
+
+# Masked, not disabled. A disabled unit is one `systemctl enable` away from running, and socket-,
+# dbus- and path-activated units start on activation even while disabled. Masking points the unit at
+# /dev/null and nothing can activate it.
+#
+# Unlike 00-common.sh's mask_unit, this one masks a unit that does NOT exist on the image as well,
+# and on purpose: kiosk masks display-manager.service precisely because we just removed every
+# package that could provide it, and the mask is what stops a later layer reintroducing one.
 auros_unit_mask() {
-    systemctl mask "$1" >/dev/null 2>&1 && { log "masked $1"; printf '%s\n' "$1" >> "$AUROS_MASKED_UNITS"; } || warn "could not mask $1"
+    local u="$1" link="/etc/systemd/system/$1"
+    _auros_systemctl_offline mask --no-reload "$u" || true
+    mkdir -p /etc/systemd/system
+    ln -sfn /dev/null "$link"
+    [ "$(readlink -f "$link" 2>/dev/null || true)" = "/dev/null" ] \
+        || die "failed to mask $u -- $link is not a link to /dev/null. A mask that did not take is a door we told the customer was closed."
+    printf '%s\n' "$u" >> "$AUROS_MASKED_UNITS"
+    log "masked $u"
 }
+
 auros_unmask_previous() {
-    local u count=0
+    local u count=0 link
     [ -r "$AUROS_MASKED_UNITS" ] || return 0
     while IFS= read -r u; do
         [ -n "$u" ] || continue
-        systemctl unmask "$u" >/dev/null 2>&1 && count=$(( count + 1 ))
+        link="/etc/systemd/system/$u"
+        if [ -L "$link" ] && [ "$(readlink -f "$link" 2>/dev/null || true)" = "/dev/null" ]; then
+            rm -f "$link"
+            count=$(( count + 1 ))
+        fi
+        _auros_systemctl_offline unmask --no-reload "$u" || true
     done < "$AUROS_MASKED_UNITS"
     log "unmasked $count units masked by the previous policy mode"
     : > "$AUROS_MASKED_UNITS"
@@ -456,17 +529,17 @@ auros_ensure_admin_group() {
         log "added to aurosadmin:$added"
     else
         cat >&2 <<'EOW'
-[20-policy] WARNING: ---------------------------------------------------------------------------
-[20-policy] WARNING: the aurosadmin group has no members on this image.
-[20-policy] WARNING:
-[20-policy] WARNING: In managed and locked, aurosadmin is the ONLY administrative identity: sudo
-[20-policy] WARNING: grants it and polkit names it as the admin. An image built like this has no
-[20-policy] WARNING: administrator at the seat at all -- which is safe, and is also probably not
-[20-policy] WARNING: what the customer wanted.
-[20-policy] WARNING:
-[20-policy] WARNING: The first-boot setup layer is what puts the school's IT account in the group.
-[20-policy] WARNING: To set it here instead, pass AUROS_ADMIN_USERS="name" to apply-policy.
-[20-policy] WARNING: ---------------------------------------------------------------------------
+auros[policy]  ! ---------------------------------------------------------------------------
+auros[policy]  ! the aurosadmin group has no members on this image.
+auros[policy]  !
+auros[policy]  ! In managed and locked, aurosadmin is the ONLY administrative identity: sudo
+auros[policy]  ! grants it and polkit names it as the admin. An image built like this has no
+auros[policy]  ! administrator at the seat at all -- which is safe, and is also probably not
+auros[policy]  ! what the customer wanted.
+auros[policy]  !
+auros[policy]  ! The first-boot setup layer is what puts the school's IT account in the group.
+auros[policy]  ! To set it here instead, pass AUROS_ADMIN_USERS="name" to apply-policy.
+auros[policy]  ! ---------------------------------------------------------------------------
 EOW
     fi
 }

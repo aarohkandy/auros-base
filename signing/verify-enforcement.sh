@@ -42,21 +42,54 @@ POLICY=/etc/containers/policy.json
 KEY=/usr/lib/pki/containers/auros.pub
 REGD=/etc/containers/registries.d
 
-CANARY_REPO_DEFAULT=""     # set at build time, see 30-update-agent.sh
+# ---------------------------------------------------------------------------------------------
+# WHICH IMAGES TO OFFER
+# ---------------------------------------------------------------------------------------------
+# PREFER the images the check matrix already builds. matrix/run/run-update.sh derives signed and
+# unsigned variants of the REAL base and serves them under the production reference string
+# (ghcr.io/<org>/auros-base@sha256:...), which is the only way the scoped sigstoreSigned rule
+# applies at all -- an image served from 10.0.2.x:5000 would fall through the catch-all and
+# "refused an unsigned image" would mean nothing. That reasoning is already written down at the
+# top of run-update.sh and this script does not second-guess it.
+#
+# So the harness passes the refs in:
+#   verify-enforcement.sh --signed REF --unsigned REF [--wrongkey REF]
+#
+# The canary tags are a FALLBACK for running this standalone, outside the matrix. They are not the
+# preferred path and CI need not build them if the harness supplies refs.
+REF_SIGNED=""; REF_UNSIGNED=""; REF_WRONGKEY=""
+allow_mutation=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --signed)   REF_SIGNED="$2";   shift 2 ;;
+        --unsigned) REF_UNSIGNED="$2"; shift 2 ;;
+        --wrongkey) REF_WRONGKEY="$2"; shift 2 ;;
+        --i-am-a-disposable-test-vm) allow_mutation=1; shift ;;
+        *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+
+CANARY_REPO_DEFAULT=""
 [[ -r "${CONF}/canary-repo" ]] && CANARY_REPO_DEFAULT="$(cat "${CONF}/canary-repo")"
 CANARY_REPO="${AUROS_CANARY_REPO:-${CANARY_REPO_DEFAULT}}"
 SCOPE_DEFAULT=""
 [[ -r "${CONF}/scope" ]] && SCOPE_DEFAULT="$(cat "${CONF}/scope")"
 SCOPE="${AUROS_SCOPE:-${SCOPE_DEFAULT}}"
 
-allow_mutation=0
+if [[ -n "${CANARY_REPO}" ]]; then
+    [[ -n "${REF_SIGNED}"   ]] || REF_SIGNED="${CANARY_REPO}:signed"
+    [[ -n "${REF_UNSIGNED}" ]] || REF_UNSIGNED="${CANARY_REPO}:unsigned"
+    [[ -n "${REF_WRONGKEY}" ]] || REF_WRONGKEY="${CANARY_REPO}:wrongkey"
+fi
+
 [[ -e "${MARKER}" ]] && allow_mutation=1
-[[ "${1:-}" == "--i-am-a-disposable-test-vm" ]] && allow_mutation=1
 
 say()  { printf '%s\n' "$*" >&2; }
 head_() { printf '\n== %s ==\n' "$*" >&2; }
 
 RESULTS=()
+WRONGKEY_INCONCLUSIVE=0
 record() { RESULTS+=("{\"step\":\"$1\",\"status\":\"$2\",\"detail\":$(printf '%s' "$3" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().strip()))')}"); }
 
 emit() {
@@ -100,17 +133,24 @@ else inconclusive "neither skopeo nor podman is present; the canary pulls cannot
 fi
 say "using ${PULLER} for the canary pulls"
 
-[[ -n "${SCOPE}" ]]       || inconclusive "no enforced scope known (${CONF}/scope missing and AUROS_SCOPE unset)"
-[[ -n "${CANARY_REPO}" ]] || inconclusive "no canary repository known (${CONF}/canary-repo missing and AUROS_CANARY_REPO unset)"
+[[ -n "${SCOPE}" ]] || inconclusive "no enforced scope known (${CONF}/scope missing and AUROS_SCOPE unset)"
 say "enforced scope: ${SCOPE}"
-say "canary repo:    ${CANARY_REPO}"
+[[ -n "${REF_SIGNED}"   ]] || inconclusive "no signed reference to test with. Pass --signed REF (the harness has one) or build the canary tags."
+[[ -n "${REF_UNSIGNED}" ]] || inconclusive "no unsigned reference to test with. Pass --unsigned REF. Without a negative there is no U4 -- reporting inconclusive rather than passing on the strength of an absence."
 
-# The canary must live inside the enforced scope, or none of the negatives prove anything about
-# our namespace.
-case "${CANARY_REPO}" in
-    "${SCOPE}"/*) say "canary is inside the enforced scope -- good" ;;
-    *) inconclusive "canary repo ${CANARY_REPO} is NOT inside the enforced scope ${SCOPE}; refusing it would prove nothing about our images" ;;
-esac
+# EVERY reference must sit inside the enforced scope. An unsigned image served from somewhere else
+# falls through the transports.docker[""] catch-all, would be accepted for reasons that have
+# nothing to do with our images, and "refused an unsigned image" would mean nothing at all. This is
+# the same trap run-update.sh documents at its top, asserted here rather than assumed.
+for ref in "${REF_SIGNED}" "${REF_UNSIGNED}" ${REF_WRONGKEY:+"${REF_WRONGKEY}"}; do
+    case "${ref}" in
+        "${SCOPE}"/*) ;;
+        *) inconclusive "${ref} is NOT inside the enforced scope ${SCOPE}. It would be matched by the catch-all instead of our sigstoreSigned rule, and the result would prove nothing." ;;
+    esac
+done
+say "signed:   ${REF_SIGNED}"
+say "unsigned: ${REF_UNSIGNED}"
+say "wrongkey: ${REF_WRONGKEY:-<not supplied -- step 3 will be reported inconclusive>}"
 
 [[ -s "${KEY}" ]] || inconclusive "${KEY} is missing or empty"
 grep -q 'BEGIN PUBLIC KEY' "${KEY}" || inconclusive "${KEY} does not look like a PEM public key"
@@ -225,22 +265,22 @@ try_pull() {
     return "${rc}"
 }
 
-if pos_out="$(try_pull "${CANARY_REPO}:signed")"; then
+if pos_out="$(try_pull "${REF_SIGNED}")"; then
     say "ACCEPTED, as required."
     record "positive-control" "pass" "${CANARY_REPO}:signed accepted"
 else
     say "${pos_out}"
-    inconclusive "the correctly signed canary ${CANARY_REPO}:signed was REFUSED. Enforcement is misconfigured, not strict. Likely causes, in order of likelihood: signedIdentity is not matchRepository; the image was signed with the new bundle format (cosign.lock: --new-bundle-format=false); registries.d attachments; wrong key. Nothing below is evidence until this passes."
+    inconclusive "the correctly signed image ${REF_SIGNED} was REFUSED. Enforcement is misconfigured, not strict. Likely causes, in order of likelihood: signedIdentity is not matchRepository; the image was signed with the new bundle format (cosign.lock: --new-bundle-format=false); registries.d attachments; wrong key. Nothing below is evidence until this passes."
 fi
 
 # =============================================================================================
-head_ "2. NEGATIVE 1 -- the UNSIGNED canary, inside our namespace, must be REFUSED"
+head_ "2. NEGATIVE 1 -- an UNSIGNED image, inside our namespace, must be REFUSED"
 # =============================================================================================
 # This is the test for D8 itself. The unsigned canary sits inside ghcr.io/<ns>, which is covered
 # both by our scoped sigstoreSigned rule and by the transports.docker[""] catch-all. If the
 # catch-all wins, this is ACCEPTED and enforcement is theatre.
 
-if neg_out="$(try_pull "${CANARY_REPO}:unsigned")"; then
+if neg_out="$(try_pull "${REF_UNSIGNED}")"; then
     say "${neg_out}"
     failed "an UNSIGNED image inside ${SCOPE} was ACCEPTED. The insecureAcceptAnything catch-all is winning over the scoped sigstoreSigned rule -- this is exactly the D8 failure, and signature enforcement on this image is doing nothing."
 fi
@@ -248,19 +288,29 @@ say "refused, as required:"; say "${neg_out}"
 record "negative-unsigned" "pass" "$(printf '%s' "${neg_out}" | tail -n2)"
 
 # =============================================================================================
-head_ "3. NEGATIVE 2 -- the WRONGLY signed canary must be REFUSED"
+head_ "3. NEGATIVE 2 -- a WRONGLY signed image must be REFUSED"
 # =============================================================================================
 # Distinct from negative 1 and worth its own step: negative 1 only proves the machine wants *a*
 # signature. This proves it checks WHICH key made it. A policy that accepted any valid sigstore
 # signature would pass negative 1 and fail here, and anyone with a Fulcio certificate could then
 # publish an image our fleet would install.
 
-if wrong_out="$(try_pull "${CANARY_REPO}:wrongkey")"; then
+if [[ -z "${REF_WRONGKEY}" ]]; then
+    say "no wrong-key reference supplied."
+    say "This is NOT a pass. Step 2 only proves the machine wants *a* signature; without step 3 a"
+    say "policy that accepted any valid sigstore signature would look identical, and anyone able to"
+    say "sign anything could push an update to the fleet."
+    record "negative-wrongkey" "inconclusive" "no --wrongkey reference supplied"
+    say "(gate1-exit.yml covers this as U4b from the host side; if that is where it is being proven,"
+    say " this step is still reported rather than silently omitted.)"
+    WRONGKEY_INCONCLUSIVE=1
+elif wrong_out="$(try_pull "${REF_WRONGKEY}")"; then
     say "${wrong_out}"
-    failed "an image signed by a DIFFERENT key was ACCEPTED. The machine is checking that a signature exists, not that it is ours. Anyone able to sign anything could push an update to the fleet."
+    failed "an image signed by a DIFFERENT key was ACCEPTED."
+else
+    say "refused, as required:"; say "${wrong_out}"
+    record "negative-wrongkey" "pass" "$(printf '%s' "${wrong_out}" | tail -n2)"
 fi
-say "refused, as required:"; say "${wrong_out}"
-record "negative-wrongkey" "pass" "$(printf '%s' "${wrong_out}" | tail -n2)"
 
 # =============================================================================================
 head_ "4. The real thing -- bootc must refuse to deploy the unsigned image"
@@ -273,9 +323,9 @@ if (( allow_mutation == 0 )); then
     inconclusive "steps 1-3 passed, but step 4 asks bootc to switch to an image that must be refused, and that is a mutation of a real machine. It is gated on ${MARKER} (created by the check-matrix harness) or the --i-am-a-disposable-test-vm flag. NOT SKIPPED -- reported as inconclusive, because U4 without step 4 is not U4."
 fi
 
-say "asking bootc to switch to ${CANARY_REPO}:unsigned ..."
+say "asking bootc to switch to ${REF_UNSIGNED} ..."
 switch_rc=0
-switch_out="$(bootc switch --retain "${CANARY_REPO}:unsigned" 2>&1)" || switch_rc=$?
+switch_out="$(bootc switch --retain "${REF_UNSIGNED}" 2>&1)" || switch_rc=$?
 say "${switch_out}"
 
 DIGEST_AFTER="$(booted_digest)"
@@ -305,6 +355,14 @@ if [[ -n "${SPEC_BEFORE}" && "${SPEC_AFTER}" != "${SPEC_BEFORE}" ]]; then
 fi
 
 record "bootc-refuses" "pass" "rc=${switch_rc}, booted digest unchanged, nothing staged"
+
+# Step 3 carries the same rule as every other step in this file: a step that did not run is not a
+# step that passed. Claiming U4 while one of its two negatives was never attempted is exactly the
+# vacuous pass this script is built to refuse -- so the summary below can only be printed when
+# every step actually ran.
+if (( WRONGKEY_INCONCLUSIVE == 1 )); then
+    inconclusive "steps 1, 2 and 4 passed, but no wrong-key reference was offered, so 'the machine checks WHICH key signed the image' is UNPROVEN here. Re-run with --wrongkey REF, or score U4 from the host side where gate1-exit.yml covers it as U4b. Not reporting a pass on three quarters of the evidence."
+fi
 
 head_ "U4 PASS"
 say "The machine accepted a correctly signed image, refused an unsigned one from inside its own"

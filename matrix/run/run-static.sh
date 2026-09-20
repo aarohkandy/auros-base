@@ -186,9 +186,9 @@ elif [ -z "$BUDGET" ]; then
 else
   PREV=''
   if [ -f "$LEDGER" ]; then
-    PREV=$(awk -F'\t' -v img="$IMAGE" -v rec="${RECIPE:--}" '
-      NR==1 { for(i=1;i<=NF;i++) col[$i]=i; next }
-      { if (col["pull_size_bytes"] && $col["pull_size_bytes"] ~ /^[0-9]+$/) last=$col["pull_size_bytes"] }
+    PREV=$(awk -F'\t' '
+      NR==1 { for(i=1;i<=NF;i++) col[$i]=i; c=col["pull_size_bytes"]; next }
+      { if (c > 0) { v=$c; if (v ~ /^[0-9]+$/ && v+0 > 0) last=v } }
       END { if (last) print last }' "$LEDGER" 2>/dev/null || true)
   fi
   MSG="measured ${PULL_BYTES} B compressed pull vs budget ${BUDGET} B"

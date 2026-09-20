@@ -215,30 +215,32 @@ a_suite_no_network_change() {
 }
 
 a_suite_update_timer() {
-    local level="$1" t TIMER=""
+    local level="$1" t found=0
     printf '\n-- try to stop the machine updating itself ---------------------------------------------\n'
-    # The unit name belongs to the update layer (task A4), not to this one. We look for the timer
-    # that is actually active rather than assuming a name, and we say which one we found. If none is
-    # active that is a FAIL, not a skip: a machine that is not updating itself is precisely the
-    # abandoned laptop we sell against. Check S10 asserts the same thing from outside the VM.
-    for t in bootc-fetch-apply-updates.timer auros-update.timer rpm-ostreed-automatic.timer; do
-        if systemctl is-active --quiet "$t" 2>/dev/null; then TIMER="$t"; break; fi
-    done
-    if [ -z "$TIMER" ]; then
-        a_bad "update.timer-active" "no update timer is active (looked for bootc-fetch-apply-updates.timer, auros-update.timer, rpm-ostreed-automatic.timer)"
-        return
-    fi
-    a_ok "update.timer-active" "$TIMER is active"
+    # The unit names belong to the update layer (task A4), not to this one, and there is more than
+    # one: build/30-update-agent.sh records that Aurora ships uupd.timer as well as bootc's own
+    # bootc-fetch-apply-updates.timer, and enables both paths. So this does not stop at the first
+    # timer it finds -- a mode that blocks one and not the other is a mode under which a user can
+    # half-disable updates, and "half" is not a state the product has a word for.
+    #
+    # If NONE is active that is a FAIL, not a skip: a machine that is not updating itself is
+    # precisely the abandoned laptop we sell against. Check S10 asserts the same thing from outside.
     a_deny "$level" "update.manage-units" org.freedesktop.systemd1.manage-units
-    a_must_fail "update.stop"    "systemctl stop $TIMER"    -- systemctl stop "$TIMER"
-    a_must_fail "update.disable" "systemctl disable $TIMER" -- systemctl disable "$TIMER"
-    a_must_fail "update.mask"    "systemctl mask $TIMER"    -- systemctl mask "$TIMER"
-    # Three attempts failing is not the same as the timer surviving. Ask the timer.
-    if systemctl is-active --quiet "$TIMER"; then
-        a_ok "update.timer-survived" "$TIMER is still active after three attempts to stop it"
-    else
-        a_bad "update.timer-survived" "$TIMER is NO LONGER ACTIVE after the attempts above -- one of them worked"
-    fi
+    for t in bootc-fetch-apply-updates.timer uupd.timer auros-update.timer rpm-ostreed-automatic.timer; do
+        systemctl is-active --quiet "$t" 2>/dev/null || continue
+        found=1
+        a_ok "update.active.$t" "$t is active"
+        a_must_fail "update.stop.$t"    "systemctl stop $t"    -- systemctl stop "$t"
+        a_must_fail "update.disable.$t" "systemctl disable $t" -- systemctl disable "$t"
+        a_must_fail "update.mask.$t"    "systemctl mask $t"    -- systemctl mask "$t"
+        # Three attempts failing is not the same as the timer surviving. Ask the timer.
+        if systemctl is-active --quiet "$t"; then
+            a_ok "update.survived.$t" "$t is still active after three attempts to stop it"
+        else
+            a_bad "update.survived.$t" "$t is NO LONGER ACTIVE after the attempts above -- one of them worked"
+        fi
+    done
+    [ "$found" = 1 ] || a_bad "update.timer-active" "no update timer is active (looked for bootc-fetch-apply-updates.timer, uupd.timer, auros-update.timer, rpm-ostreed-automatic.timer)"
 }
 
 a_suite_policy_immutable() {

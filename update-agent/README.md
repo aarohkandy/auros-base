@@ -82,12 +82,39 @@ against a VM sitting at exactly that greeter, could never pass.
 
 `/etc/auros/update-agent/apply-policy` takes `when-idle` (shipped default), `never`, or `always`.
 
-> **Assumption about another agent's area, flagged rather than solved.** If the first-boot guided
-> setup (D4) leaves the VM **autologged into a desktop**, that is an `Active`/`Class=user` session,
-> `auros-update` will stage without rebooting, and **U1 will fail** — correctly, because the
-> shipped behaviour would be to wait. If that happens, the fix is a decision about the boot
-> experience, not a hack here. The `always` policy exists as the escape hatch, but using it for a
-> test means the test no longer describes what customers get.
+> ### ⚠ Cross-agent conflict, concrete and currently live
+>
+> `matrix/run/run-update.sh` defaults to **`AUTOLOGIN=1`**. That means its VM always has an
+> `Active`, `Class=user` session, so `when-idle` correctly declines to reboot — and **check U1
+> reads that as a failure.**
+>
+> This is not a bug in either half. It is D4 and U1 pulling in opposite directions, and the
+> harness's autologin is what makes the tension visible.
+>
+> **The fix is one line in the harness overlay**, alongside the two HARNESS ONLY files
+> `run-update.sh` already writes into the guest (`registries.conf.d/99-auros-matrix.conf` and the
+> compressed timer interval). Any one of these works:
+>
+> ```sh
+> # in run-update.sh's $OVL, next to the existing HARNESS ONLY overlays
+> mkdir -p "$OVL/run" && touch "$OVL/run/auros-check-matrix"     # preferred — /run, cannot ship
+> # or
+> echo always > "$OVL/etc/auros/update-agent/apply-policy"
+> # or
+> run-update.sh --autologin 0 ...
+> ```
+>
+> `auros-update` already honours **`/run/auros-check-matrix`** and applies unconditionally when it
+> is present. `/run` is tmpfs, so the marker cannot exist on a machine that was not deliberately
+> put into test mode and it can never ship.
+>
+> The precedent is the harness's own: it already notes that its compressed timer interval proves
+> the machine updates itself but "does not prove the production interval". This is the same kind of
+> concession, in the same place, for the same reason.
+>
+> **What must not happen** is shipping `apply-policy=always` as the default to make U1 green. That
+> would make every school laptop reboot three minutes after a student opens it, which is the exact
+> behaviour this wrapper exists to prevent.
 
 **Failure policy.** Registry unreachable, or `uupd` holding the bootc lock, exits **0**. U5 says an
 offline machine is a no-op, and a non-zero exit becomes a failed unit, which

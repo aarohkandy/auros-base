@@ -28,8 +28,8 @@ plan ──► build ──┬──► static ──┐
 | `build` | mirrors the pinned upstream digest (D21); builds **twice**; flattens each with `rpm-ostree compose build-chunked-oci --bootc` (D2/D11); compares content digests; pushes an **unsigned** `stage-<run_id>` tag | **S7** |
 | `static` | `matrix/run.sh --phase static` against the staging digest | **S2–S6, S9, S10** |
 | `boot` | one job per entry in `matrix/profiles.yaml`, fanned out | **B1–B12** |
-| `sign` | cosign keyless via OIDC, then proves the signature is *discoverable* | **S8** |
-| `update` | mints old/new/bad images and runs `matrix/run.sh --phase update` | **U1–U5, R1** |
+| `sign` | cosign **keyed** signing with the key the image trusts, then proves the signature is *discoverable* | **S8** |
+| `update` | `matrix/run.sh --phase update`, handing the harness the private key | **U1–U5, R1** |
 | `publish` | assembles `results.json`, records the ledger row, **runs the gate**, moves `:hardened` | spec §4.3 |
 | `cleanup` | notes the staging tags it cannot delete | nothing; it is housekeeping |
 | `keep-nightly-enabled` | re-enables `nightly.yml` on every push to `main` | see §5 |
@@ -74,6 +74,28 @@ The four layers that actually hold, per PLAN.md §3.2 — the CI gate is only th
 | `:stage-<run_id>` | before any check runs | **no** | No. D8's in-image policy is `sigstoreSigned` for the whole `ghcr.io/aarohkandy` scope, so an unsigned image fails it. |
 | `@sha256:…` | after static + boot pass | yes | Only by someone who hand-types the digest. No tag points at it. |
 | `:hardened`, `:<date>`, `:<sha12>` | after `gate.mjs` exits 0 | yes | **Yes.** This is the tag machines follow, so this is the tag the gate protects. |
+
+### Signing is keyed, not keyless — and that is not the instruction I was given
+
+The brief for these workflows said "sign with cosign keyless via OIDC". **The landed image policy makes
+that wrong**, so the workflows do not do it. `signing/policy.json` says:
+
+```json
+{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub",
+  "signedIdentity": { "type": "matchRepository" } }
+```
+
+A keyless signature carries a Fulcio certificate, not that key. A machine enforcing this policy would
+find no signature matching `auros.pub`, refuse every update forever, and do it at 3am in a school months
+after anybody remembered there was a choice. **The image's policy decides the signing method; CI does not
+get a vote.** Switching to keyless would mean changing `policy.json` first and waiting for every machine
+in the field to install an image containing the new policy — the same ordering problem
+`signing/keys/README.md` describes for key rotation.
+
+Before signing, the step derives the public half of `COSIGN_PRIVATE_KEY` and **diffs it against
+`signing/keys/auros.pub`**. Signing with the wrong key produces a perfectly valid signature that every
+customer machine rejects — and S8 would still pass, because the `.sig` tag would be discoverable. That
+check is the difference between "we signed it" and "they can verify it".
 
 Signing happens *before* the gate on purpose. U1–U5 have to exercise the real enforcement path, and an
 unsigned image cannot do that — the VM would refuse a good image and U1 would fail for the wrong reason.
@@ -190,6 +212,8 @@ either.
 | Secret | Required? | Used by | What happens without it |
 |---|---|---|---|
 | `GITHUB_TOKEN` | automatic | everything | n/a |
+| `COSIGN_PRIVATE_KEY` | **required** | `sign` and `update` in `build.yml`, `gate1-exit.yml` | **Nothing publishes.** The `sign` job fails with a pointer to `signing/keys/README.md`, and `gate1-exit` refuses to start rather than produce a report where Leg A fails and Leg B passes vacuously. This is fail-closed and intended. |
+| `COSIGN_PASSWORD` | **required** | as above | as above |
 | `AUROS_DISPATCH_TOKEN` | **optional** | `nightly.yml` (dispatch + ledger push), `build.yml` (ledger push), `gate1-exit.yml` (dispatch leg) | Nothing fails. Dispatch is skipped with a notice and the `*/10` poll carries propagation. The ledger row lives only as a build artifact for that run. `gate1-exit` reports the dispatch leg as **NOT PROVEN**. |
 
 `AUROS_DISPATCH_TOKEN` should be a fine-grained PAT with, at minimum:
@@ -201,8 +225,19 @@ Two repositories, one token, by design — but if you would rather not have a si
 write to both, split it into two secrets and change the two `env:` lines that reference it. Every use is
 individually non-fatal, so a token scoped to only one of the two degrades cleanly on the other.
 
-**No secret can influence whether an image publishes.** `AUROS_DISPATCH_TOKEN` affects notification and
-record-keeping only.
+`AUROS_DISPATCH_TOKEN` affects notification and record-keeping only — it cannot influence whether an
+image publishes. `COSIGN_PRIVATE_KEY` can, but only in one direction: without it, nothing publishes.
+**No secret can cause a publish that would not otherwise happen.**
+
+### The keypair does not exist yet, and that is currently a hard blocker
+
+`signing/keys/auros.pub` is deliberately absent, and `build/30-update-agent.sh` fails the build without
+it. So **no build can currently succeed**, by design — see `signing/keys/README.md`. A dummy key would
+produce an image that looks exactly like the product and refuses every update forever.
+
+Minting the keypair is **§9-reserved**: it creates a long-lived organisational credential and is not an
+agent action. The human runs `cosign generate-key-pair` (pinned to the version in `signing/cosign.lock`),
+commits `auros.pub`, and sets the two secrets.
 
 ---
 
@@ -221,6 +256,7 @@ All four repos are public (PLAN.md 2.3), which changes most of these.
 | **GHCR** | Free storage and bandwidth for public packages. The D21 mirror therefore costs nothing. |
 | **`GITHUB_TOKEN` API rate limit** | 1,000 requests/hour/repository. Nowhere near. |
 | **Cron granularity** | 5 minutes minimum, and **scheduled runs are delayed under load, sometimes by a lot** (BLOCKED.md B7). Every cron here is deliberately off the hour. |
+| **cosign** | Version, bundle-format flag and installer action all come from `signing/cosign.lock` (**v2.6.5**, not the v3 line — on v3 `--new-bundle-format` defaults to true and every signature becomes invisible to `containers/image`). The `uses:` ref cannot be an expression, so `sigstore/cosign-installer@v4.1.2` is written out **and asserted against the lock** at run time. |
 | **Runner image** | Pinned to `ubuntu-24.04`, never `ubuntu-latest` (D23) — `ubuntu-latest` migrates to 26.04 between 2026-10-19 and 2026-11-19, and an OS migration under a build that boots VMs is a week we do not have. |
 | **Runner disk** | Measured 145 G total, 110 G free after the cleanup step (`docs/evidence/2026-09-20-runner-probe.md`). Do **not** move podman's graphroot to `/mnt`: probe-boot revision 1 did, and it broke `bootc-image-builder`, which mounts the host store at its default path and then finds a libpod DB pointing elsewhere. |
 
@@ -315,32 +351,48 @@ red build and not a bad publish.
 
 ### `matrix/run.sh` — the check-matrix harness (TASKS A8)
 
+**Verified against the landed harness**, not assumed — `matrix/run.sh` was adapted to this interface in
+commit `b1806cc`, and the update phase's real contract turned out to differ from what I first guessed.
+
 ```
 matrix/run.sh --phase static|boot|update
               --image  <ghcr ref pinned by digest>
               --digest <sha256:…>
-              [--profile <id>]                                  # boot only
-              [--old-image R] [--new-image R] [--bad-image R]   # update only
+              [--profile <id>]              # required for boot; passed for update so the fragment
+                                            # lands under a real profile rather than the synthetic one
               --checks   matrix/checks.yaml
               --profiles matrix/profiles.yaml
               --out      <fragment.json>
+              [-- <args passed through to the phase script>]
 ```
 
 It writes one **fragment**:
 
 ```json
-{ "profile": "uefi-modern",
-  "checks": [ { "id": "B1", "status": "pass", "detail": "…", "duration_ms": 1234 } ] }
+{ "profile": "static",
+  "checks": [ { "id": "S2", "status": "pass", "detail": "…", "duration_ms": 1234 } ] }
 ```
 
-`publish` merges the fragments into one `results.json` matching `matrix/results.schema.json`. Fragments
-from the static and update legs are recorded under `uefi-modern`, which `profiles.yaml` describes as the
-always-bound baseline profile — those checks are profile-independent and belong under a real profile
-rather than a synthetic one. The check IDs (`S*`/`U*`/`B*`) already say which leg produced them.
+`publish` merges the fragments into one `results.json` matching `matrix/results.schema.json`, grouping by
+`.profile`. The harness buckets the static phase under the synthetic profile `static`, so `build.yml`'s
+own hand-written fragments (S1, S7, S8) use `"profile": "static"` too — otherwise the static checks
+scatter across two buckets for no reason. Boot fragments use the real profile id.
 
-`build.yml` supplies the update leg's three images itself: old is the digest under test, new is that
-digest plus a marker file, bad is the same content pushed **unsigned**. That is D8's exact rejection
-condition, and U4 is the only check that proves signing does anything at all.
+**The update phase does not take images from CI.** `matrix/run/run-update.sh` stands up its own registry
+on the host, serves the image under the name the in-image policy is scoped to, and mints the old, new and
+tampered variants itself. All it needs is:
+
+```
+matrix/run.sh --phase update --profile uefi-modern --image <ref> … -- --signing-key /tmp/auros.key
+```
+
+That key is the **private** half of what the image ships at `/usr/lib/pki/containers/auros.pub`. The
+harness refuses to run without it, and its reasoning is worth repeating: with no key it could only offer
+unsigned images, so **U4 would pass while U1 failed** — which looks like a working lock and is the exact
+opposite of proving anything.
+
+It also refuses to run without a writable `/dev/kvm` unless `AUROS_ALLOW_TCG=1`. **CI does not set that.**
+The update group is four boots; under emulation it would exceed the 6-hour job limit and prove nothing.
 
 ### `tools/gate.mjs` — the publish gate (TASKS 0.5, meta repo)
 
@@ -377,6 +429,12 @@ control. The mirror is populated by `build.yml` on every publishable run whether
 yet, so flipping the `FROM` line is a one-line change with nothing else to coordinate. Until it is
 flipped, `plan` emits a warning rather than failing — A1 owns that file, not CI.
 
+### Mirroring (D21) is `tools/mirror-upstream.sh`, not this workflow
+
+`build.yml` calls it and does not reimplement it. It landed purpose-built while these workflows were
+being written; `resolve-upstream.sh` only *recognises* a `FROM` line pointing at the mirror, for S1.
+Its env var is `AUROS_MIRROR` (not `AUROS_MIRROR_IMAGE`, which is `resolve-upstream.sh`'s).
+
 ### Flattening (D11) currently lives in `build.yml`, not the Containerfile
 
 `rpm-ostree compose build-chunked-oci --bootc` runs as a CI step, because it is a *publish* step and
@@ -404,8 +462,17 @@ None of this has run. Written on 2026-09-20; nothing below has a run ID.
   `DECISIONS.md`. **Do not weaken it quietly.**
 - That a `gate1-exit` VM reaches SSH at all. `probe-boot.yml` got as far as a qcow2; the login prompt is
   still under test (GATE.md).
-- That `matrix/run.sh` and `tools/gate.mjs` accept the flags in §8. Neither existed when this was
-  written.
+- That `tools/gate.mjs` accepts the flags in §8. **It does not exist yet** — `tools/` in the meta repo
+  holds `compat-lint.mjs` and `honesty-gate.mjs` only. `plan` fails the build until it lands, which is
+  the correct behaviour: an image that cannot be gated must not exist. `matrix/run.sh` **does** exist and
+  its interface is verified.
+
+**Blocked outright, today:**
+
+- `signing/keys/auros.pub` does not exist, and `build/30-update-agent.sh` fails the build without it.
+  **No build can currently succeed.** That is by design (`signing/keys/README.md`) and it is a §9-reserved
+  human action, not something to work around.
+- `tools/gate.mjs` does not exist in the meta repo. `plan` fails early and loudly.
 
 **Known to be false, and handled:**
 

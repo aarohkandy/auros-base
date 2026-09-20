@@ -35,8 +35,17 @@ SRC="$PAYLOAD/$MODE"
 # shellcheck source=/dev/null
 . "$SRC/mode.env"
 
+# Recommends: is how a removed package comes back on the NEXT transaction -- including one in a
+# customer recipe's own layer. Done here rather than only in 20-policy.sh so that a recipe calling
+# apply-policy directly gets it as well.
+auros_disable_weak_deps
+
 install -d -m 0755 "$AUROS_POLICY_STATE"
-: > "${AUROS_MASKED_UNITS}" 2>/dev/null || install -m 0644 /dev/null "$AUROS_MASKED_UNITS"
+# Ensure the file exists WITHOUT truncating it: auros_unmask_previous below has to read the list
+# the previous mode wrote, and it truncates the file itself once it has. Truncating here instead
+# would leave every unit the previous mode masked still masked -- a mode switch that releases the
+# files and silently keeps the masks.
+[ -f "$AUROS_MASKED_UNITS" ] || install -m 0644 /dev/null "$AUROS_MASKED_UNITS"
 
 PREV="none"
 [ -r "$AUROS_MODE_STAMP" ] && PREV="$(cat "$AUROS_MODE_STAMP")"
@@ -56,13 +65,13 @@ if [ "$PREV" = "kiosk" ] && [ "$MODE" != "kiosk" ]; then
 fi
 
 # ── release whatever the previous mode installed ─────────────────────────────────────────────────
-auros_uninstall_previous "$AUROS_MANIFEST"
+auros_uninstall_previous "$AUROS_POLICY_MANIFEST"
 auros_unmask_previous
 auros_pam_su_release
 auros_dconf_clear
 auros_kdeglobals_strip "$AUROS_KDEGLOBALS"
 
-install -m 0644 /dev/null "$AUROS_MANIFEST"
+install -m 0644 /dev/null "$AUROS_POLICY_MANIFEST"
 
 # ── things every mode gets, including open ───────────────────────────────────────────────────────
 # The polkit canary actions and the aurosadmin group live here. The canaries MUST exist in open too:
@@ -78,7 +87,7 @@ fi
 auros_ensure_admin_group
 
 # ── the mode's own files ─────────────────────────────────────────────────────────────────────────
-auros_install_tree "$SRC/root" "$AUROS_MANIFEST"
+auros_install_tree "$SRC/root" "$AUROS_POLICY_MANIFEST"
 auros_kdeglobals_apply "$SRC/kdeglobals"
 
 # Modes are shipped as file trees, which means a mode bug is a file with the wrong mode bits, and a
@@ -139,7 +148,7 @@ case "$MODE" in
     { printf '# Written by apply-policy. See kiosk.conf.example for the format.\n'
       printf 'KIOSK_EXEC=%s\n' "\"$KIOSK_EXEC\""; } > /etc/auros/kiosk.conf
     chmod 0644 /etc/auros/kiosk.conf
-    printf '/etc/auros/kiosk.conf\n' >> "$AUROS_MANIFEST"
+    printf '/etc/auros/kiosk.conf\n' >> "$AUROS_POLICY_MANIFEST"
     log "kiosk application: $KIOSK_EXEC"
 
     # ---- 2. a compositor, installed BEFORE the desktop is removed ------------------------------
@@ -201,7 +210,7 @@ binary, add it to remove.list, and let the build go red until it is gone."
     auros_unit_mask 'gdm.service'
     install -d -m 0755 /etc/systemd/system
     ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target
-    printf '/etc/systemd/system/default.target\n' >> "$AUROS_MANIFEST"
+    printf '/etc/systemd/system/default.target\n' >> "$AUROS_POLICY_MANIFEST"
     log "default target set to multi-user.target (there is no display manager to reach graphical.target for)"
 
     auros_dconf_profile
@@ -235,7 +244,11 @@ chmod 0444 "$AUROS_MODE_STAMP"
     printf '  "mode": "%s",\n' "$(auros_json_str "$MODE")"
     printf '  "previous_mode": "%s",\n' "$(auros_json_str "$PREV")"
     printf '  "title": "%s",\n' "$(auros_json_str "$AUROS_MODE_TITLE")"
-    printf '  "applied_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # NOT `date`. Check S7 builds the image twice in one CI run and compares content digests, so a
+    # wall-clock timestamp here would be the single field that makes two identical builds differ --
+    # exactly the reason build/00-common.sh keeps timestamps out of build-steps.tsv. SOURCE_DATE_EPOCH
+    # is set by the Containerfile from the upstream base image's creation time.
+    printf '  "applied_at": "%s",\n' "$(date -u -d "@${SOURCE_DATE_EPOCH:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
     printf '  "admin_group": "aurosadmin",\n'
     printf '  "admin_group_members": "%s",\n' "$(auros_json_str "$(getent group aurosadmin | cut -d: -f4)")"
     printf '  "kiosk_compositor": "%s",\n' "$(auros_json_str "$COMPOSITOR")"
@@ -259,9 +272,38 @@ chmod 0444 "$AUROS_MODE_STAMP"
 chmod 0444 "$AUROS_REPORT"
 rm -f "$AUROS_REMOVED_TSV"
 
+# ── determinism: normalise the mtimes of everything this script wrote ────────────────────────────
+#
+# Check S7 builds the image twice in one CI run and requires the same content digest. A layer's
+# digest covers mtimes, so a file created by `printf` at build time carries the wall clock and two
+# identical builds differ. build/90-cleanup.sh normalises the paths that went through 00-common.sh's
+# install_file(); nothing here goes through it, and when a RECIPE calls apply-policy, 90-cleanup has
+# already run and will not run again. So this layer normalises its own.
+_auros_epoch="${SOURCE_DATE_EPOCH:-0}"
+LIBEXEC_APPLY=/usr/libexec/auros/apply-policy
+LIBEXEC_ASSERT=/usr/libexec/auros/assert-policy
+while IFS= read -r _p; do
+    [ -n "$_p" ] && [ -e "$_p" ] && touch -h -d "@$_auros_epoch" "$_p" 2>/dev/null || true
+    # Register with 00-common.sh's list too when it still exists, so 90-cleanup.sh sees these paths
+    # as well. Belt and braces: whichever of the two runs, the mtimes end up the same.
+    # `|| true` is load-bearing: under `set -e`, an AND-list whose last command does not run is a
+    # failed simple command, and this script would abort on the first iteration in a recipe layer,
+    # where AUROS_WRITTEN_LIST does not exist.
+    { [ -n "${AUROS_WRITTEN_LIST:-}" ] && [ -f "${AUROS_WRITTEN_LIST}" ] && printf '%s\n' "$_p" >> "$AUROS_WRITTEN_LIST"; } || true
+done < <(cat "$AUROS_POLICY_MANIFEST" "$COMMON_MANIFEST" 2>/dev/null; printf '%s\n' \
+    "$AUROS_MODE_STAMP" "$AUROS_REPORT" "$AUROS_POLICY_MANIFEST" "$AUROS_MASKED_UNITS" \
+    "$COMMON_MANIFEST" "$AUROS_KDEGLOBALS" "$AUROS_POLICY_STATE/kiosk-compositor")
+# Narrowed to the paths this layer owns. /usr/libexec/auros and /usr/lib/auros are shared with the
+# update and hardening layers, and normalising another layer's mtimes would be harmless but is still
+# reaching into somebody else's files.
+find /usr/share/auros/policy "$AUROS_POLICY_STATE" \
+     "$LIBEXEC_APPLY" "$LIBEXEC_ASSERT" "$AUROS_MODE_STAMP" \
+     -exec touch -h -d "@$_auros_epoch" {} + 2>/dev/null || true
+log "normalised mtimes to SOURCE_DATE_EPOCH=$_auros_epoch (check S7 builds twice and compares digests)"
+
 log "----------------------------------------------------------------"
 log "policy mode '$MODE' applied."
-log "  files installed:   $(wc -l < "$AUROS_MANIFEST" | tr -d ' ')"
+log "  files installed:   $(wc -l < "$AUROS_POLICY_MANIFEST" | tr -d ' ')"
 log "  units masked:      $(wc -l < "$AUROS_MASKED_UNITS" | tr -d ' ')"
 if [ "$MODE" = kiosk ]; then
     log "  /usr measured:     ${USR_BEFORE} -> ${USR_AFTER} bytes ($(( (${USR_BEFORE:-0} - ${USR_AFTER:-0}) / 1048576 )) MiB reclaimed, on disk, uncompressed)"

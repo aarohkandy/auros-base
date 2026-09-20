@@ -45,6 +45,27 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$IMAGE" ] || usage
 export AUROS_RUN_DIR
+
+# The passthrough after `--` is a single list aimed at three scripts with different option sets, and
+# each of them dies on an option it does not know (which is correct — a silently ignored flag is how a
+# run stops testing what you asked for). So route each flag to the scripts that accept it.
+STATIC_OPTS=' --digest --registry-ref --second-digest --containerfile --budget-bytes --policy --install-rpm --flatpak-ref --remove-pkg --cosign-key --ledger '
+BOOT_OPTS=' --qcow2 --locale --keymap --policy --flatpak-ref --user --no-autologin '
+UPDATE_OPTS=' --signing-key --pubkey --policy --migration-dir '
+declare -a STATIC_ARGS=() BOOT_ARGS=() UPDATE_ARGS=()
+i=0
+while [ "$i" -lt "${#PASSTHRU[@]}" ]; do
+  flag=${PASSTHRU[$i]}
+  case "$flag" in --*) ;; *) die "stray value '$flag' after --; every passthrough argument must be a --flag or its value";; esac
+  val=''; has_val=0
+  if [ $((i+1)) -lt "${#PASSTHRU[@]}" ] && [[ "${PASSTHRU[$((i+1))]}" != --* ]]; then val=${PASSTHRU[$((i+1))]}; has_val=1; fi
+  known=0
+  case "$STATIC_OPTS" in *" $flag "*) known=1; STATIC_ARGS+=("$flag"); [ "$has_val" = 1 ] && STATIC_ARGS+=("$val");; esac
+  case "$BOOT_OPTS"   in *" $flag "*) known=1; BOOT_ARGS+=("$flag");   [ "$has_val" = 1 ] && BOOT_ARGS+=("$val");; esac
+  case "$UPDATE_OPTS" in *" $flag "*) known=1; UPDATE_ARGS+=("$flag"); [ "$has_val" = 1 ] && UPDATE_ARGS+=("$val");; esac
+  [ "$known" = 1 ] || die "unknown passthrough option: $flag"
+  i=$(( i + 1 + has_val ))
+done
 mkdir -p "$AUROS_RUN_DIR/checks" "$AUROS_RUN_DIR/logs" "$AUROS_RUN_DIR/work"
 STARTED=$(now_iso)
 
@@ -58,7 +79,7 @@ log "matrix: image=$IMAGE recipe=${RECIPE:-<base>} profiles=${PROFILE_LIST[*]} u
 # ── static ───────────────────────────────────────────────────────────────────────────────────────
 STATIC_RC=0
 "$HARNESS_DIR/run-static.sh" --image "$IMAGE" ${RECIPE:+--recipe "$RECIPE"} --out "$AUROS_RUN_DIR" \
-  "${PASSTHRU[@]+"${PASSTHRU[@]}"}" || STATIC_RC=$?
+  "${STATIC_ARGS[@]+"${STATIC_ARGS[@]}"}" || STATIC_RC=$?
 if [ "$STATIC_RC" -ne 0 ]; then
   log "STATIC FAILED — not booting anything. Assembling results so the failure is recorded against the digest."
 fi
@@ -68,7 +89,7 @@ if [ "$STATIC_RC" -eq 0 ]; then
   run_one() {
     local p=$1
     if "$HARNESS_DIR/run-boot.sh" --profile "$p" --image "$IMAGE" ${RECIPE:+--recipe "$RECIPE"} \
-         --out "$AUROS_RUN_DIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}" > "$AUROS_RUN_DIR/logs/run-boot-$p.log" 2>&1; then
+         --out "$AUROS_RUN_DIR" "${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"}" > "$AUROS_RUN_DIR/logs/run-boot-$p.log" 2>&1; then
       echo "$p pass  $AUROS_RUN_DIR/logs/run-boot-$p.log"
     else
       echo "$p fail  $AUROS_RUN_DIR/logs/run-boot-$p.log"
@@ -86,7 +107,7 @@ if [ "$STATIC_RC" -eq 0 ]; then
 
   if [ "$SKIP_UPDATE" = 0 ]; then
     "$HARNESS_DIR/run-update.sh" --image "$IMAGE" --profile "$UPDATE_PROFILE" ${RECIPE:+--recipe "$RECIPE"} \
-      --out "$AUROS_RUN_DIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}" > "$AUROS_RUN_DIR/logs/run-update.log" 2>&1 \
+      --out "$AUROS_RUN_DIR" "${UPDATE_ARGS[@]+"${UPDATE_ARGS[@]}"}" > "$AUROS_RUN_DIR/logs/run-update.log" 2>&1 \
       && echo "update pass  $AUROS_RUN_DIR/logs/run-update.log" \
       || echo "update fail  $AUROS_RUN_DIR/logs/run-update.log"
   else
@@ -100,10 +121,10 @@ DIGEST=$(cat "$AUROS_RUN_DIR/work/digest" 2>/dev/null || true)
 [ -n "$DIGEST" ] || die "no content digest for $IMAGE — results cannot be keyed to a tag"
 IMG_NAME=${IMAGE%@*}; IMG_NAME=${IMG_NAME%:*}
 
+EMIT_RC=0
 node "$HARNESS_DIR/emit-results.mjs" --run-dir "$AUROS_RUN_DIR" --image "$IMG_NAME" --digest "$DIGEST" \
   --run-url "$RUN_URL" ${RECIPE:+--recipe "$RECIPE"} --profiles "$PROFILES" \
-  --update-profile "$UPDATE_PROFILE" --started-at "$STARTED"
-EMIT_RC=$?
+  --update-profile "$UPDATE_PROFILE" --started-at "$STARTED" || EMIT_RC=$?
 
 if [ "$RECORD" = 1 ] && [ "$EMIT_RC" -eq 0 ]; then
   node "$HARNESS_DIR/record-pass.mjs" --results "$AUROS_RUN_DIR/results.json" --bound-profiles "$PROFILES" \

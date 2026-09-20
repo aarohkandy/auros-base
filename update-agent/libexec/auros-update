@@ -53,6 +53,16 @@ if [[ -r "${APPLY_POLICY_FILE}" ]]; then
     read -r apply_policy < "${APPLY_POLICY_FILE}" || apply_policy=when-idle
     apply_policy="${apply_policy//[[:space:]]/}"
 fi
+
+# The check-matrix harness boots its VMs with autologin, so there is always an Active, Class=user
+# session and `when-idle` would correctly decline to reboot -- which reads as a U1 failure. The
+# harness already overlays two HARNESS ONLY files onto the guest (registries.conf and a compressed
+# timer interval); this marker is a third of the same kind. It is under /run, so it cannot exist on
+# a machine that was not deliberately put into test mode, and it never ships.
+if [[ -e /run/auros-check-matrix ]]; then
+    log "/run/auros-check-matrix present: check-matrix run, applying unconditionally"
+    apply_policy=always
+fi
 case "${apply_policy}" in
     when-idle|never|always) ;;
     *)

@@ -98,7 +98,10 @@ const declaredRemove = lines(args['declared-remove']);
 // ── S4 — keep assertions ────────────────────────────────────────────────────────────────────────
 {
   const want = lines(args['install-rpms']);
-  const missing = want.filter((n) => !rpms.has(n.split('-')[0]) && !rpms.has(n));
+  // Exact rpm NAME matching. No prefix heuristics: "firefox" must not be satisfied by
+  // "firefox-langpacks", and a near-miss that silently counts as a hit is how a keep assertion stops
+  // asserting anything.
+  const missing = want.filter((n) => !rpms.has(n));
   let fp = { status: 'pass', detail: 'no flatpak refs declared' };
   if (args['flatpak-result'] && existsSync(args['flatpak-result'])) {
     try { fp = JSON.parse(readFileSync(args['flatpak-result'], 'utf8')); } catch { fp = { status: 'fail', detail: 'flatpak result file unreadable' }; }
