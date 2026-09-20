@@ -27,18 +27,20 @@ a_suite_no_root            admin
 a_suite_no_software        admin
 a_suite_no_network_change  admin
 a_suite_update_timer       admin
-a_suite_policy_immutable
+a_suite_policy_immutable   admin
 
 printf '\n-- what managed deliberately still allows -----------------------------------------------\n'
 a_pk_allow "allowed.shutdown" org.freedesktop.login1.power-off
 a_must_succeed "allowed.session" "the user can run an ordinary command" -- /usr/bin/id
 # Managed keeps the terminal, because a managed machine has a competent adult behind it some of the
-# time and taking the terminal away is what `locked` is for. Asserting its PRESENCE is what stops
-# managed and locked quietly converging into the same mode over a handful of commits.
-if command -v konsole >/dev/null 2>&1; then
-    a_ok "allowed.terminal" "a terminal emulator is present, as managed intends"
-else
-    a_note "allowed.terminal" "no konsole on this image -- not a failure, but managed never asked for it to be removed"
-fi
+# time and taking the terminal away is what `locked` is for. Asserting that is what stops managed and
+# locked quietly converging into the same mode over a handful of commits.
+#
+# `command -v konsole` is NOT that assertion. A binary on disk that KAuthorized refuses to start is a
+# machine where managed silently became locked, and the filesystem would look identical. So the
+# attempt is made: a script is run THROUGH konsole and through KIO, and it has to actually run. This
+# is the same suite locked/assert.sh runs with expect=shut -- one mechanism, opposite expectation,
+# which is why the two modes cannot converge without one of them going red.
+a_suite_kde_kiosk          allow
 
 a_finish managed

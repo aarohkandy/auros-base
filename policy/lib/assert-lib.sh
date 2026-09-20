@@ -26,6 +26,29 @@
 #   org.auros.policy.control-allow is the important one: it is our own action, allow_any=yes, and no
 #   mode rule ever touches it. If pkcheck says no to that, the subject cannot be authorised for
 #   anything and every other denial in the run is meaningless.
+#
+# THE THIRD RULE, added 2026-09-20 after an audit found that half of a `locked` run was padding:
+#
+#   Every attempt declares whether it is PRIMARY evidence or CORROBORATING, and the claim is
+#   settled by running the same attempt on an `open` image rather than by asserting it here.
+#
+#   `aurosprobe` is a sysusers system account in no privileged group with no logind session. On a
+#   stock bootc host `sudo -n true`, `su -c id root`, `systemd-run --scope`, `machinectl shell` and
+#   every write to /etc or /usr fail for that subject in EVERY mode, including `open`. Their failure
+#   under `locked` is therefore not by itself evidence that `locked` did anything. They stay --
+#   they would catch a real regression, e.g. a sudoers drop-in that accidentally grants ALL -- but
+#   they are labelled `corroborating` and a_finish prints the list, so nobody reads a green
+#   `root.sudo` as proof of the mode.
+#
+#   The discriminating half is the pkcheck calls, because pkcheck distinguishes 1 (refused outright)
+#   from 3 (an administrator could authorise this). `open` answers 3 where `locked` answers 1, and
+#   open/assert.sh now asserts exactly that with a_deny at level `control`: if an action answers 1
+#   on an image with no Auros rules installed, the negative control FAILS and says so, because a
+#   denial of that action under `locked` would be an artefact of the probe rather than our policy.
+#
+#   The same reasoning is applied to the KDE half of the mode by a_suite_kde_kiosk: the attempt
+#   creates a marker file through a KDE application and observes whether the marker appears, and
+#   `open` asserts that it DOES. An attempt that cannot succeed anywhere proves nothing anywhere.
 
 set -uo pipefail
 
@@ -35,11 +58,25 @@ A_LINES=()
 A_JSON=0
 A_TIMEOUT=${AUROS_ASSERT_TIMEOUT:-25}
 
+# Attempts whose failure does not, on its own, discriminate this mode from `open`. Populated by
+# a_corroborate; printed by a_finish so the distinction is visible in the CI log and in the JSON.
+A_CORROBORATING=()
+# Populated by a_control_observe, which only ever runs in open/assert.sh.
+A_CONTROL_DISCRIMINATING=()
+A_CONTROL_NON_DISCRIMINATING=()
+
+# ── the update timers: ONE list ──────────────────────────────────────────────────────────────────
+# D22: uupd, not bootc-fetch-apply-updates, is the real update driver on this base. Every consumer
+# iterates this array. A second hand-maintained copy in open/assert.sh omitted uupd.timer and would
+# have reported "no update timer is active" on a machine uupd was patching perfectly well -- a false
+# red on the base image's own gate.
+A_UPDATE_TIMERS=(bootc-fetch-apply-updates.timer uupd.timer auros-update.timer rpm-ostreed-automatic.timer)
+
 a_json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 a_ok()  { A_PASS=$(( A_PASS + 1 )); A_LINES+=("pass|$1|$2"); printf 'PASS  %-34s %s\n' "$1" "$2"; }
 a_bad() { A_FAIL=$(( A_FAIL + 1 )); A_LINES+=("fail|$1|$2"); printf 'FAIL  %-34s %s\n' "$1" "$2"; }
-a_note(){ printf '      %-34s %s\n' "$1" "$2"; }
+a_note(){ A_LINES+=("note|$1|$2"); printf '      %-34s %s\n' "$1" "$2"; }
 
 a_abort() {
     printf 'FAIL  %-34s %s\n' "control" "$1"
@@ -67,11 +104,37 @@ a_must_fail() {   # a_must_fail <id> <description> -- <command...>
     fi
 }
 
+# a_corroborate -- an attempt that fails on an `open` image too, so its failure here is consistent
+# with the mode but is not by itself evidence of it. Same mechanics as a_must_fail; different label,
+# and the id is recorded so a_finish can list them. See THE THIRD RULE at the top of this file.
+a_corroborate() {  # a_corroborate <id> <description> -- <command...>
+    local id="$1" desc="$2"; shift 2; [ "${1:-}" = "--" ] && shift
+    A_CORROBORATING+=("$id")
+    a_must_fail "$id" "$desc [corroborating]" -- "$@"
+}
+
 a_must_succeed() {  # a_must_succeed <id> <description> -- <command...>
     local id="$1" desc="$2"; shift 2; [ "${1:-}" = "--" ] && shift
     local out rc
     out="$(timeout "$A_TIMEOUT" "$@" 2>&1 </dev/null)"; rc=$?
     if [ "$rc" -eq 0 ]; then a_ok "$id" "$desc"; else a_bad "$id" "$desc -- failed (exit $rc): $(printf '%s' "$out" | head -1)"; fi
+}
+
+# a_control_observe -- run an attempt on an UNLOCKED image and judge nothing. Its only job is to
+# record, in the matrix output, whether this attempt is capable of succeeding for this subject at
+# all. An attempt that fails here as well is one whose failure elsewhere carries no information, and
+# that fact belongs in the log rather than in somebody's head.
+a_control_observe() {  # a_control_observe <id> <description> -- <command...>
+    local id="$1" desc="$2"; shift 2; [ "${1:-}" = "--" ] && shift
+    local out rc
+    out="$(timeout "$A_TIMEOUT" "$@" 2>&1 </dev/null)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        A_CONTROL_DISCRIMINATING+=("$id")
+        a_note "control.$id" "$desc -- SUCCEEDED here. Its failure under locked/kiosk is therefore evidence."
+    else
+        A_CONTROL_NON_DISCRIMINATING+=("$id")
+        a_note "control.$id" "$desc -- failed here too (exit $rc). CORROBORATING ONLY elsewhere."
+    fi
 }
 
 a_absent() {  # a_absent <id> <binary> -- the forbidden thing cannot be attempted because it is gone
@@ -88,7 +151,8 @@ a_absent() {  # a_absent <id> <binary> -- the forbidden thing cannot be attempte
 # ── polkit ───────────────────────────────────────────────────────────────────────────────────────
 # pkcheck exit codes: 0 authorised, 1 not authorised, 2 error, 3 authorisation could be obtained by
 # authenticating. We care about the difference between 1 and 3, because it IS the difference between
-# `locked` and `managed`.
+# `locked` and `managed` -- and, per THE THIRD RULE, it is the only thing in a_suite_no_root,
+# a_suite_no_software and a_suite_no_network_change that discriminates at all.
 a_pk() { pkcheck --action-id "$1" --process "$$" >/dev/null 2>&1; echo $?; }
 
 a_pk_hard_deny() {  # locked/kiosk: the answer is no, and no password changes it
@@ -107,6 +171,24 @@ a_pk_admin_only() {  # managed: not now, but an administrator at this machine co
         0) a_bad "$id" "$action -- AUTHORISED without any administrator. The mode is not in force." ;;
         1|3) a_ok "$id" "$action -- not authorised for this user (pkcheck $rc)" ;;
         *) a_bad "$id" "$action -- pkcheck returned $rc (error). An error is not a denial." ;;
+    esac
+}
+
+# a_pk_not_hard_denied -- THE NEGATIVE CONTROL, run only by open/assert.sh.
+#
+# On an image with no Auros policy rules installed, an action that `locked` denies must still be
+# answerable: 0 (yes) or 3 (an administrator could authorise this). If it answers 1 HERE, then the
+# same answer under `locked` was never our doing -- it is the base's own default for a subject with
+# no session -- and the corresponding line in locked/assert.sh is decoration. That is a FAIL of this
+# control, not a pass, and it is the check that stops this whole directory from rotting into a list
+# of denials nobody caused.
+a_pk_not_hard_denied() {
+    local id="$1" action="$2" rc; rc="$(a_pk "$action")"
+    case "$rc" in
+        0) a_ok  "$id" "$action -- permitted here (pkcheck 0). A refusal under managed/locked/kiosk is ours." ;;
+        3) a_ok  "$id" "$action -- answerable with an administrator password here (pkcheck 3). A HARD refusal under locked is ours." ;;
+        1) a_bad "$id" "$action -- refused OUTRIGHT (pkcheck 1) on an image carrying no Auros policy rules. A denial of this action under locked/kiosk is therefore an artefact of the probe subject, not evidence of the mode. Either give the probe a session, or drop this action from the suite -- do not leave it reporting a pass it did not earn." ;;
+        *) a_bad "$id" "$action -- pkcheck returned $rc (error) on the negative control. An error is not an answer." ;;
     esac
 }
 
@@ -156,25 +238,47 @@ a_expect_mode() {
 # drift apart -- one gains a check, another does not, and eventually two modes are indistinguishable
 # in CI while being different products in the field.
 #
-# $1 is "hard" (locked/kiosk: the answer is no, and no password changes it) or "admin" (managed: not
-# for this user, but an administrator at this machine could).
+# $1 is the LEVEL:
+#   hard      locked/kiosk -- the answer is no, and no password changes it
+#   admin     managed      -- not for this user, but an administrator at this machine could
+#   control   open         -- the negative control. Nothing is restricted here, so the polkit answer
+#                             must not be a hard refusal, and the non-polkit attempts are run purely
+#                             to record whether they are capable of succeeding at all.
 
-a_deny() { if [ "$1" = hard ]; then a_pk_hard_deny "$2" "$3"; else a_pk_admin_only "$2" "$3"; fi; }
+a_deny() {
+    case "$1" in
+        hard)    a_pk_hard_deny       "$2" "$3" ;;
+        admin)   a_pk_admin_only      "$2" "$3" ;;
+        control) a_pk_not_hard_denied "$2" "$3" ;;
+        *)       a_bad "$2" "a_deny was called with unknown level '$1' -- refusing to guess which promise to assert" ;;
+    esac
+}
+
+# a_try <level> <id> <desc> -- <cmd...>
+# The non-polkit attempts. Under hard/admin they are corroborating; under control they are observed
+# and not judged. Routing them through one function is what keeps the open run and the locked run
+# attempting the SAME things, which is the only way the control means anything.
+a_try() {
+    local level="$1"; shift
+    if [ "$level" = control ]; then a_control_observe "$@"; else a_corroborate "$@"; fi
+}
 
 a_suite_no_root() {
     local level="$1"
     printf '\n-- try to get root ---------------------------------------------------------------------\n'
-    a_must_fail "root.sudo"        "sudo -n true"                      -- sudo -n true
-    a_must_fail "root.sudo-shell"  "sudo -n bash -c id"                -- sudo -n /usr/bin/bash -c id
-    a_must_fail "root.pkexec"      "pkexec id, with no auth agent"     -- pkexec --disable-internal-agent /usr/bin/id
+    # PRIMARY: the one answer that differs between an open image and a locked one for this subject.
     a_deny "$level" "root.pkexec-policy" org.freedesktop.policykit.exec
-    # su fails on any machine with no root password, so on its own it proves little. It is here
-    # because the PAM restriction is a real second lock and its absence should be visible, and it is
-    # labelled honestly rather than counted as primary evidence.
-    a_must_fail "root.su"          "su -c id root (corroborating only)" -- su -c id root
-    a_must_fail "root.systemd-run" "systemd-run --scope on the system manager" -- systemd-run --scope --quiet /usr/bin/id
+    # CORROBORATING: all of these fail for a sessionless system account on a stock `open` image too.
+    # They stay because they would catch a real regression -- a sudoers drop-in that granted ALL, a
+    # root password that got set -- but they are not what proves the mode. open/assert.sh runs the
+    # identical list at level `control` and prints which of them succeeded there.
+    a_try "$level" "root.sudo"        "sudo -n true"                      -- sudo -n true
+    a_try "$level" "root.sudo-shell"  "sudo -n bash -c id"                -- sudo -n /usr/bin/bash -c id
+    a_try "$level" "root.pkexec"      "pkexec id, with no auth agent"     -- pkexec --disable-internal-agent /usr/bin/id
+    a_try "$level" "root.su"          "su -c id root"                     -- su -c id root
+    a_try "$level" "root.systemd-run" "systemd-run --scope on the system manager" -- systemd-run --scope --quiet /usr/bin/id
     if command -v machinectl >/dev/null 2>&1; then
-        a_must_fail "root.machinectl" "machinectl shell .host" -- machinectl shell .host
+        a_try "$level" "root.machinectl" "machinectl shell .host" -- machinectl shell .host
     else
         a_ok "root.machinectl" "machinectl is absent from the image"
     fi
@@ -187,10 +291,10 @@ a_suite_no_software() {
     a_deny "$level" "pkg.packagekit"       org.freedesktop.packagekit.package-install
     a_deny "$level" "pkg.flatpak-system"   org.freedesktop.Flatpak.app-install
     if command -v rpm-ostree >/dev/null 2>&1; then
-        a_must_fail "pkg.rpmostree" "rpm-ostree install nano" -- rpm-ostree install --idempotent nano
+        a_try "$level" "pkg.rpmostree" "rpm-ostree install nano" -- rpm-ostree install --idempotent nano
     fi
     if command -v flatpak >/dev/null 2>&1; then
-        a_must_fail "pkg.flatpak" "flatpak install --system from flathub" -- flatpak install --system -y --noninteractive flathub org.gnome.Calculator
+        a_try "$level" "pkg.flatpak" "flatpak install --system from flathub" -- flatpak install --system -y --noninteractive flathub org.gnome.Calculator
     fi
     # HONEST LIMIT, deliberately NOT asserted as a pass:
     #   `flatpak install --user` needs no polkit authorisation, and flatpak has no supported
@@ -209,8 +313,8 @@ a_suite_no_network_change() {
     a_deny "$level" "net.control"       org.freedesktop.NetworkManager.network-control
     a_deny "$level" "net.enable"        org.freedesktop.NetworkManager.enable-disable-network
     if command -v nmcli >/dev/null 2>&1; then
-        a_must_fail "net.off" "nmcli networking off" -- nmcli networking off
-        a_must_fail "net.add" "nmcli connection add type dummy" -- nmcli connection add type dummy ifname auros-probe0 con-name auros-probe
+        a_try "$level" "net.off" "nmcli networking off" -- nmcli networking off
+        a_try "$level" "net.add" "nmcli connection add type dummy" -- nmcli connection add type dummy ifname auros-probe0 con-name auros-probe
     fi
 }
 
@@ -218,42 +322,239 @@ a_suite_update_timer() {
     local level="$1" t found=0
     printf '\n-- try to stop the machine updating itself ---------------------------------------------\n'
     # The unit names belong to the update layer (task A4), not to this one, and there is more than
-    # one: build/30-update-agent.sh records that Aurora ships uupd.timer as well as bootc's own
-    # bootc-fetch-apply-updates.timer, and enables both paths. So this does not stop at the first
-    # timer it finds -- a mode that blocks one and not the other is a mode under which a user can
+    # one: D22 records that uupd -- not bootc-fetch-apply-updates -- is the real update driver on
+    # this base, and build/30-update-agent.sh enables both paths. So this does not stop at the first
+    # timer it finds: a mode that blocks one and not the other is a mode under which a user can
     # half-disable updates, and "half" is not a state the product has a word for.
+    #
+    # ONE list, $A_UPDATE_TIMERS, shared with open/assert.sh's floor check. A second hand-kept copy
+    # is how uupd.timer went missing from one of them.
     #
     # If NONE is active that is a FAIL, not a skip: a machine that is not updating itself is
     # precisely the abandoned laptop we sell against. Check S10 asserts the same thing from outside.
     a_deny "$level" "update.manage-units" org.freedesktop.systemd1.manage-units
-    for t in bootc-fetch-apply-updates.timer uupd.timer auros-update.timer rpm-ostreed-automatic.timer; do
+    for t in "${A_UPDATE_TIMERS[@]}"; do
         systemctl is-active --quiet "$t" 2>/dev/null || continue
         found=1
         a_ok "update.active.$t" "$t is active"
-        a_must_fail "update.stop.$t"    "systemctl stop $t"    -- systemctl stop "$t"
-        a_must_fail "update.disable.$t" "systemctl disable $t" -- systemctl disable "$t"
-        a_must_fail "update.mask.$t"    "systemctl mask $t"    -- systemctl mask "$t"
-        # Three attempts failing is not the same as the timer surviving. Ask the timer.
-        if systemctl is-active --quiet "$t"; then
-            a_ok "update.survived.$t" "$t is still active after three attempts to stop it"
-        else
-            a_bad "update.survived.$t" "$t is NO LONGER ACTIVE after the attempts above -- one of them worked"
+        # Under `control` we do NOT attempt to stop the timer. The open image is a machine under
+        # test that the rest of the matrix expects to keep updating itself; an attempt that happened
+        # to succeed would leave U1 looking at a machine we disabled. The polkit answer above is the
+        # discriminating half in any case.
+        if [ "$level" != control ]; then
+            a_corroborate "update.stop.$t"    "systemctl stop $t"    -- systemctl stop "$t"
+            a_corroborate "update.disable.$t" "systemctl disable $t" -- systemctl disable "$t"
+            a_corroborate "update.mask.$t"    "systemctl mask $t"    -- systemctl mask "$t"
+            # Three attempts failing is not the same as the timer surviving. Ask the timer.
+            if systemctl is-active --quiet "$t"; then
+                a_ok "update.survived.$t" "$t is still active after three attempts to stop it"
+            else
+                a_bad "update.survived.$t" "$t is NO LONGER ACTIVE after the attempts above -- one of them worked"
+            fi
         fi
     done
-    [ "$found" = 1 ] || a_bad "update.timer-active" "no update timer is active (looked for bootc-fetch-apply-updates.timer, uupd.timer, auros-update.timer, rpm-ostreed-automatic.timer)"
+    [ "$found" = 1 ] || a_bad "update.timer-active" "no update timer is active (looked for ${A_UPDATE_TIMERS[*]})"
 }
 
+# a_suite_policy_immutable -- WHAT THIS ACTUALLY PROVES, stated plainly because the name oversells it.
+#
+# All four writes below fail for any unprivileged account on any bootc host in any mode: /etc is
+# root-owned and /usr is read-only. That is a property of the BASE IMAGE, not of the policy mode,
+# and an audit was right to call a `locked` run that counted them as mode evidence padded.
+#
+# They are kept, and they are run in `open` as well, for two honest reasons:
+#   1. As a floor. If a future change made /etc group-writable, or shipped a sudoers drop-in that
+#      granted the probe a write, these would go red -- in every mode, which is correct.
+#   2. As the negative control for themselves. Running them at level `control` in open/assert.sh
+#      puts "these four failed on an unlocked image too" into the matrix output, so no reader
+#      mistakes them for evidence about locked.
 a_suite_policy_immutable() {
-    printf '\n-- try to edit the policy itself -------------------------------------------------------\n'
-    a_must_fail "self.sudoers"    "write a new sudoers drop-in"   -- /usr/bin/install -m 0440 /dev/null /etc/sudoers.d/00-auros-probe
-    a_must_fail "self.polkit"     "write a new polkit rule"       -- /usr/bin/install -m 0644 /dev/null /etc/polkit-1/rules.d/00-auros-probe.rules
-    a_must_fail "self.stamp"      "overwrite the mode stamp"      -- /usr/bin/tee /usr/lib/auros/policy-mode
-    a_must_fail "self.kdeglobals" "overwrite /etc/xdg/kdeglobals" -- /usr/bin/tee /etc/xdg/kdeglobals
+    local level="${1:-hard}"
+    printf '\n-- try to edit the policy itself (a FLOOR property of the base, not of this mode) -------\n'
+    a_try "$level" "self.sudoers"    "write a new sudoers drop-in"   -- /usr/bin/install -m 0440 /dev/null /etc/sudoers.d/00-auros-probe
+    a_try "$level" "self.polkit"     "write a new polkit rule"       -- /usr/bin/install -m 0644 /dev/null /etc/polkit-1/rules.d/00-auros-probe.rules
+    a_try "$level" "self.stamp"      "overwrite the mode stamp"      -- /usr/bin/tee /usr/lib/auros/policy-mode
+    a_try "$level" "self.kdeglobals" "overwrite /etc/xdg/kdeglobals" -- /usr/bin/tee /etc/xdg/kdeglobals
+    if [ "$level" != control ]; then
+        a_note "self.scope" "these four fail on an OPEN image too (open/assert.sh runs the same list as its control). They are the base's read-only-/usr and root-owned-/etc floor, not this mode."
+    fi
+}
+
+# ── KDE Kiosk (KAuthorized), the half of `locked` that had nothing attempting it ──────────────────
+#
+# D3 justifies choosing KDE on the grounds that "the KDE Kiosk framework is the only lockdown
+# mechanism strong enough to make our locked and kiosk policy modes provable rather than merely
+# configured", and locked/description.md tells the customer verbatim that Dolphin's "Open Terminal
+# Here", Kate's terminal panel and the run-command box are switched off. Until this suite existed,
+# nothing on the machine attempted any of it: the claim rested on a .ini file merged into
+# /etc/xdg/kdeglobals and believed.
+#
+# That file is also the single most fragile artefact in the mode. build/40-windows-feel.sh runs
+# AFTER build/20-policy.sh and installs /etc/xdg/kdeglobals as a WHOLE FILE, which removes the three
+# KDE Kiosk groups apply-policy merged into it. polkit, sudoers, PAM, dconf and the unit masks all
+# survive that; the KDE restrictions do not. 20-policy.sh warns about the ordering at build time.
+# This suite is what notices it at runtime.
+#
+# THE ATTEMPT, and why it observes a marker file rather than an exit code:
+#   KAuthorized is a library check inside the KDE application, evaluated before it opens a window,
+#   so QT_QPA_PLATFORM=offscreen reaches it. But a denied Konsole puts up a KMessageBox and its exit
+#   code is not a documented contract, and a modal error dialog under an offscreen platform is a
+#   hang waiting to be scored as flakiness. So we do not read an exit code. We ask the application
+#   to run a script that touches a marker, wait, and look for the marker:
+#
+#       marker present  => the door is OPEN, a shell ran
+#       marker absent   => the door is SHUT, nothing ran
+#
+#   The same attempt is made on `open` with expect=open, where the marker MUST appear. If it does
+#   not, the KDE runtime cannot start headless for this subject and every KAuthorized denial in this
+#   matrix is an artefact -- so open/assert.sh goes red and says exactly that, instead of every
+#   other mode going green on an attempt that could never have succeeded.
+A_KDE_SETTLE=${AUROS_KDE_SETTLE:-10}
+
+a_kde_bin() {  # first of the KDE binaries that exists, printed; non-zero if none
+    local b; for b in "$@"; do command -v "$b" >/dev/null 2>&1 && { printf '%s' "$b"; return 0; }; done; return 1
+}
+
+# a_kde_door <id> <expect: open|shut> <binary> <description> -- <args...>
+# @SCRIPT@ in the args is replaced with the path of a script that touches the marker.
+a_kde_door() {
+    local id="$1" expect="$2" bin="$3" desc="$4"; shift 4; [ "${1:-}" = "--" ] && shift
+    local dir marker script a rc=0
+    local -a args=()
+
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        if [ "$expect" = shut ]; then
+            a_ok "$id" "$desc -- $bin is not on this image, so this door does not exist"
+        else
+            a_bad "$id" "$desc -- $bin is absent, so this control cannot show that the attempt is capable of succeeding. Without it, a refusal of the same attempt under locked/kiosk proves nothing."
+        fi
+        return
+    fi
+
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/auros-kde.XXXXXX" 2>/dev/null)" || {
+        a_bad "$id" "$desc -- no writable temporary directory, so the attempt could not be made at all. An attempt that was not made is not a denial."
+        return
+    }
+    marker="$dir/a-shell-ran"
+    script="$dir/open-a-shell"
+    { printf '#!/usr/bin/bash\n'; printf 'touch %s\n' "$marker"; printf 'exit 0\n'; } > "$script"
+    chmod 0755 "$script"
+    mkdir -p "$dir/home/.config" "$dir/home/.cache" "$dir/home/.local/share" "$dir/run"
+    chmod 0700 "$dir/run"
+
+    for a in "$@"; do args+=("${a//@SCRIPT@/$script}"); done
+
+    # A private HOME so the result is about /etc/xdg, which is where our restriction lives, and not
+    # about whatever a previous run left in the probe account's own config.
+    env QT_QPA_PLATFORM=offscreen QT_LOGGING_RULES='*=false' QT_ACCESSIBILITY=0 \
+        HOME="$dir/home" XDG_CONFIG_HOME="$dir/home/.config" \
+        XDG_CACHE_HOME="$dir/home/.cache" XDG_DATA_HOME="$dir/home/.local/share" \
+        XDG_RUNTIME_DIR="$dir/run" \
+        timeout "$A_TIMEOUT" "$bin" "${args[@]}" >/dev/null 2>&1 </dev/null &
+    local pid=$! i=0
+    while [ "$i" -lt "$A_KDE_SETTLE" ] && [ ! -e "$marker" ]; do sleep 1; i=$(( i + 1 )); done
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || rc=$?
+    pkill -u "$(id -u)" -x "$bin" >/dev/null 2>&1 || true
+
+    if [ -e "$marker" ]; then
+        if [ "$expect" = open ]; then
+            a_ok "$id" "$desc -- a shell RAN through $bin. This subject can open this door, so a refusal of it under managed/locked/kiosk is evidence."
+        else
+            a_bad "$id" "$desc -- A SHELL RAN through $bin. KAuthorized did not stop it, so the sentence we print in locked/description.md ('Dolphin's Open Terminal Here, Kate's terminal panel and the run-command box are all switched off') is FALSE on this image. The usual cause is /etc/xdg/kdeglobals being replaced as a whole file after apply-policy ran -- see the kdeglobals ordering hazard in policy/README.md."
+        fi
+    else
+        if [ "$expect" = shut ]; then
+            a_ok "$id" "$desc -- refused: no shell ran within ${A_KDE_SETTLE}s"
+        else
+            a_bad "$id" "$desc -- no shell ran within ${A_KDE_SETTLE}s on an image that restricts nothing. The KDE runtime cannot be exercised headlessly by this subject, which means every KAuthorized denial recorded elsewhere in this matrix is an artefact of the probe rather than evidence of the mode. Fix the probe or stop claiming the KDE restrictions in description.md."
+        fi
+    fi
+    rm -rf "$dir"
+}
+
+# a_kde_cascade <id> <key> <want> -- corroborating only: KDE's OWN config cascade resolves the key,
+# which is strictly stronger than grepping /etc/xdg/kdeglobals (it honours $XDG_CONFIG_DIRS ordering
+# and the [$i] immutability marker) but is still a read, so it is never primary evidence.
+a_kde_cascade() {
+    local id="$1" key="$2" want="$3" kr got
+    kr="$(a_kde_bin kreadconfig6 kreadconfig5)" || { a_note "$id" "no kreadconfig on this image; the corroborating read was skipped (the attempt above is the evidence)"; return; }
+    got="$(env QT_QPA_PLATFORM=offscreen "$kr" --file kdeglobals --group "KDE Action Restrictions" --key "$key" 2>/dev/null)"
+    if [ "$got" = "$want" ]; then
+        a_note "$id" "KDE's own cascade resolves [KDE Action Restrictions] $key=$got [corroborating]"
+    else
+        a_bad "$id" "KDE's own cascade resolves [KDE Action Restrictions] $key='${got:-<unset>}', not '$want'. The group did not survive the merge into /etc/xdg/kdeglobals."
+    fi
+}
+
+# a_suite_kde_kiosk <level>
+#   hard      locked  -- every door must be shut
+#   allow     managed -- the terminal is deliberately KEPT, so the doors must be OPEN. Asserting
+#                        that is what stops managed and locked quietly converging.
+#   control   open    -- nothing is restricted, so the doors must be OPEN. This is the control that
+#                        makes `hard` mean something.
+#   absent    kiosk   -- the KDE applications were deleted; a_absent covers them, and a door that
+#                        does not exist is checked as absence rather than as refusal.
+a_suite_kde_kiosk() {
+    local level="$1" expect konsole kioclient
+    case "$level" in
+        hard)          expect=shut ;;
+        allow|control) expect=open ;;
+        absent)        expect=shut ;;
+        *) a_bad "kde.level" "a_suite_kde_kiosk called with unknown level '$level'"; return ;;
+    esac
+    printf '\n-- try to reach a shell through a KDE application (KAuthorized) ------------------------\n'
+
+    konsole="$(a_kde_bin konsole konsole5 || true)"
+    kioclient="$(a_kde_bin kioclient6 kioclient5 kioclient || true)"
+
+    if [ "$level" = absent ]; then
+        # kiosk removed them. Say so as absence -- "the binary is gone" is a stronger statement than
+        # "the binary refused", and absent-binaries.list already gates the build on it.
+        [ -n "$konsole" ]   && a_bad "kde.konsole.absent"   "konsole is still on a kiosk image at $(command -v "$konsole")" \
+                            || a_ok  "kde.konsole.absent"   "no konsole on this image"
+        [ -n "$kioclient" ] && a_note "kde.kioclient"       "$kioclient is present; the door is attempted below anyway" \
+                            || a_ok  "kde.kioclient.absent" "no kioclient on this image"
+    fi
+
+    if [ -n "$konsole" ] || [ "$expect" = open ]; then
+        a_kde_door "kde.konsole" "$expect" "${konsole:-konsole}" \
+                   "konsole -e <script> (action/shell_access)" -- -e @SCRIPT@
+    fi
+    if [ -n "$kioclient" ] || [ "$expect" = open ]; then
+        # KIO's OpenUrlJob consults the same KAuthorized shell_access before it will execute a local
+        # binary, so this is a second, independent door through one gate. Dolphin's "Open Terminal
+        # Here" and Kate's terminal panel are the same gate reached from a GUI we cannot script.
+        a_kde_door "kde.kioclient" "$expect" "${kioclient:-kioclient6}" \
+                   "kioclient exec <script> (action/shell_access via KIO)" -- exec @SCRIPT@
+    fi
+
+    case "$level" in
+        hard)   a_kde_cascade "kde.cascade.shell_access" shell_access false
+                a_kde_cascade "kde.cascade.run_command"  run_command  false ;;
+        allow)  a_note "kde.cascade" "managed does not restrict shell_access; nothing to corroborate" ;;
+        control) a_note "kde.cascade" "open restricts nothing; the two doors above are the control" ;;
+    esac
 }
 
 a_finish() {
     local mode="$1"
     printf '\n'
+    if [ "${#A_CORROBORATING[@]}" -gt 0 ]; then
+        printf 'EVIDENCE CLASSIFICATION -- %d of the attempts above are CORROBORATING, not primary:\n' "${#A_CORROBORATING[@]}"
+        printf '  %s\n' "${A_CORROBORATING[*]}"
+        printf '  These fail for this probe subject on an OPEN image too (it is a sessionless system\n'
+        printf '  account, /etc is root-owned and /usr is read-only), so their failure here is\n'
+        printf '  consistent with the mode but does not on its own prove it. open/assert.sh runs the\n'
+        printf '  same attempts as an explicit negative control and prints which of them succeeded.\n'
+        printf '  The primary evidence for this mode is the pkcheck answers (1 vs 3) and the KDE\n'
+        printf '  KAuthorized doors, both of which differ between open and locked for this subject.\n\n'
+    fi
+    if [ "${#A_CONTROL_NON_DISCRIMINATING[@]}" -gt 0 ] || [ "${#A_CONTROL_DISCRIMINATING[@]}" -gt 0 ]; then
+        printf 'NEGATIVE CONTROL -- what this unlocked image allowed the probe subject to do:\n'
+        printf '  succeeded here (so a refusal elsewhere is evidence): %s\n' "${A_CONTROL_DISCRIMINATING[*]:-none}"
+        printf '  failed here too (corroborating only elsewhere):      %s\n\n' "${A_CONTROL_NON_DISCRIMINATING[*]:-none}"
+    fi
     if [ "$A_FAIL" -eq 0 ]; then
         printf 'RESULT: pass (%d attempts, %d failures) mode=%s\n' "$A_PASS" "$A_FAIL" "$mode"
     else
@@ -261,8 +562,11 @@ a_finish() {
     fi
     if [ "$A_JSON" = 1 ]; then
         local l first=1
-        printf '\n--- json ---\n{"mode":"%s","verdict":"%s","passed":%d,"failed":%d,"attempts":[' \
-               "$(a_json_str "$mode")" "$([ "$A_FAIL" -eq 0 ] && echo pass || echo fail)" "$A_PASS" "$A_FAIL"
+        printf '\n--- json ---\n{"mode":"%s","verdict":"%s","passed":%d,"failed":%d,"corroborating":"%s","control_discriminating":"%s","control_non_discriminating":"%s","attempts":[' \
+               "$(a_json_str "$mode")" "$([ "$A_FAIL" -eq 0 ] && echo pass || echo fail)" "$A_PASS" "$A_FAIL" \
+               "$(a_json_str "${A_CORROBORATING[*]:-}")" \
+               "$(a_json_str "${A_CONTROL_DISCRIMINATING[*]:-}")" \
+               "$(a_json_str "${A_CONTROL_NON_DISCRIMINATING[*]:-}")"
         for l in "${A_LINES[@]}"; do
             [ "$first" = 1 ] || printf ','
             first=0

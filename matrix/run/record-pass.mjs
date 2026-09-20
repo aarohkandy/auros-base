@@ -12,14 +12,18 @@
 //   - matrix_version must equal the current checks.yaml, because a pass under an older, weaker matrix
 //     is not evidence of a pass under this one.
 //   - the digest must be a digest.
+//   - the ledger's column set is IMPORTED from tools/gate.mjs, never restated here, and the row is
+//     shown to gate.decide() on a scratch copy before a byte is appended. A row the gate cannot read
+//     is not written at all: under gate.mjs one malformed row refuses every digest in the file.
 //
 // compat.tsv rows are appended on EVERY run, pass or fail — a failed VM run is still an observation,
 // and the row carries the outcome in its notes. The ledger is appended on a full pass only.
 //
 // usage: record-pass.mjs --results results.json [--bound-profiles a,b] [--compat-rows FILE]
 //                        [--ledger FILE] [--compat-tsv FILE] [--dry-run]
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { loadChecks, loadProfiles, requiredFor, DEFAULT_UPDATE_PROFILE, META_REPO, MATRIX_DIR } from './lib/matrix.mjs';
 import { validate } from './lib/validate.mjs';
@@ -33,20 +37,36 @@ for (let i = 2; i < process.argv.length; i++) {
 const die = (m) => { console.error(`record-pass: ${m}`); process.exit(1); };
 if (!a.results) die('--results is required');
 
-const LEDGER = a.ledger ?? join(META_REPO, 'attest', 'passed-digests.tsv');
 const COMPAT = a['compat-tsv'] ?? join(META_REPO, 'hardware', 'compat.tsv');
 const UPDATE_PROFILE = a['update-profile'] ?? DEFAULT_UPDATE_PROFILE;
 const DRY = a['dry-run'] === 'true';
 
-// ── ASSUMED CONVENTION, and the one thing in this file most likely to need changing. ────────────
-// attest/passed-digests.tsv belongs to the publish-gate work item (TASKS 0.5, tools/gate.mjs), which is
-// not written yet. These are the columns this harness will write. If gate.mjs defines a different
-// header, THIS FILE is the single place to change — and the code below refuses to append to a file
-// whose header differs rather than writing a row nobody can read.
-const LEDGER_COLUMNS = [
-  'digest', 'image', 'recipe', 'matrix_version', 'profiles', 'verdict',
-  'results_sha256', 'pull_size_bytes', 'run_url', 'recorded_at', 'recorded_by',
-];
+// ── THE COLUMN SET IS IMPORTED FROM THE GATE, NEVER COPIED ──────────────────────────────────────
+// This used to be a hand-written list of 11 columns guessed before tools/gate.mjs existed. gate.mjs
+// reads 9, with different names and different semantics (`profiles_passed`/`checks_passed` rather
+// than `profiles`/`verdict`), and it refuses ANY ledger whose header differs — which meant every row
+// this file could write would have made the gate refuse every digest in the file, not just that row.
+// Two files describing the same table from memory is how that happens, so there is now exactly one
+// description and this one imports it.
+//
+// gate.mjs lives in the meta/control repo (D6) and is not always a sibling of auros-base, so it is
+// located from the ledger path itself: the ledger is always <meta-root>/attest/passed-digests.tsv,
+// so <meta-root>/tools/gate.mjs is next to it. If it cannot be found we DIE rather than fall back to
+// a local copy — a recorder that cannot see the gate's column set cannot know the gate will be able
+// to read what it writes, and writing anyway is exactly the failure this paragraph describes.
+const LEDGER = a.ledger ?? join(META_REPO, 'attest', 'passed-digests.tsv');
+const META_ROOT = dirname(dirname(resolve(LEDGER)));
+const GATE_CANDIDATES = [join(META_ROOT, 'tools', 'gate.mjs'), join(META_REPO, 'tools', 'gate.mjs')];
+const GATE_PATH = GATE_CANDIDATES.find((p) => existsSync(p));
+if (!GATE_PATH) {
+  die(`cannot find tools/gate.mjs — looked in:\n  ${GATE_CANDIDATES.join('\n  ')}\n` +
+      'The ledger column set is defined by the gate that reads it, and is imported from there rather ' +
+      'than copied. Point --ledger at <meta-repo>/attest/passed-digests.tsv, or check the meta repo out.');
+}
+const gate = await import(pathToFileURL(GATE_PATH).href);
+if (!Array.isArray(gate.HEADER) || gate.HEADER.length === 0) die(`${GATE_PATH} exports no HEADER — this is not the publish gate`);
+if (typeof gate.decide !== 'function') die(`${GATE_PATH} exports no decide() — this is not the publish gate`);
+const LEDGER_COLUMNS = [...gate.HEADER];
 
 const checks = loadChecks();
 const known = loadProfiles();
@@ -137,26 +157,100 @@ if (computed !== 'pass') {
   process.exit(1);
 }
 
+// ── the two set-valued columns the gate actually reads ──────────────────────────────────────────
+// `checks_passed` is the set of check IDs that passed on EVERY profile that binds them — the
+// intersection over binders, not the union over profiles. It is computed rather than taken as
+// `checks.all`, because a check defined in checks.yaml that no profile binds has never been proven
+// by anything, and listing it would be a pass manufactured by arithmetic. When that happens the set
+// comes up short and the gate refuses with `incomplete-checks`, which is the correct outcome.
+// The declared counts (the "/N" suffixes) are what stop a partial pass hiding as a short list.
+const checksPassed = checks.all.filter((id) => {
+  const binders = bound.filter((pid) => requiredFor(checks, pid, UPDATE_PROFILE).includes(id));
+  if (binders.length === 0) return false;
+  return binders.every((pid) => {
+    const entry = byProfile.get(pid);
+    const c = entry && entry.checks.find((x) => x.id === id);
+    return !!c && c.status === 'pass';
+  });
+});
+
 const resultsSha = createHash('sha256').update(readFileSync(a.results)).digest('hex');
 const pullBytes = (() => { const p = join(dirname(a.results), 'work', 'pull-bytes'); try { return readFileSync(p, 'utf8').trim() || '0'; } catch { return '0'; } })();
-const row = [
-  results.digest, results.image, results.recipe ?? '-', String(results.matrix_version),
-  bound.join(','), 'pass', resultsSha, pullBytes, results.run_url,
-  new Date().toISOString().replace(/\.\d+Z$/, 'Z'), 'auros-base/matrix/run/record-pass.mjs',
-];
+// results_sha256 and pull_size_bytes have no column in the gate's ledger; they are printed here and
+// live in the run's artifact rather than being smuggled into a table that cannot hold them.
+console.log(`  results.json sha256: ${resultsSha}`);
+console.log(`  pull size (bytes):   ${pullBytes}`);
+
+const rowByName = {
+  digest: results.digest,
+  image: results.image,
+  recipe: results.recipe ?? '-',
+  matrix_version: String(results.matrix_version),
+  profiles_passed: `${bound.join(',')}/${bound.length}`,
+  checks_passed: `${checksPassed.join(',')}/${checks.all.length}`,
+  run_url: results.run_url,
+  recorded_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+  recorded_by: 'auros-base/matrix/run/record-pass.mjs',
+};
+const unknownCols = LEDGER_COLUMNS.filter((c) => !(c in rowByName));
+if (unknownCols.length) {
+  die(`tools/gate.mjs declares ledger column(s) this recorder has no value for: ${unknownCols.join(', ')}. ` +
+      'The gate changed its table and this file has not caught up — fix it here rather than writing an empty cell.');
+}
+const row = LEDGER_COLUMNS.map((c) => rowByName[c]);
 if (row.some((v) => String(v).includes('\t'))) die('a ledger field contains a tab');
+
+// ── the header, read past the ledger's own documentation ────────────────────────────────────────
+// attest/passed-digests.tsv opens with a 50-line comment block explaining the format. Reading
+// `.split('\n')[0]` therefore compared a sentence beginning "# AUROS ATTESTATION LEDGER" against a
+// tab-joined column list, which can never match, so this guard died on every well-formed ledger.
+// The header is the first line that is neither blank nor a comment — the same rule parseLedger uses.
+const ledgerHeaderOf = (text) => text.split('\n').find((l) => l.trim() !== '' && !l.startsWith('#'));
 
 if (!existsSync(LEDGER)) {
   if (!DRY) { mkdirSync(dirname(LEDGER), { recursive: true }); writeFileSync(LEDGER, LEDGER_COLUMNS.join('\t') + '\n'); }
-  console.log(`  created ${LEDGER} with the assumed column set (see the comment in record-pass.mjs)`);
+  console.log(`  created ${LEDGER} with the column set imported from ${GATE_PATH}`);
 }
 if (existsSync(LEDGER)) {
-  const head = readFileSync(LEDGER, 'utf8').split('\n')[0];
+  const head = ledgerHeaderOf(readFileSync(LEDGER, 'utf8'));
+  if (head === undefined) {
+    die(`${LEDGER} has no header row — it is empty or entirely comments. The gate refuses such a file outright.`);
+  }
   if (head.trim() !== LEDGER_COLUMNS.join('\t')) {
-    die(`${LEDGER} has a different header than this harness writes.\n  ledger:  ${head}\n  harness: ${LEDGER_COLUMNS.join('\t')}\nRefusing to append a row the gate cannot read. Reconcile LEDGER_COLUMNS in record-pass.mjs with tools/gate.mjs — do not paper over it.`);
+    die(`${LEDGER} has a different header than the gate declares.\n  ledger:  ${head}\n  gate:    ${LEDGER_COLUMNS.join('\t')}\nRefusing to append a row the gate cannot read. The column set comes from ${GATE_PATH}; reconcile the FILE, not this program.`);
   }
   const body = readFileSync(LEDGER, 'utf8');
   if (body.includes(`\n${results.digest}\t`)) { console.log(`  ${results.digest} is already recorded; not duplicating`); process.exit(0); }
 }
+
+// ── PROVE THE GATE CAN READ IT, BEFORE WRITING IT ───────────────────────────────────────────────
+// The row is appended to a COPY first and the real gate is asked to decide on that copy. If it
+// refuses, nothing is written and this program exits non-zero naming the gate's own reason. This is
+// not the gate certifying itself: the gate that guards the publish reads the COMMITTED ledger from a
+// fresh checkout, in a different job. This is only the recorder refusing to write a row that would
+// poison the file — under gate.mjs a single malformed row refuses every digest in it, so a bad append
+// here is an outage for every image, not just this one.
+{
+  const existing = existsSync(LEDGER) ? readFileSync(LEDGER, 'utf8') : LEDGER_COLUMNS.join('\t') + '\n';
+  const probe = `${LEDGER}.probe-${process.pid}.tsv`;
+  writeFileSync(probe, existing + row.join('\t') + '\n');
+  let verdict;
+  try {
+    verdict = gate.decide({ digest: results.digest, image: results.image }, {
+      ledger: probe,
+      config: join(META_ROOT, 'auros.config.json'),
+      checks: join(MATRIX_DIR, 'checks.yaml'),
+      profiles: join(MATRIX_DIR, 'profiles.yaml'),
+    });
+  } finally { try { unlinkSync(probe); } catch { /* the probe is disposable */ } }
+  if (!verdict.allowed) {
+    die(`the row this run would write is one the gate REFUSES [${verdict.code}]:\n  ${verdict.reason}\n` +
+        `  row: ${row.join(' | ')}\nNothing was written. A row the gate cannot accept is worse than no row, ` +
+        'because a malformed ledger refuses every digest in it.');
+  }
+  console.log(`  gate pre-flight: ALLOW (${verdict.code}) — the committed row will be readable by tools/gate.mjs`);
+}
+
 if (!DRY) appendFileSync(LEDGER, row.join('\t') + '\n');
 console.log(`  RECORDED a full pass for ${results.digest} in ${LEDGER}${DRY ? ' (dry run — nothing written)' : ''}`);
+console.log(`  row: ${row.join('\t')}`);

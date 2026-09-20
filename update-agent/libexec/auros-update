@@ -35,8 +35,15 @@
 
 set -euo pipefail
 
-STATE_DIR=/var/lib/auros/update-agent
-CONF_DIR=/etc/auros/update-agent
+# ── THE ONE TEST SEAM ───────────────────────────────────────────────────────────────────────────
+# Every absolute path below is taken relative to ${AUROS_TEST_ROOT}, which is unset on a real
+# machine -- ${R} is then empty and the paths are exactly the paths. tests/run-tests.sh sets it to
+# a scratch tree with stub binaries on PATH, which is how each branch here is shown to be
+# reachable, including the ones that go red (D19: a step that cannot fail is not a check).
+R="${AUROS_TEST_ROOT:-}"
+
+STATE_DIR="${R}/var/lib/auros/update-agent"
+CONF_DIR="${R}/etc/auros/update-agent"
 APPLY_POLICY_FILE="${CONF_DIR}/apply-policy"
 LOCK_RETRY_SECONDS=60
 
@@ -71,7 +78,7 @@ fi
 # harness already overlays two HARNESS ONLY files onto the guest (registries.conf and a compressed
 # timer interval); this marker is a third of the same kind. It is under /run, so it cannot exist on
 # a machine that was not deliberately put into test mode, and it never ships.
-if [[ -e /run/auros-check-matrix ]]; then
+if [[ -e "${R}/run/auros-check-matrix" ]]; then
     log "/run/auros-check-matrix present: check-matrix run, applying unconditionally"
     apply_policy=always
 fi
@@ -234,7 +241,7 @@ printf '%s\n' "${staged_digest}" > "${STATE_DIR}/staged-digest"
 # We do not refuse to stage on this basis. A machine that stops updating is the abandoned laptop
 # we sell against, and refusing would trade a recoverable risk for a certain one. But the
 # operator should be able to find this line in the journal afterwards.
-if [[ -r /boot/grub2/grub.cfg ]] && ! grep -q 'boot_counter' /boot/grub2/grub.cfg; then
+if [[ -r "${R}/boot/grub2/grub.cfg" ]] && ! grep -q 'boot_counter' "${R}/boot/grub2/grub.cfg"; then
     err "ROLLBACK IS NOT WIRED: /boot/grub2/grub.cfg has no boot_counter logic."
     err "Staging anyway, but a failed update on this machine will NOT roll back by itself."
 fi

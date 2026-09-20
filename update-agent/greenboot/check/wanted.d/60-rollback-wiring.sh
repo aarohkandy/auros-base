@@ -37,11 +37,23 @@
 
 set -uo pipefail
 
+# ── THE ONE TEST SEAM ───────────────────────────────────────────────────────────────────────────
+# Every absolute path this script reads is taken relative to ${AUROS_TEST_ROOT}. On a real machine
+# that variable is unset, ${R} is empty, and the paths are exactly the paths -- nothing changes.
+# tests/run-tests.sh sets it to a scratch tree and puts stub `bootc`/`systemctl` on PATH, which is
+# how every branch below is DEMONSTRATED to be reachable, including the ones that go red. Setting
+# it on a real machine requires the ability to edit the environment of a root systemd unit, i.e.
+# root already; and the only effect would be to make this check read state that is not there,
+# which reports a problem rather than hiding one. A check nobody has watched fail is a decoration
+# (D19), and before this seam existed nobody could have watched this one fail -- its whole JSON
+# block raised a traceback on every boot instead.
+R="${AUROS_TEST_ROOT:-}"
+
 rc=0
 problem() { echo "PROBLEM: $*" >&2; rc=1; }
 
 # --- 1. ostree + GRUB backend, not composefs/UKI (D9) ----------------------------------------
-if [[ -e /run/ostree-booted ]]; then
+if [[ -e "${R}/run/ostree-booted" ]]; then
     echo "OK: booted via ostree (/run/ostree-booted present)"
 else
     problem "/run/ostree-booted is absent. This does not look like the ostree backend; greenboot rollback does not work on composefs/UKI (D9)."
@@ -56,7 +68,7 @@ fi
 # This is a FILESYSTEM assertion, so it is true or false regardless of what any JSON field is
 # named in whatever bootc version this machine is carrying.
 for u in ostree-finalize-staged.service greenboot-grub2-set-counter.service; do
-    if [[ -e "/usr/lib/systemd/system/${u}" || -e "/etc/systemd/system/${u}" ]]; then
+    if [[ -e "${R}/usr/lib/systemd/system/${u}" || -e "${R}/etc/systemd/system/${u}" ]]; then
         echo "OK: ${u} is present"
     else
         problem "${u} is absent. greenboot's boot counter is staged through it; without it nothing decrements the counter and auto-rollback does not happen (D9 -- this is what a composefs/UKI backend looks like from inside the machine)."
@@ -144,8 +156,8 @@ fi
 # (coreos/bootupd src/grubconfigs.rs, read 2026-09-20). If the machine was installed before
 # greenboot was added to the image, the fragment is in /usr but NOT in grub.cfg, and
 # rollback silently does not exist.
-if [[ -r /boot/grub2/grub.cfg ]]; then
-    if grep -q 'boot_counter' /boot/grub2/grub.cfg; then
+if [[ -r "${R}/boot/grub2/grub.cfg" ]]; then
+    if grep -q 'boot_counter' "${R}/boot/grub2/grub.cfg"; then
         echo "OK: /boot/grub2/grub.cfg contains boot_counter logic"
     else
         problem "/boot/grub2/grub.cfg has NO boot_counter logic. Auto-rollback will not happen on this machine. Fix with: bootupctl update"
@@ -155,7 +167,7 @@ else
 fi
 
 # --- 3. retry count is the one we documented --------------------------------------------------
-conf=/etc/greenboot/greenboot.conf
+conf="${R}/etc/greenboot/greenboot.conf"
 if [[ -r "${conf}" ]]; then
     attempts="$(grep -E '^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=' "${conf}" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')"
     if [[ "${attempts}" == "2" ]]; then

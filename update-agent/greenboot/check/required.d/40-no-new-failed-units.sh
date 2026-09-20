@@ -18,12 +18,52 @@
 #
 # First boot has no baseline. That passes, loudly: there is genuinely nothing to regress against
 # on a machine's first boot, and failing it would roll back the image the customer just paid for.
+#
+# ── BOTH SIDES OF THE DIFFERENCE ARE SAMPLED AT THE SAME POINT IN THE BOOT ──────────────────────
+#
+# They used to not be, and it silently hollowed the check out. This script runs from
+# greenboot-healthcheck.service (WantedBy=multi-user.target). green.d runs from
+# greenboot-task-runner.service, AFTER boot-complete.target -- strictly later, once the graphical
+# stack has had time to fail. So the baseline was a superset sampled late and the current reading
+# was sampled early: any unit that failed after multi-user.target -- which is most of the desktop,
+# the thing D4 makes the product -- was recorded into the baseline as normal and then never
+# observed at check time on the following boot, so it could never register as a regression. The
+# bias was toward passing, which is the safe direction for false rollbacks and the useless
+# direction for finding real ones.
+#
+# The fix is to sample ONCE, here, and have green.d promote THIS snapshot rather than take its
+# own later one. So this script writes `failed-units.candidate` (stamped with the boot id) and
+# green.d/10-auros-record-good-boot.sh renames it to `failed-units.baseline` only if greenboot
+# went on to declare this same boot green. That keeps the property that made the baseline
+# trustworthy -- only a boot that passed every required check becomes the new normal -- and adds
+# the one it was missing, which is that the two sides are comparable at all.
+#
+# WHERE IN THE BOOT "here" IS, precisely: required.d runs in numeric order and strict mode, so
+# 20-graphical-target.sh has already waited for display-manager.service to reach `active` (or,
+# on a kiosk image, graphical.target) before this script runs. The sample is therefore taken
+# after the graphical stack is up, not before it.
+#
+# WHAT THIS CHECK STILL CANNOT SEE, stated because the old header claimed coverage the sampling
+# did not give: a unit that fails LATER than this point -- between here and boot-complete.target,
+# or in a user session afterwards -- is in neither side of the difference and is invisible to
+# this check by construction. Zero-failed-units at rest is check B11's job, in a clean VM, where
+# demanding it is fair. On a customer's 2013 laptop it is not, for the reason above.
 
 set -uo pipefail
 
-STATE_DIR=/var/lib/auros/update-agent
+# ── THE ONE TEST SEAM ───────────────────────────────────────────────────────────────────────────
+# Every absolute path below is taken relative to ${AUROS_TEST_ROOT}, which is unset on a real
+# machine -- ${R} is then empty and the paths are exactly the paths. tests/run-tests.sh sets it to
+# a scratch tree with stub binaries on PATH, which is how each branch here is shown to be
+# reachable, including the ones that go red (D19: a step that cannot fail is not a check).
+R="${AUROS_TEST_ROOT:-}"
+
+STATE_DIR="${R}/var/lib/auros/update-agent"
 BASELINE="${STATE_DIR}/failed-units.baseline"
-IGNORE=/etc/auros/update-agent/failed-units.ignore
+CANDIDATE="${STATE_DIR}/failed-units.candidate"
+IGNORE="${R}/etc/auros/update-agent/failed-units.ignore"
+
+boot_id() { cat "${R}/proc/sys/kernel/random/boot_id" 2>/dev/null || echo unknown; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -36,6 +76,21 @@ now="$(current_failed)"
 echo "failed units now: $(echo "${now}" | grep -c . 2>/dev/null || echo 0)"
 [[ -n "${now}" ]] && echo "${now}" | sed 's/^/  now-failed: /'
 
+# Offer THIS snapshot, taken at THIS point in the boot, as the next baseline. green.d promotes it
+# only if greenboot goes on to declare this boot green -- so a bad boot can still never launder
+# its failures into the new normal, and the two sides of tomorrow's difference are sampled at the
+# same moment of the boot as each other. Best effort: if /var is not writable there is nothing
+# useful to do about it here and it must not fail the boot.
+if mkdir -p "${STATE_DIR}" 2>/dev/null; then
+    {
+        printf '#boot-id %s\n' "$(boot_id)"
+        printf '%s\n' "${now}" | grep -v '^$' || true
+    } > "${CANDIDATE}.tmp" 2>/dev/null \
+        && mv -f "${CANDIDATE}.tmp" "${CANDIDATE}" 2>/dev/null \
+        && echo "offered this snapshot as the next baseline (${CANDIDATE}, boot-id $(boot_id))" \
+        || echo "NOTE: could not write ${CANDIDATE}; green.d will fall back to sampling late."
+fi
+
 if [[ ! -r "${BASELINE}" ]]; then
     echo "OK: no baseline at ${BASELINE} yet -- this is the first boot greenboot has judged."
     echo "There is nothing to regress against, so this check passes. The baseline is written"
@@ -43,7 +98,9 @@ if [[ ! -r "${BASELINE}" ]]; then
     exit 0
 fi
 
-before="$(sort -u < "${BASELINE}")"
+# grep -v '^#' so a baseline written by any version of green.d that promoted the candidate file
+# verbatim cannot smuggle its `#boot-id` header in as if it were the name of a failed unit.
+before="$(grep -v '^[[:space:]]*#' "${BASELINE}" | grep -v '^$' | sort -u || true)"
 echo "failed units at the last green boot: $(echo "${before}" | grep -c . 2>/dev/null || echo 0)"
 
 new="$(comm -13 <(printf '%s\n' "${before}") <(printf '%s\n' "${now}") || true)"

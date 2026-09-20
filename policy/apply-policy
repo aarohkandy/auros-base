@@ -111,8 +111,24 @@ for f in /usr/libexec/auros/auros-kiosk-session /usr/libexec/auros/apply-policy 
 done
 
 AUROS_GROUPS_STILL_MARKED=""
-AUROS_REMOVED_TSV="$(mktemp)"
+# NOT mktemp. Both of this script's scratch files live under $AUROS_POLICY_STATE, for a reason that
+# is a build-determinism bug rather than tidiness:
+#
+#   apply-policy for kiosk runs in a CUSTOMER RECIPE's layer, where build/90-cleanup.sh has already
+#   run and will not run again -- so nothing sweeps /tmp afterwards. A `mktemp` file that is not
+#   removed is therefore COMMITTED INTO THE IMAGE with a random name per build, and two builds of
+#   the same recipe against the same pinned base digest produce different content digests. That is
+#   precisely the property check S7 gates on, and the failure presents as flakiness, which is how it
+#   would get retried away instead of fixed.
+#
+#   $AUROS_POLICY_STATE is swept by the `find ... -exec touch` at the end of this script, so even a
+#   file left behind by a `die` in the middle has a fixed name and a normalised mtime. Both are also
+#   removed explicitly below.
+AUROS_REMOVED_TSV="$AUROS_POLICY_STATE/.removed.tsv"
+AUROS_KEEP_PRESENT_BEFORE="$AUROS_POLICY_STATE/.keep-present-before"
+export AUROS_KEEP_PRESENT_BEFORE
 : > "$AUROS_REMOVED_TSV"
+: > "$AUROS_KEEP_PRESENT_BEFORE"
 USR_BEFORE=0; USR_AFTER=0
 COMPOSITOR=""
 
@@ -121,7 +137,7 @@ case "$MODE" in
     log "open: no restrictions are installed. The base image's hardening, the signed update path and"
     log "open: the retained rollback deployment are untouched -- open means we added no lock on top,"
     log "open: not that the floor was removed."
-    rm -f "$AUROS_POLICY_STATE/kiosk-compositor"
+    rm -f "$AUROS_POLICY_STATE/kiosk-compositor" "$AUROS_POLICY_STATE/kiosk-vt-switch"
     ;;
 
   managed|locked)
@@ -159,15 +175,50 @@ case "$MODE" in
         COMPOSITOR=cage
     elif [ "$DNF" != none ] && "$DNF" -y install --setopt=install_weak_deps=False cage >/dev/null 2>&1; then
         COMPOSITOR=cage
-    elif command -v weston >/dev/null 2>&1; then
-        COMPOSITOR=weston
-    elif [ "$DNF" != none ] && "$DNF" -y install --setopt=install_weak_deps=False weston >/dev/null 2>&1; then
-        COMPOSITOR=weston
+    elif command -v weston >/dev/null 2>&1 || { [ "$DNF" != none ] && "$DNF" -y install --setopt=install_weak_deps=False weston >/dev/null 2>&1; }; then
+        # THE WESTON FALLBACK IS NOW OPT-IN, and the reason is a customer-facing claim rather than a
+        # preference. kiosk/description.md tells the buyer "Ctrl+Alt+F2 does not produce a text
+        # prompt". On the cage path that is enforced twice -- the gettys are masked AND cage is
+        # started without `-s`, so the compositor never binds Ctrl+Alt+Fn at all. libweston's DRM
+        # backend binds VT switching UNCONDITIONALLY; there is no flag to omit. The promise still
+        # holds, because every getty is masked and a switch lands on a blank console, but it holds
+        # by one mechanism instead of two, and that is a weaker image than the one we sold.
+        #
+        # So the build stops and makes a human decide, rather than silently shipping the weaker
+        # machine when cage happens to be missing from the repositories that morning.
+        if [ "${AUROS_KIOSK_ALLOW_WESTON:-0}" = 1 ]; then
+            COMPOSITOR=weston
+            warn "================================================================"
+            warn "WESTON FALLBACK ACCEPTED (AUROS_KIOSK_ALLOW_WESTON=1)."
+            warn "libweston binds VT switching unconditionally, so Ctrl+Alt+Fn DOES leave the"
+            warn "compositor on this image. It lands on a blank console because every getty is"
+            warn "masked -- not because the switch was prevented. kiosk/assert.sh records this as a"
+            warn "known limit at runtime and kiosk/description.md states it to the customer."
+            warn "================================================================"
+        else
+            die "kiosk: cage could not be installed and only weston is available.
+weston is a WEAKER kiosk than cage for this product's central claim. cage is started without \`-s\`
+so it never binds Ctrl+Alt+Fn; libweston's DRM backend binds VT switching unconditionally and has no
+flag to turn it off. kiosk/description.md tells the customer 'Ctrl+Alt+F2 does not produce a text
+prompt' -- which stays true either way, because every getty is masked, but on the weston path it is
+true for one reason instead of two.
+Refusing to make that trade silently. Either fix the cage availability, or set
+AUROS_KIOSK_ALLOW_WESTON=1 to accept it deliberately; the runtime assertion and the customer-facing
+description both record the limit when you do."
+        fi
     else
         die "kiosk needs a Wayland kiosk compositor and neither cage nor weston could be installed. Refusing to delete the desktop shell from an image that would then have nothing to draw with."
     fi
     printf '%s\n' "$COMPOSITOR" > "$AUROS_POLICY_STATE/kiosk-compositor"
+    # The VT-switch posture, recorded as a fact about THIS image so that kiosk/assert.sh asserts the
+    # right thing rather than inferring it. assert.sh then checks the running compositor's own argv
+    # against this record -- the record alone would be a configuration file, which is what B5 fails.
+    case "$COMPOSITOR" in
+        cage)   printf 'cage-no-vt-switch\n'         > "$AUROS_POLICY_STATE/kiosk-vt-switch" ;;
+        weston) printf 'weston-vt-switch-possible\n' > "$AUROS_POLICY_STATE/kiosk-vt-switch" ;;
+    esac
     log "kiosk compositor: $COMPOSITOR (recorded at $AUROS_POLICY_STATE/kiosk-compositor; assert.sh checks the RUNNING process against this)"
+    log "kiosk VT posture: $(cat "$AUROS_POLICY_STATE/kiosk-vt-switch")"
 
     # DELIBERATELY NOT greetd. greetd is a login/display manager by function, and check S9 asserts
     # that no display-manager binary exists on a kiosk image. We would rather have no such binary at
@@ -176,8 +227,6 @@ case "$MODE" in
 
     # ---- 3. measure, then subtract --------------------------------------------------------------
     USR_BEFORE="$(du -sxb /usr 2>/dev/null | cut -f1 || echo 0)"
-    AUROS_KEEP_PRESENT_BEFORE="$(mktemp)"
-    export AUROS_KEEP_PRESENT_BEFORE
     auros_snapshot_keep "$SRC/keep.list" "$AUROS_KEEP_PRESENT_BEFORE"
     auros_remove_packages "$SRC/remove.list" "$SRC/keep.list"
     auros_unmark_groups "$SRC/remove-groups.list"
@@ -270,7 +319,11 @@ chmod 0444 "$AUROS_MODE_STAMP"
     printf '}\n'
 } > "$AUROS_REPORT"
 chmod 0444 "$AUROS_REPORT"
-rm -f "$AUROS_REMOVED_TSV"
+# BOTH scratch files, not one. The keep-list snapshot used to be a `mktemp` that nothing removed,
+# and in a recipe layer (where 90-cleanup.sh no longer runs) that put a /tmp/tmp.XXXXXXXXXX with a
+# per-build random name inside every kiosk image -- breaking S7's "same recipe + same pinned base
+# digest => same content digest" in a way that looks like flakiness.
+rm -f "$AUROS_REMOVED_TSV" "$AUROS_KEEP_PRESENT_BEFORE"
 
 # ── determinism: normalise the mtimes of everything this script wrote ────────────────────────────
 #
@@ -292,7 +345,8 @@ while IFS= read -r _p; do
     { [ -n "${AUROS_WRITTEN_LIST:-}" ] && [ -f "${AUROS_WRITTEN_LIST}" ] && printf '%s\n' "$_p" >> "$AUROS_WRITTEN_LIST"; } || true
 done < <(cat "$AUROS_POLICY_MANIFEST" "$COMMON_MANIFEST" 2>/dev/null; printf '%s\n' \
     "$AUROS_MODE_STAMP" "$AUROS_REPORT" "$AUROS_POLICY_MANIFEST" "$AUROS_MASKED_UNITS" \
-    "$COMMON_MANIFEST" "$AUROS_KDEGLOBALS" "$AUROS_POLICY_STATE/kiosk-compositor")
+    "$COMMON_MANIFEST" "$AUROS_KDEGLOBALS" "$AUROS_POLICY_STATE/kiosk-compositor" \
+    "$AUROS_POLICY_STATE/kiosk-vt-switch" "$AUROS_POLICY_STATE/claims.env")
 # Narrowed to the paths this layer owns. /usr/libexec/auros and /usr/lib/auros are shared with the
 # update and hardening layers, and normalising another layer's mtimes would be harmless but is still
 # reaching into somebody else's files.

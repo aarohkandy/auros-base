@@ -263,12 +263,32 @@ jobs:
           # that packages a customer's recipe removed are bytes they never download. If the flatten
           # step fails, the build fails. Publishing an unflattened image would leave the product's
           # central claim ("we removed 214 packages") true on disk and false on the wire.
+          # BASE_REF USED TO BE PASSED AS `--build-arg BASE_IMAGE=…` AND DID NOTHING.
+          # Containerfile declares only UPSTREAM_IMAGE / UPSTREAM_TAG / UPSTREAM_DIGEST /
+          # SOURCE_DATE_EPOCH, and its FROM is a hardcoded literal on purpose (Containerfile lines
+          # 30-31: written as a literal so the digest is greppable without evaluating build args).
+          # podman warns about an unused build-arg and carries on, so the flag looked like the D21
+          # mirror switch and was inert — "looks configured, isn't", which is the thing D22 is about.
+          #
+          # The flag is gone. The mirror flip is what it always actually was: an edit to the FROM
+          # line, which `tools/resolve-upstream.sh assert` reads and reports as base_via. So BASE_REF
+          # now GATES the build instead of decorating it — if the Containerfile's FROM is not the
+          # reference the resolver just proved against base.lock, nothing is built.
+          CF_FROM=$(grep -m1 -E '^FROM[[:space:]]' Containerfile | awk '{print $2}')
+          if [ "$CF_FROM" != "$BASE_REF" ]; then
+            echo "::error::Containerfile's FROM is not the reference the resolver just proved against base.lock."
+            echo "  resolver: ${BASE_REF}"
+            echo "  FROM:     ${CF_FROM}"
+            echo "  Flipping to the D21 mirror is an edit to THAT line; no build argument does it."
+            exit 1
+          fi
+          echo "FROM matches the resolved base reference: ${BASE_REF}"
+
           build_one () {
             local n="$1" raw="localhost/auros-base:raw-$1" out="localhost/auros-base:chunked-$1"
             echo "::group::build $n — derive"
             sudo podman build \
               --timestamp "$SOURCE_DATE_EPOCH" \
-              --build-arg "BASE_IMAGE=${BASE_REF}" \
               -t "$raw" -f Containerfile .
             # Record the pre-flatten identity too. When S7 goes red at 2am, the first question is
             # whether the nondeterminism is in our build or in the chunker, and this answers it

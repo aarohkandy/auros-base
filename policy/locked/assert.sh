@@ -31,7 +31,23 @@ a_suite_no_root            hard
 a_suite_no_software        hard
 a_suite_no_network_change  hard
 a_suite_update_timer       hard
-a_suite_policy_immutable
+a_suite_policy_immutable   hard
+
+# The KDE half of the mode, which until now had NOTHING attempting it. D3 justifies choosing KDE on
+# the grounds that "the KDE Kiosk framework is the only lockdown mechanism strong enough to make our
+# locked and kiosk policy modes provable rather than merely configured", and description.md tells the
+# customer verbatim that Dolphin's "Open Terminal Here", Kate's terminal panel and the run-command
+# box are switched off. That sentence rested on a .ini file merged into /etc/xdg/kdeglobals and
+# believed -- the exact state B5's `fails_on: configured-but-not-effective` exists to catch, on the
+# single most fragile artefact in the mode: build/40-windows-feel.sh runs after build/20-policy.sh
+# and writes /etc/xdg/kdeglobals as a WHOLE FILE, which removes the three groups apply-policy merged
+# into it. polkit, sudoers, PAM, dconf and the unit masks all survive that; the KDE restrictions do
+# not. This suite is the only thing on the machine that would notice.
+#
+# It goes red if a shell actually runs through konsole or KIO. open/assert.sh runs the identical
+# attempt with expect=open and goes red if a shell does NOT run there -- so a green here cannot be
+# an attempt that could never have succeeded.
+a_suite_kde_kiosk          hard
 
 printf '\n-- what locked deliberately still allows ------------------------------------------------\n'
 # Asserted as PERMITTED on purpose. A mode that also broke shutting the lid and reading the battery
@@ -43,5 +59,6 @@ a_must_succeed "allowed.session" "the user can run an ordinary command" -- /usr/
 printf '\n-- and the two things locked does NOT claim, recorded rather than hidden ----------------\n'
 a_note "limit.user-flatpak" "a user with a shell can still install a Flatpak into their own home. No privilege, not on the system, gone when the profile resets. kiosk is the mode that removes this."
 a_note "limit.grub"         "anyone who can restart the machine and edit the boot menu can get root on any Linux machine unless the boot menu has a password. That password belongs to the hardening layer, not to this mode."
+a_note "limit.non-kde"      "action/shell_access governs KDE applications. It is not a kernel restriction and it does not delete /usr/bin/bash. A student who reaches a shell by some non-KDE route still cannot do anything on the list above -- that is what the polkit half is for -- and the mode that removes the shell itself is kiosk."
 
 a_finish locked
