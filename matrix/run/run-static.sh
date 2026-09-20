@@ -84,8 +84,11 @@ else
     FROM_IMG=${FROM_REF%@*}; FROM_DIG=${FROM_REF#*@}
     if [ "$FROM_DIG" != "$LOCK_DIG" ]; then
       record S1 fail "FROM digest $FROM_DIG != base.lock UPSTREAM_DIGEST $LOCK_DIG"
-    elif [ "$FROM_IMG" != "$LOCK_IMG" ]; then
-      record S1 fail "FROM image $FROM_IMG != base.lock UPSTREAM_IMAGE $LOCK_IMG"
+    elif [ "$FROM_IMG" != "$LOCK_IMG" ] && [ "$FROM_IMG" != "$(read_lock UPSTREAM_MIRROR)" ]; then
+      # D21: upstream garbage-collects the digest we pin, so the base mirrors it into our own
+      # namespace and FROM may resolve against the mirror. The DIGEST is what S1 is really about, and
+      # it is identical either way; the image name may be upstream's or base.lock's UPSTREAM_MIRROR.
+      record S1 fail "FROM image $FROM_IMG is neither base.lock UPSTREAM_IMAGE ($LOCK_IMG) nor UPSTREAM_MIRROR ($(read_lock UPSTREAM_MIRROR | sed 's/^$/unset/'))"
     else
       record S1 pass "FROM ${FROM_IMG}@${FROM_DIG} == base.lock exactly"
     fi

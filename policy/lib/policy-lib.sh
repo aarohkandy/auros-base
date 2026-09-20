@@ -315,6 +315,14 @@ auros_kdeglobals_strip() {
         }
         { if (!skip) print }
     ' "$tmp" > "$f"
+    # 3. trim trailing blank lines. Without this, every rebuild of every image adds one more blank
+    #    line to the file for the lifetime of the product. Harmless, and the kind of harmless that
+    #    someone eventually has to explain.
+    awk '{ l[NR] = $0 }
+         END { last = NR
+               while (last > 0 && l[last] ~ /^[[:space:]]*$/) last--
+               for (i = 1; i <= last; i++) print l[i] }' "$f" > "$tmp"
+    cat "$tmp" > "$f"
     rm -f "$tmp"
 }
 

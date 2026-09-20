@@ -80,12 +80,25 @@ deployment_count() {
   printf '%s' "${n:-0}"
 }
 
+# D25: `.status.booted.image.image.signature` reads "containerPolicy" when the booted image was
+# actually admitted by the signature policy. Anything else means the machine is running an image it
+# did not verify, which is the D8 failure wearing a green face. U4 reads this field.
+booted_signature() {
+  local j=$1 v=''
+  if command -v jq >/dev/null 2>&1; then
+    v=$(printf '%s' "$j" | jq -r '.status.booted.image.image.signature // empty' 2>/dev/null | head -1)
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  fi
+  printf '%s' "$j" | tr ',' '\n' | sed -n '/"booted"/,/"rollback"/p' | grep -oE '"signature" *: *"[A-Za-z]+"' | head -1 | grep -oE '"[A-Za-z]+"$' | tr -d '"'
+}
+
 status_line() {
-  local j dig n
+  local j dig n sig
   j=$(bootc status --json 2>/dev/null || echo '{}')
   dig=$(booted_digest "$j" | tr -d '\n')
+  sig=$(booted_signature "$j" | tr -d '\n')
   n=$(deployment_count)
-  say "#AUROS-STATUS#{\"boot\":$N,\"digest\":\"${dig}\",\"deployments\":${n:-0}}"
+  say "#AUROS-STATUS#{\"boot\":$N,\"digest\":\"${dig}\",\"deployments\":${n:-0},\"signature\":\"${sig}\"}"
 }
 status_line
 
@@ -121,14 +134,21 @@ fi
 
 # ── B5 — Policy in force at RUNTIME, not merely configured ───────────────────────────────────────
 tick
-ASSERT="/usr/libexec/auros/policy-assert-${POLICY_MODE}"
+# The image's own runtime assertion, at the path build/20-policy.sh installs it to. Named explicitly
+# rather than by mode: assert-policy with no argument reads the stamp the image was built with, which
+# is a stronger test than asserting the mode we were told to expect.
+ASSERT=/usr/libexec/auros/assert-policy
 P_PROBLEMS=''
 if [ -x "$ASSERT" ]; then
-  if ! runuser -u "$TEST_USER" -- "$ASSERT" > /tmp/policy-assert.log 2>&1; then
-    P_PROBLEMS="${ASSERT} exited non-zero: $(tail -3 /tmp/policy-assert.log | tr '\n' ' ')"
+  if ! runuser -u "$TEST_USER" -- "$ASSERT" "$POLICY_MODE" > /tmp/policy-assert.log 2>&1; then
+    P_PROBLEMS="${ASSERT} ${POLICY_MODE} exited non-zero: $(tail -3 /tmp/policy-assert.log | tr '\n' ' ')"
+  fi
+  STAMPED=$(cat /usr/lib/auros/policy-mode 2>/dev/null || echo '')
+  if [ -n "$STAMPED" ] && [ "$STAMPED" != "$POLICY_MODE" ]; then
+    P_PROBLEMS="$P_PROBLEMS; the image is stamped ${STAMPED} but this run was told ${POLICY_MODE}"
   fi
 else
-  P_PROBLEMS="no runtime assertion script at ${ASSERT} (harness assumption about the policy layer's layout)"
+  P_PROBLEMS="no runtime assertion script at ${ASSERT}"
 fi
 case "$POLICY_MODE" in
   locked|kiosk)

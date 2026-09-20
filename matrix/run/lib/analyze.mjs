@@ -149,11 +149,11 @@ const declaredRemove = lines(args['declared-remove']);
 
 // ── S9 — policy shape ───────────────────────────────────────────────────────────────────────────
 {
-  const mode = (args.policy && args.policy !== 'auto' ? args.policy : (kv.LABEL_POLICY_FILE || '')).trim();
+  const mode = (args.policy && args.policy !== 'auto' ? args.policy : (kv.POLICY_MODE_STAMP || '')).trim();
   const shells = (kv.DESKTOP_SHELL_BINARIES || '').split(' ').filter(Boolean);
   const dms = (kv.DISPLAY_MANAGER_BINARIES || '').split(' ').filter(Boolean);
   if (!mode) {
-    rec('S9', 'fail', `policy mode is undeclared. Pass --policy, or ship it in the image at /usr/share/auros/policy-mode. An image whose policy mode cannot be named cannot have its policy shape checked, and an unknown policy is not an open one.`);
+    rec('S9', 'fail', `policy mode is undeclared. Pass --policy, or stamp it in the image at /usr/lib/auros/policy-mode (which is where build/20-policy.sh puts it). An image whose policy mode cannot be named cannot have its policy shape checked, and an unknown policy is not an open one.`);
   } else if (!['open', 'managed', 'locked', 'kiosk'].includes(mode)) {
     rec('S9', 'fail', `unknown policy mode "${mode}"`);
   } else if (mode === 'kiosk') {
@@ -168,8 +168,10 @@ const declaredRemove = lines(args['declared-remove']);
   } else {
     const unit = kv[`POLICY_UNIT_${mode}`] === '1';
     const dir = (kv.AUROS_POLICY_DIRS || '').split(',').filter(Boolean).includes(mode);
-    if (!unit && !dir) rec('S9', 'fail', `policy=${mode} but neither /usr/lib/systemd/system/auros-policy-${mode}.service nor /usr/share/auros/policy/${mode}/ exists. (Harness assumption about the policy layer's file layout — see run/README.md.)`);
-    else rec('S9', 'pass', `policy=${mode}: ${unit ? `auros-policy-${mode}.service present` : ''}${unit && dir ? ' and ' : ''}${dir ? `/usr/share/auros/policy/${mode}/ present` : ''}`);
+    const assertBin = !!kv.POLICY_ASSERT_BIN;
+    if (!unit && !dir) rec('S9', 'fail', `policy=${mode} but neither /usr/lib/systemd/system/auros-policy-${mode}.service nor /usr/share/auros/policy/${mode}/ exists`);
+    else if (!assertBin) rec('S9', 'fail', `policy=${mode}: the payload is present but /usr/libexec/auros/assert-policy is not — B5 has nothing to run, so "configured" could never be distinguished from "in force"`);
+    else rec('S9', 'pass', `policy=${mode}: ${dir ? `/usr/share/auros/policy/${mode}/ present` : `auros-policy-${mode}.service present`}, stamped at /usr/lib/auros/policy-mode, and assert-policy is installed for B5 to run`);
   }
 }
 
@@ -188,6 +190,12 @@ const declaredRemove = lines(args['declared-remove']);
     else if (mustEnable && !['enabled', 'enabled-runtime', 'static', 'indirect', 'alias'].includes(kv[`${k}_ENABLED`])) problems.push(`${name} present but is-enabled=${kv[`${k}_ENABLED`]}`);
   }
   if (kv.UNIT_GREENBOOT_ROLLBACK_SERVICE_PRESENT !== '1') problems.push('greenboot-rollback.service not installed — without it a failed boot does not roll back, it just keeps failing');
+  if (Number(kv.GREENBOOT_REQUIRED_COUNT || 0) < 1) problems.push('/etc/greenboot/check/required.d/ is empty — greenboot would declare every boot healthy, and U3 could never fire');
+  // Two enabled update timers is not a pass. It is two updaters racing, and the loser's failure is
+  // the kind of thing that shows up once a month on one machine in a fleet of 180.
+  if (['enabled', 'enabled-runtime'].includes(kv.UNIT_UUPD_TIMER_ENABLED) && ['enabled', 'enabled-runtime'].includes(kv.UNIT_BOOTC_FETCH_APPLY_UPDATES_TIMER_ENABLED)) {
+    problems.push('both uupd.timer and bootc-fetch-apply-updates.timer are enabled. D22 and build/30-update-agent.sh say exactly one drives updates; two do, and they will collide.');
+  }
 
   // D8: the whole point. Enforcement that verifies nothing is worse than no enforcement.
   const scope = args.scope || 'ghcr.io/aarohkandy';

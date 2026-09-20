@@ -36,7 +36,10 @@ emit OS_ID "$( . /usr/lib/os-release 2>/dev/null && printf '%s %s' "${ID:-?}" "$
 
 # ── S10: the protected set ───────────────────────────────────────────────────────────────────────
 emit BOOTC_BIN "$(command -v bootc || echo '')"
-for u in bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service \
+# uupd.timer is probed but not required: Aurora preset-enables it and the Auros update agent
+# deliberately leaves it inert while enabling bootc's own timer (build/30-update-agent.sh, D22).
+# Two enabled updaters racing each other is worth seeing, which is why it is here at all.
+for u in bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service uupd.timer \
          greenboot-healthcheck.service greenboot-rollback.service greenboot-grub2-set-counter.service \
          redboot-auto-reboot.service NetworkManager.service; do
   k=$(printf '%s' "$u" | tr '.-' '__' | tr '[:lower:]' '[:upper:]')
@@ -79,9 +82,15 @@ emit AUROS_POLICY_DIRS "$(ls -1 /usr/share/auros/policy 2>/dev/null | tr '\n' ',
 emit AUROS_POLICY_UNITS "$(ls -1 /usr/lib/systemd/system/ 2>/dev/null | grep -c '^auros-policy-' || echo 0)"
 for m in open managed locked kiosk; do
   emit "POLICY_UNIT_${m}" "$(unit_present "auros-policy-${m}.service")"
-  emit "POLICY_ASSERT_${m}" "$( [ -x "/usr/libexec/auros/policy-assert-${m}" ] && echo 1 || echo 0 )"
 done
-emit LABEL_POLICY_FILE "$(cat /usr/share/auros/policy-mode 2>/dev/null || echo '')"
+# The real conventions, read from auros-base/build/20-policy.sh rather than guessed:
+#   mode stamp           /usr/lib/auros/policy-mode
+#   runtime assertion    /usr/libexec/auros/assert-policy [mode]
+#   payload              /usr/share/auros/policy/<mode>/
+emit POLICY_MODE_STAMP "$(cat /usr/lib/auros/policy-mode 2>/dev/null || echo '')"
+emit POLICY_ASSERT_BIN "$( [ -x /usr/libexec/auros/assert-policy ] && echo /usr/libexec/auros/assert-policy || echo '' )"
+emit POLICY_APPLY_BIN "$( [ -x /usr/libexec/auros/apply-policy ] && echo /usr/libexec/auros/apply-policy || echo '' )"
+emit GREENBOOT_REQUIRED_COUNT "$(ls -1 /etc/greenboot/check/required.d/ 2>/dev/null | wc -l | tr -d ' ')"
 
 # ── S5 / S3: the removal report, wherever the prune engine put it.
 REPORT=''

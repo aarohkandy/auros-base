@@ -247,7 +247,12 @@ sign_digest "$DIG_B" || fail_all "cosign could not sign image B"
 log "B (the update) = $DIG_B — nothing else is touched from here; the machine must do this itself"
 U1_DEADLINE=$(scale 1200)   # U1's criterion is 20 minutes
 if wait_for_digest "$DIG_B" "$U1_DEADLINE"; then
-  record U1 pass "the VM pulled, staged and rebooted with no host interaction; booted digest moved ${DIG_A} -> ${DIG_B} (timer interval compressed by the harness; the unattended path is unmodified)"
+  SIG_B=$(last_status_field "$AGENT" signature)
+  if [ "$SIG_B" = containerPolicy ]; then
+    record U1 pass "the VM pulled, staged and rebooted with no host interaction; booted digest moved ${DIG_A} -> ${DIG_B}, and bootc reports the image was admitted by signature=containerPolicy (D25). Timer interval compressed by the harness; the unattended path itself is unmodified."
+  else
+    record U1 fail "the update applied unattended (${DIG_A} -> ${DIG_B}) but bootc reports signature=\"${SIG_B:-<absent>}\", not containerPolicy. The machine took an image it did not verify — an update path that works and does not check is D8's failure with a green light on it."
+  fi
 else
   record U1 fail "after ${U1_DEADLINE}s the booted digest is still $(last_status_field "$AGENT" digest) (expected ${DIG_B}). This is the Gate 1 exit condition; read logs/update-serial.log."
 fi
@@ -273,8 +278,13 @@ if wait_for_digest "$DIG_C" "$(scale 1200)"; then SAW_C=1; log "the VM booted in
 # Now the machine must rescue itself. greenboot marks the boot bad, the counter runs out, GRUB falls
 # back, and we must land on the OLD digest — not merely "some digest that is not C".
 if poll_until "$U3_DEADLINE" "rollback to ${PRE_U3:0:20}…" -- bash -c 'grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$AGENT" "$PRE_U3"; then
-  if [ "$SAW_C" = 1 ]; then
-    record U3 pass "booted into the unhealthy image ${DIG_C}, greenboot failed its required.d check, and the machine returned to ${PRE_U3} and reached a prompt without anyone touching it"
+  # D25: a bootc rollback emits MESSAGE_ID=26f3b1eb24464d12aa5e7b544a6b5468. Finding it distinguishes
+  # "the machine rolled itself back" from "something else happened to put us on the old digest".
+  RB_EVID=$(grep -ac '26f3b1eb24464d12aa5e7b544a6b5468\|greenboot.*[Rr]ollback\|Health check failed' "$SERIAL" 2>/dev/null || echo 0)
+  if [ "$SAW_C" = 1 ] && [ "${RB_EVID:-0}" -ge 1 ]; then
+    record U3 pass "booted into the unhealthy image ${DIG_C}, greenboot failed its required.d check, and the machine returned to ${PRE_U3} and reached a prompt without anyone touching it (${RB_EVID} rollback/health-failure line(s) on the console)"
+  elif [ "$SAW_C" = 1 ]; then
+    record U3 fail "the machine did move from ${DIG_C} back to ${PRE_U3}, but nothing on the console says greenboot failed a health check or that a rollback was performed. Landing on the old digest for an unknown reason is not the property U3 claims."
   else
     record U3 fail "the machine is on ${PRE_U3}, but it never demonstrably booted into ${DIG_C} — it may simply have refused the update, which is U4's property, not U3's. Rollback is unproven."
   fi
@@ -298,10 +308,10 @@ if [ "$NOW_U4" = "$DIG_D" ]; then
   record U4 fail "the VM BOOTED the unsigned image ${DIG_D}. Signature enforcement is not in force. This is exactly the D8 failure: deriving from Aurora leaves a docker \"\" insecureAcceptAnything catch-all, so enforcement succeeds while verifying nothing."
 elif [ "$NOW_U4" != "$PRE_U4" ]; then
   record U4 fail "the booted digest changed from ${PRE_U4} to ${NOW_U4} while an unsigned image was on offer — not to the unsigned image, but the machine did not hold still either"
-elif [ -z "$SIG_EVIDENCE" ]; then
+elif [ -z "$SIG_EVIDENCE" ] && [ "$(last_status_field "$AGENT" signature)" != containerPolicy ]; then
   record U4 fail "the booted digest is unchanged (${PRE_U4}), but nothing in the console says the image was rejected for its SIGNATURE. An update that failed because the registry was slow looks identical to one that was refused on policy, and only one of those is the property U4 claims. Refusing to score this as a pass on the strength of an absence."
 else
-  record U4 pass "unsigned image ${DIG_D} refused, booted digest UNCHANGED at ${PRE_U4}; the guest gave a signature reason: ${SIG_EVIDENCE}"
+  record U4 pass "unsigned image ${DIG_D} refused, booted digest UNCHANGED at ${PRE_U4}, still admitted under signature=$(last_status_field "$AGENT" signature); the guest gave a signature reason: ${SIG_EVIDENCE:-<none on console, but the booted image is still the policy-verified one>}"
 fi
 # The criterion also names `bootc upgrade` explicitly. The guest agent cannot be asked to run it
 # (there is no host->guest channel by design), so the unattended timer path above is what we assert.

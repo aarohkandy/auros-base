@@ -63,6 +63,14 @@ build_qcow2() {
 name = "${TEST_USER:-auros}"
 password = "${TEST_PASSWORD:-auros}"
 groups = ["wheel"]
+
+# D26, measured: this image is ~8.4 GB across 257 layers and bib's default root filesystem is too
+# small for it — ostree refuses the write with "min-free-space-percent '3%' would be exceeded" rather
+# than filling the disk. Without this stanza the boot checks fail at image-build time for a reason
+# that has nothing to do with the image.
+[[customizations.filesystem]]
+mountpoint = "/"
+minsize = "${ROOTFS_MINSIZE:-20 GiB}"
 TOML
   podman pull "${BIB_IMAGE:-quay.io/centos-bootc/bootc-image-builder:latest}" >/dev/null 2>&1 || true
   log "bootc-image-builder -> qcow2 (this is the slow step)"
@@ -71,7 +79,7 @@ TOML
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     -v "$AUROS_RUN_DIR/work/bib-config.toml":/config.toml:ro \
     "${BIB_IMAGE:-quay.io/centos-bootc/bootc-image-builder:latest}" \
-    --type qcow2 --rootfs ext4 --local "$img" \
+    --type qcow2 --rootfs "${BIB_ROOTFS:-xfs}" --local "$img" \
     > "$AUROS_RUN_DIR/logs/bib.log" 2>&1 \
     || { tail -40 "$AUROS_RUN_DIR/logs/bib.log" >&2; return 1; }
   find "$out" -name '*.qcow2' | head -1
