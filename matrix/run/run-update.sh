@@ -124,7 +124,10 @@ sign_digest() {  # sign_digest <digest>
 # ── three images: A (old), B (the update), C (the one whose greenboot check fails), D (unsigned) ──
 log "building the update images"
 mk_variant() { # mk_variant <tag> <dockerfile-body-file>
-  local tag=$1 body=$2 ctx="$W/variant-$tag"
+  # Split: bash expands every word of a `local` line before assigning any of them, so `ctx` would read
+  # the OUTER, unset `tag` and `set -u` would stop the update group — U1-U5, the heart of Gate 2.
+  local tag=$1 body=$2
+  local ctx="$W/variant-$tag"
   rm -rf "$ctx"; mkdir -p "$ctx"; cp "$body" "$ctx/Containerfile"
   podman build --build-arg "BASE=$IMAGE" -t "localhost/auros-matrix-$tag:test" "$ctx" >>"$L/variants.log" 2>&1
 }

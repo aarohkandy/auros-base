@@ -55,5 +55,17 @@ out=$(bash -c 'set -euo pipefail
   x="$(find $e -maxdepth 0 | wc -l)"; echo reached' 2>&1 || true)
 [ "$out" = "reached" ] && ok "filtering to existing directories first survives" || no "guarded find died: [$out]"
 
+
+echo
+echo "local self-reference (bash expands a whole 'local' line before assigning any of it):"
+out=$(bash -c 'set -u; f(){ local t="$1" d="x/${t}"; echo "$d"; }; f hi' 2>&1 || true)
+case "$out" in
+  *"unbound variable"*) ok "confirmed: a local reading its own sibling dies under set -u (the bug is real)" ;;
+  *) no "expected an unbound-variable death, got [$out] — re-check this hazard" ;;
+esac
+hits=$(python3 "$HERE/tests/lib/local_selfref.py" "$HERE")
+if [ -z "$hits" ]; then ok "no local line reads a name it assigns in the same statement"
+else no "a local line reads a name it assigns in the same statement:"; printf '%s\n' "$hits" | sed 's/^/          /'; fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

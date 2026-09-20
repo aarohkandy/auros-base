@@ -43,7 +43,11 @@ FLATHUB_SHA256=3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a
 # all, rather than `systemctl --user enable` per account, because every user of these machines is
 # created long after the image was built.
 enable_user_unit() {
-  local u="$1" t="$2" dir="/usr/lib/systemd/user/${t}.wants"
+  # Two statements, not one. Bash expands EVERY word of a `local` line before `local` assigns any of
+  # them, so `local t="$2" dir="...${t}..."` reads the OUTER, unset `t` — and `set -u` kills the build.
+  # It did: "line 46: t: unbound variable", after every other step in this file had succeeded.
+  local u="$1" t="$2"
+  local dir="/usr/lib/systemd/user/${t}.wants"
   [ -f "/usr/lib/systemd/user/$u" ] || die "cannot enable $u — /usr/lib/systemd/user/$u does not exist"
   mkdir -p "$dir"
   ln -sfn "../$u" "$dir/$u"
