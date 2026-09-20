@@ -488,7 +488,11 @@ jobs:
           sudo docker system prune -af --volumes >/dev/null 2>&1 || true
           # Measured in the runner probe: /dev/kvm is present and becomes writable after chmod.
           sudo chmod 666 /dev/kvm || true
-          ls -l /dev/kvm || echo "::warning::no /dev/kvm — boot checks will run under TCG, 10-20x slower"
+          # NOT "will run under TCG, slower". run-boot.sh REFUSES without a writable /dev/kvm unless
+          # AUROS_ALLOW_TCG=1, because a silent fall back to emulation would quietly stop enforcing
+          # B1's 120-second budget — the check would still go green while measuring nothing. Saying
+          # "slower" here would send whoever debugs this looking for a timeout instead of a refusal.
+          ls -l /dev/kvm || echo "::error::no writable /dev/kvm. The boot harness will REFUSE rather than fall back to emulation, because TCG would silently void B1's 120s budget."
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf swtpm swtpm-tools
           qemu-system-x86_64 --version | head -1

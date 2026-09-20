@@ -185,6 +185,17 @@ extract_between() { # <file> <start-regex> <end-regex>
   printf '%s\n' "$body"
 }
 
+# extract_raw — extract_between WITHOUT the parse check, for ranges that are deliberately fragments
+# (a package list, a case arm) and are read as TEXT rather than run. Still aborts on an empty match:
+# a fragment that matched nothing is just as vacuous as a block that did.
+extract_raw() { # <file> <start-regex> <end-regex>
+  local f="$1" body
+  [ -f "$f" ] || t_abort "extract_raw: no such file: $f"
+  body="$(sed -n "\\%$2%,\\%$3%p" "$f")"
+  [ -n "$body" ] || t_abort "extract_raw: empty extraction from $f between [$2] and [$3] — this test is vacuous."
+  printf '%s\n' "$body"
+}
+
 # extract_lines <file> <regex> — every line matching regex. Used where the thing under test is a
 # single assertion line rather than a function.
 extract_lines() {
