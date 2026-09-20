@@ -60,11 +60,14 @@ _auros_effective_kargs() {
     grep -RIhs '^[[:space:]]*options[[:space:]]' /usr/lib/ostree-boot 2>/dev/null | sed 's/^[[:space:]]*options[[:space:]]*//' | tr ' ' '\n'
   fi
 }
-_auros_bad_kargs=$(_auros_effective_kargs | tr -d '[:space:]' | grep -E '^(selinux=0|enforcing=0)$' || true)
+# NOTE: `tr -d '[:space:]'` would delete the NEWLINES too, collapsing every argument onto one line so
+# that `^selinux=0$` could never match and the check would pass on everything. That is the worst
+# failure mode a security check has — permanently green. Strip spaces and tabs only.
+_auros_bad_kargs=$(_auros_effective_kargs | tr -d ' \t' | grep -E '^(selinux=0|enforcing=0)$' || true)
 if [ -n "$_auros_bad_kargs" ]; then
   die "this image ships a kernel argument that disables SELinux: $(printf '%s' "$_auros_bad_kargs" | tr '\n' ' ')"
 fi
-did "no image-supplied kernel argument disables SELinux ($(_auros_effective_kargs | tr -d '[:space:]' | grep -c . || true) effective kargs inspected)"
+did "no image-supplied kernel argument disables SELinux ($(_auros_effective_kargs | tr -d ' \t' | grep -c . || true) effective kargs inspected)"
 
 # Labelling note, so nobody goes looking for a restorecon that is not here: bootc applies SELinux
 # labels from the policy across the tree at install time, and running restorecon inside an
