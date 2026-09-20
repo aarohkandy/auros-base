@@ -43,10 +43,28 @@ install_file "$H/kargs-selinux.toml" /usr/lib/bootc/kargs.d/10-auros-selinux.tom
 did "kernel argument selinux=1 pinned via /usr/lib/bootc/kargs.d (enforcing=1 deliberately NOT set — see the file for why)"
 
 # An argument that switches SELinux off, shipped by anyone, defeats all of the above.
-if grep -RIs -E 'selinux=0|enforcing=0' /usr/lib/bootc/kargs.d /usr/lib/ostree-boot 2>/dev/null | grep -q .; then
-  die "something in this image ships a kernel argument that disables SELinux: $(grep -RIsl -E 'selinux=0|enforcing=0' /usr/lib/bootc/kargs.d /usr/lib/ostree-boot 2>/dev/null | tr '\n' ' ')"
+#
+# Read the EFFECTIVE arguments, not the file text. A plain grep over these files matched our own
+# kargs-selinux.toml, whose comment explains that `enforcing=0` at the GRUB prompt is the technician's
+# only recovery path — so the check failed the build over its own justification. A check that cannot
+# tell an argument from a sentence about an argument will eventually be silenced by whoever is on call,
+# and a silenced check is worse than none.
+_auros_effective_kargs() {
+  # `kargs = ["a", "b"]` in kargs.d/*.toml, plus any options= line in a bootloader config, stripped of
+  # comments first so prose can never be mistaken for configuration.
+  for f in /usr/lib/bootc/kargs.d/*.toml; do
+    [ -e "$f" ] || continue
+    sed 's/#.*$//' "$f" | sed -n 's/.*kargs[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' | tr ',' '\n' | tr -d '"'"'"' []'
+  done
+  if [ -d /usr/lib/ostree-boot ]; then
+    grep -RIhs '^[[:space:]]*options[[:space:]]' /usr/lib/ostree-boot 2>/dev/null | sed 's/^[[:space:]]*options[[:space:]]*//' | tr ' ' '\n'
+  fi
+}
+_auros_bad_kargs=$(_auros_effective_kargs | tr -d '[:space:]' | grep -E '^(selinux=0|enforcing=0)$' || true)
+if [ -n "$_auros_bad_kargs" ]; then
+  die "this image ships a kernel argument that disables SELinux: $(printf '%s' "$_auros_bad_kargs" | tr '\n' ' ')"
 fi
-did "no image-supplied kernel argument disables SELinux"
+did "no image-supplied kernel argument disables SELinux ($(_auros_effective_kargs | tr -d '[:space:]' | grep -c . || true) effective kargs inspected)"
 
 # Labelling note, so nobody goes looking for a restorecon that is not here: bootc applies SELinux
 # labels from the policy across the tree at install time, and running restorecon inside an

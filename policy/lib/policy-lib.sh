@@ -371,7 +371,12 @@ auros_dconf_profile() {
 
 auros_dconf_update() {
     if command -v dconf >/dev/null 2>&1; then
-        dconf update && log "compiled the dconf databases"
+        # `|| die`, not `&& log`: as the last statement of this function, an AND-list whose left side
+        # fails returns non-zero, and the caller runs under `set -e` -- so a dconf compile failure
+        # would abort apply-policy silently, with no line saying which step died. An explicit die is
+        # the same outcome with a message somebody can act on.
+        dconf update || die "dconf update failed. The lock files are on the image but the binary database was not compiled, so the GTK lockdown is shipped and NOT in force -- which is the configured-but-not-effective state check B5 fails a mode for."
+        log "compiled the dconf databases"
     else
         warn "dconf is not installed; the dconf locks are shipped but will not be compiled. GTK application lockdown is therefore NOT in force -- polkit and sudoers are unaffected."
     fi

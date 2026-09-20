@@ -107,7 +107,7 @@ else
     warn "visudo is not available; the sudoers drop-in was installed without syntax validation"
 fi
 for f in /usr/libexec/auros/auros-kiosk-session /usr/libexec/auros/apply-policy /usr/libexec/auros/assert-policy; do
-    [ -e "$f" ] && chmod 0755 "$f"
+    { [ -e "$f" ] && chmod 0755 "$f"; } || true
 done
 
 AUROS_GROUPS_STILL_MARKED=""
