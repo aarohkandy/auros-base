@@ -484,3 +484,49 @@ None of this has run. Written on 2026-09-20; nothing below has a run ID.
 **Out of scope for any of this, permanently:** everything in `matrix/profiles.yaml` →
 `not_provable_in_vm`. A full green matrix means the software is sound. It does not mean a particular
 2013 ThinkPad works, and a green CI badge must never be read as if it did.
+
+---
+
+## Unit tests — the layer underneath the check matrix
+
+`bash tests/run-all.sh` · `bash tests/prove-red.sh` · CI: `.github/workflows/unit-tests.yml`
+
+The check matrix costs ~40 minutes, 8.4 GB and a KVM runner, so it cannot run on every edit. These
+run in seconds on a laptop with nothing but bash, sed, grep, awk, coreutils and python3 — no podman,
+no QEMU, no registry.
+
+**They prove a different thing and it is worth being precise about which.** The matrix proves a real
+machine does the real thing (U1–U5, B1–B12). These prove that the assertions deciding whether an
+image ships are **capable of saying no**. That is not a hypothetical distinction here: the SELinux
+kernel-argument check in `build/10-hardening.sh` was permanently RED for part of a day and then
+permanently GREEN for an hour, and in neither state was anything wrong with the image.
+
+| suite | covers |
+|---|---|
+| `tests/00-common.test.sh` | the preflight: digest mismatch, malformed digest, absent lockfile, D21's mirror-vs-upstream FROM rule, `mask_unit` |
+| `tests/10-hardening.test.sh` | SELinux config and kernel state, sshd masked-not-disabled, firewalld default-deny, the NOPASSWD ordering rule, every `telemetry.tsv` unit-mask row |
+| `tests/20-policy.test.sh` | the **B5 lint** — a static scan for any mode asserting a restriction by reading a file — plus the mode stamp and the payload's permissions |
+| `tests/30-update-agent.test.sh` | greenboot's capability map, the GRUB boot counter, `MAX_BOOT_ATTEMPTS`, and **every required.d health check driven into every failure branch it has** |
+| `tests/40-windows-feel.test.sh` | double-click (group-aware), Discover's backends on disk, the Flathub key pin, the taskbar layout, the first-run stamps |
+| `tests/90-cleanup.test.sh` | the protected set per kind, the build context, baked machine identity, `/var/log`, determinism |
+| `tests/kargs-check.test.sh` | the SELinux kernel-argument check, 24 cases, both directions |
+| `policy/tests/`, `desktop/tests/`, `update-agent/tests/` | the policy primitives, B12 per mode, the update agent |
+
+### Two rules the harness enforces mechanically
+
+**The direction audit.** `tests/lib/harness.sh` records whether each check id has been seen going
+green *and* going red, and fails the suite for any check observed in only one direction. Exempting
+one requires `t_exempt <id> <reason>`, and the reason is printed in the run output.
+
+**Never copy the code under test.** Every block is extracted from the shipping script at run time
+with `extract_fn` / `extract_between`, which abort the whole suite on an empty extraction or on a
+block that does not parse. A sed range that quietly matches nothing yields an empty program, and an
+empty program passes every input — the permanently-green bug, one level up, inside the thing meant to
+catch it.
+
+### `prove-red.sh`
+
+27 mutations, each reintroducing a specific bug into a scratch copy and requiring the suite that owns
+it to go red *for the stated reason*. A suite that stays green with its bug put back is decoration,
+and this is the only thing that can tell the difference. Run one with
+`bash tests/prove-red.sh "<substring of the label>"`.

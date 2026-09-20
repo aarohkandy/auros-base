@@ -175,7 +175,20 @@ present="$(find $backend_dirs -name '*-backend.so' 2>/dev/null | xargs -r -n1 ba
 # shellcheck disable=SC2086
 stray="$(find $backend_dirs -name '*-backend.so' 2>/dev/null | grep -Ev '/(flatpak|fwupd)-backend\.so$' || true)"
 [ -z "$stray" ] || die "non-Flatpak Discover backends are still on disk: $(printf '%s ' $stray)— they would be loaded and offered to a user"
-[ -n "$present" ] || die "no Discover backend plugins on disk at all — the app store could not install anything"
+if [ -z "$present" ]; then
+  # Print the ground truth WITH the failure rather than making the next build fetch it. Three
+  # failures today were a remembered path or name; each cost a twelve-minute image build to learn
+  # one fact. An assertion that says only "not found" makes that cost mandatory.
+  printf 'auros[40-windows-feel]   searched for Discover backends in:\n' >&2
+  # shellcheck disable=SC2086
+  for d in $backend_dirs; do printf 'auros[40-windows-feel]     %s %s\n' "$d" "$([ -d "$d" ] && echo '(exists)' || echo '(absent)')" >&2; done
+  printf 'auros[40-windows-feel]   every *.so shipped by plasma-discover:\n' >&2
+  rpm -ql plasma-discover 2>/dev/null | grep '\.so$' | sed 's|^|auros[40-windows-feel]     |' >&2 || true
+  printf 'auros[40-windows-feel]   every path containing "discover" under /usr/lib*/qt*/plugins:\n' >&2
+  find /usr/lib64/qt6/plugins /usr/lib/qt6/plugins /usr/lib64/qt5/plugins /usr/lib/qt5/plugins \
+       -ipath '*discover*' 2>/dev/null | head -40 | sed 's|^|auros[40-windows-feel]     |' >&2 || true
+  die "no Discover backend plugins found at the paths above — the app store could not install anything (check B12). The listing above is ground truth: correct backend_dirs from it rather than guessing another path."
+fi
 did "Discover backends on disk: ${present}"
 record discover-backends "$present"
 

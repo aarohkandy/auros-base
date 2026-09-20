@@ -1,0 +1,87 @@
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+# unit-tests — the layer of testing underneath the VM check matrix.
+#
+# Every suite here runs on a bare runner in seconds, with no podman, no QEMU and no registry. That is
+# the point: the check matrix costs ~40 minutes and 8.4 GB, so it cannot run on every edit, and an
+# assertion that is only exercised by something you run twice a day is an assertion that stays broken
+# for half a day.
+#
+# TWO JOBS, AND THE SECOND ONE IS THE IMPORTANT ONE:
+#
+#   run-all     the suites pass against the code as it is.
+#   prove-red   each bug these suites were written for is REINTRODUCED into a scratch copy, and the
+#               suite that owns it must go red. A suite that stays green with its bug put back is
+#               decoration, and this job is the only thing that can tell the difference.
+#
+# D19, from our own history: "a step that cannot fail is not a check." The SELinux kernel-argument
+# check in build/10-hardening.sh was permanently RED for part of a day and then permanently GREEN for
+# an hour, and in neither state was anything wrong with the image being built.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+name: unit-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+# D19: pipefail everywhere. Our own boot probe once piped a build step through `tail -40`, so the
+# pipeline's exit status was tail's and a FAILING bootc-image-builder was scored as a PASSING step.
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: build-script assertions
+    # D23: pinned, not `ubuntu-latest`. `latest` migrates to 26.04 between 2026-10-19 and 2026-11-19
+    # and an OS migration under the test suite is a morning nobody has.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The suites must exist before this job can mean anything
+        run: |
+          # A test job that finds no tests exits 0 and looks identical to a test job that passed.
+          # That is the permanently-green shape, applied to CI itself, so it is checked first.
+          n=$(ls tests/*.test.sh policy/tests/*.test.sh desktop/tests/*.test.sh 2>/dev/null | wc -l)
+          echo "found $n test suites"
+          [ "$n" -ge 6 ] || { echo "::error::only $n test suites found; this job would pass on an empty checkout"; exit 1; }
+          for f in tests/run-all.sh tests/prove-red.sh update-agent/tests/run-tests.sh; do
+            [ -f "$f" ] || { echo "::error::$f is missing"; exit 1; }
+          done
+
+      - name: Every shipped script parses
+        run: |
+          # Cheap, and it catches the class of failure that makes a greenboot health check fail on
+          # every boot of every machine forever.
+          rc=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "::error file=$f::does not parse as bash"; rc=1; }
+          done < <(find build hardening policy update-agent desktop signing tools tests -name '*.sh' -type f)
+          exit $rc
+
+      - name: run-all — the suites pass
+        run: bash tests/run-all.sh
+
+      - name: prove-red — each bug is reintroduced and must be caught
+        run: bash tests/prove-red.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## Build-script assertions'
+            echo
+            echo 'These run against synthetic fake roots, with no image built. They do not prove a'
+            echo 'machine boots — that is the check matrix, in QEMU. They prove the assertions that'
+            echo 'decide whether an image ships are capable of saying no.'
+            echo
+            echo '```'
+            bash tests/run-all.sh 2>&1 | tail -20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

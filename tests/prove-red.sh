@@ -35,9 +35,14 @@ trap 'rm -rf "$WORK"' EXIT
 #
 # `expect` is an optional substring that must appear in the failing output, so that a mutation which
 # happens to break the suite for an unrelated reason is not counted as the test having caught the bug.
+# ONLY="<substring>" as the first argument runs just the mutations whose label matches. The whole
+# file copies the repository once per case, so iterating on one of them without this is slow enough
+# that somebody would stop running it.
+ONLY="${1:-}"
 n=0
 mutate() { # <label> <suite> [expect-substring]
   local label="$1" suite="$2" expect="${3:-}"
+  if [ -n "$ONLY" ]; then case "$label" in *"$ONLY"*) ;; *) cat >/dev/null; return ;; esac; fi
   n=$((n+1))
   local dir="$WORK/m$n"
   cp -R "$REPO" "$dir"
@@ -334,7 +339,7 @@ MUT
 # The suites stay; only the LEVEL changes. That is the realistic regression — somebody copies a line
 # from locked/assert.sh — and it is the one a "does this file call the suites?" check cannot see.
 mutate "open runs the suites at 'hard' instead of 'control', so no denial can be shown to be ours" \
-       tests/20-policy.test.sh "negative control" <<'MUT'
+       tests/20-policy.test.sh "cannot be shown to be ours" <<'MUT'
 import re
 p = 'policy/open/assert.sh'
 s = open(p).read()
@@ -369,6 +374,7 @@ MUT
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
   printf '%s\n' "$(c 32 "$PASS/$((PASS+FAIL)) reintroduced bugs were caught by the suite that owns them.")"
+  [ "$PASS" -gt 0 ] || { printf '%s\n' "$(c 31 'but no mutation actually ran — a filter that matches nothing is not a pass')"; exit 1; }
 else
   printf '%s\n' "$(c 31 "$PASS caught, $FAIL NOT CAUGHT:")"
   for f in "${FAILED[@]}"; do printf '    · %s\n' "$f"; done
