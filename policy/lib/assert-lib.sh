@@ -148,6 +148,107 @@ a_expect_mode() {
     fi
 }
 
+# ── shared attempt suites ────────────────────────────────────────────────────────────────────────
+#
+# These live in the library rather than in each mode's assert.sh for one reason: locked, managed and
+# kiosk make the SAME promises about root, software, network and updates, and differ only in whether
+# the answer is "no" or "not without the administrator password". Three copies of the same attempts
+# drift apart -- one gains a check, another does not, and eventually two modes are indistinguishable
+# in CI while being different products in the field.
+#
+# $1 is "hard" (locked/kiosk: the answer is no, and no password changes it) or "admin" (managed: not
+# for this user, but an administrator at this machine could).
+
+a_deny() { if [ "$1" = hard ]; then a_pk_hard_deny "$2" "$3"; else a_pk_admin_only "$2" "$3"; fi; }
+
+a_suite_no_root() {
+    local level="$1"
+    printf '\n-- try to get root ---------------------------------------------------------------------\n'
+    a_must_fail "root.sudo"        "sudo -n true"                      -- sudo -n true
+    a_must_fail "root.sudo-shell"  "sudo -n bash -c id"                -- sudo -n /usr/bin/bash -c id
+    a_must_fail "root.pkexec"      "pkexec id, with no auth agent"     -- pkexec --disable-internal-agent /usr/bin/id
+    a_deny "$level" "root.pkexec-policy" org.freedesktop.policykit.exec
+    # su fails on any machine with no root password, so on its own it proves little. It is here
+    # because the PAM restriction is a real second lock and its absence should be visible, and it is
+    # labelled honestly rather than counted as primary evidence.
+    a_must_fail "root.su"          "su -c id root (corroborating only)" -- su -c id root
+    a_must_fail "root.systemd-run" "systemd-run --scope on the system manager" -- systemd-run --scope --quiet /usr/bin/id
+    if command -v machinectl >/dev/null 2>&1; then
+        a_must_fail "root.machinectl" "machinectl shell .host" -- machinectl shell .host
+    else
+        a_ok "root.machinectl" "machinectl is absent from the image"
+    fi
+}
+
+a_suite_no_software() {
+    local level="$1"
+    printf '\n-- try to install software -------------------------------------------------------------\n'
+    a_deny "$level" "pkg.rpmostree-policy" org.projectatomic.rpmostree1.install-uninstall-packages
+    a_deny "$level" "pkg.packagekit"       org.freedesktop.packagekit.package-install
+    a_deny "$level" "pkg.flatpak-system"   org.freedesktop.Flatpak.app-install
+    if command -v rpm-ostree >/dev/null 2>&1; then
+        a_must_fail "pkg.rpmostree" "rpm-ostree install nano" -- rpm-ostree install --idempotent nano
+    fi
+    if command -v flatpak >/dev/null 2>&1; then
+        a_must_fail "pkg.flatpak" "flatpak install --system from flathub" -- flatpak install --system -y --noninteractive flathub org.gnome.Calculator
+    fi
+    # HONEST LIMIT, deliberately NOT asserted as a pass:
+    #   `flatpak install --user` needs no polkit authorisation, and flatpak has no supported
+    #   system-wide switch that disables user-scope installs. A user with a shell can install a
+    #   Flatpak into their own home directory. It runs with no privilege, it is not on the system,
+    #   and it goes away when the profile is reset. `locked` does not claim to prevent it, and
+    #   locked/description.md tells the customer so in the same words. The mode that removes this
+    #   path is `kiosk`, because kiosk removes the shell.
+    a_note "pkg.flatpak-user" "not asserted: user-scope Flatpak installs are outside what this mode claims (see description.md)"
+}
+
+a_suite_no_network_change() {
+    local level="$1"
+    printf '\n-- try to change the network -----------------------------------------------------------\n'
+    a_deny "$level" "net.modify-system" org.freedesktop.NetworkManager.settings.modify.system
+    a_deny "$level" "net.control"       org.freedesktop.NetworkManager.network-control
+    a_deny "$level" "net.enable"        org.freedesktop.NetworkManager.enable-disable-network
+    if command -v nmcli >/dev/null 2>&1; then
+        a_must_fail "net.off" "nmcli networking off" -- nmcli networking off
+        a_must_fail "net.add" "nmcli connection add type dummy" -- nmcli connection add type dummy ifname auros-probe0 con-name auros-probe
+    fi
+}
+
+a_suite_update_timer() {
+    local level="$1" t TIMER=""
+    printf '\n-- try to stop the machine updating itself ---------------------------------------------\n'
+    # The unit name belongs to the update layer (task A4), not to this one. We look for the timer
+    # that is actually active rather than assuming a name, and we say which one we found. If none is
+    # active that is a FAIL, not a skip: a machine that is not updating itself is precisely the
+    # abandoned laptop we sell against. Check S10 asserts the same thing from outside the VM.
+    for t in bootc-fetch-apply-updates.timer auros-update.timer rpm-ostreed-automatic.timer; do
+        if systemctl is-active --quiet "$t" 2>/dev/null; then TIMER="$t"; break; fi
+    done
+    if [ -z "$TIMER" ]; then
+        a_bad "update.timer-active" "no update timer is active (looked for bootc-fetch-apply-updates.timer, auros-update.timer, rpm-ostreed-automatic.timer)"
+        return
+    fi
+    a_ok "update.timer-active" "$TIMER is active"
+    a_deny "$level" "update.manage-units" org.freedesktop.systemd1.manage-units
+    a_must_fail "update.stop"    "systemctl stop $TIMER"    -- systemctl stop "$TIMER"
+    a_must_fail "update.disable" "systemctl disable $TIMER" -- systemctl disable "$TIMER"
+    a_must_fail "update.mask"    "systemctl mask $TIMER"    -- systemctl mask "$TIMER"
+    # Three attempts failing is not the same as the timer surviving. Ask the timer.
+    if systemctl is-active --quiet "$TIMER"; then
+        a_ok "update.timer-survived" "$TIMER is still active after three attempts to stop it"
+    else
+        a_bad "update.timer-survived" "$TIMER is NO LONGER ACTIVE after the attempts above -- one of them worked"
+    fi
+}
+
+a_suite_policy_immutable() {
+    printf '\n-- try to edit the policy itself -------------------------------------------------------\n'
+    a_must_fail "self.sudoers"    "write a new sudoers drop-in"   -- /usr/bin/install -m 0440 /dev/null /etc/sudoers.d/00-auros-probe
+    a_must_fail "self.polkit"     "write a new polkit rule"       -- /usr/bin/install -m 0644 /dev/null /etc/polkit-1/rules.d/00-auros-probe.rules
+    a_must_fail "self.stamp"      "overwrite the mode stamp"      -- /usr/bin/tee /usr/lib/auros/policy-mode
+    a_must_fail "self.kdeglobals" "overwrite /etc/xdg/kdeglobals" -- /usr/bin/tee /etc/xdg/kdeglobals
+}
+
 a_finish() {
     local mode="$1"
     printf '\n'

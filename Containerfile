@@ -97,16 +97,23 @@ RUN chmod 0755 /tmp/auros-build/build/*.sh && \
     test ! -e /tmp/auros-build || { printf 'auros: build context survived cleanup\n' >&2; exit 1; }
 
 # ── Commit and lint ─────────────────────────────────────────────────────────────────────────────
-# `ostree container commit` is the ostree-side finalisation: it clears /var (which is machine-local
-# state that an image has no business carrying) and prepares the filesystem for use as an ostree
-# container. It is the last thing that touches the filesystem.
+# NOTE: `ostree container commit` is deliberately NOT called here — see DECISIONS.md D20.
+#
+# It belongs to the older rpm-ostree derivation flow and is obsolete for a bootc image derived from
+# Universal Blue. We MEASURED this: a probe build containing that line failed with
+#   error: Not in an ostree-based container environment
+# (https://github.com/aarohkandy/auros-base/actions/runs/35539207877). Almost every tutorial written
+# before 2024 ends with that line, and its error message does not point at the cause, so this comment
+# is here to stop it being re-added by someone following one.
+#
+# The /var hygiene that command used to provide is done explicitly in build/90-cleanup.sh, where it
+# is visible and testable rather than a side effect of a finalisation step.
 #
 # `bootc container lint` is check S2, run here as well as in CI. Here it fails the build at the point
 # of damage; in CI it is the gate. It is deliberately NOT tolerated with `|| true` — an image that is
 # structurally incapable of being a bootable host is worth nothing, and finding that out at build
 # time is strictly better than finding it out in QEMU.
-RUN ostree container commit && \
-    bootc container lint
+RUN bootc container lint
 
 # ── OCI labels ──────────────────────────────────────────────────────────────────────────────────
 # Placed after the build so that a change to a label does not invalidate the build cache for every

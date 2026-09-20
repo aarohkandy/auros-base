@@ -1,0 +1,67 @@
+#!/usr/bin/bash
+# assert-policy -- prove, at runtime, that the policy mode this image claims is actually in force.
+#
+#   /usr/libexec/auros/assert-policy [mode] [--json]
+#
+# This is what check B5 runs inside the booted VM. With no argument it reads the mode the image was
+# stamped with at build time and asserts that one; naming a mode explicitly is for debugging and for
+# asserting that an image is NOT some other mode.
+#
+# Exit 0 = the mode is in force. Anything else = it is not, regardless of what the configuration
+# files on the machine say. B5 fails a mode that is configured but not effective.
+set -uo pipefail
+
+PAYLOAD=${AUROS_POLICY_PAYLOAD:-/usr/share/auros/policy}
+STAMP=/usr/lib/auros/policy-mode
+
+die() { printf 'assert-policy: %s\n' "$*" >&2; exit 2; }
+
+MODE=""
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --json) ARGS+=("$a") ;;
+        -*)     die "unknown option $a" ;;
+        *)      MODE="$a" ;;
+    esac
+done
+
+if [ -z "$MODE" ]; then
+    [ -r "$STAMP" ] || die "no mode argument and no stamp at $STAMP. This image did not have apply-policy run on it, so there is no mode to prove."
+    MODE="$(cat "$STAMP")"
+fi
+case "$MODE" in
+    open|managed|locked|kiosk) ;;
+    *) die "unknown mode '$MODE'" ;;
+esac
+
+SCRIPT="$PAYLOAD/$MODE/assert.sh"
+[ -x "$SCRIPT" ] || die "$SCRIPT is missing or not executable"
+
+# ── drop privilege, because a root process proves nothing ────────────────────────────────────────
+#
+# Everything the assertion attempts is something root is allowed to do on any machine in any mode.
+# Run as root, the whole suite would be a list of successes and the run would report a failure for
+# the wrong reason -- or worse, an over-helpful future edit would "fix" that by skipping the
+# attempts, and the check would quietly stop checking anything.
+#
+# So: refuse to run as root, and re-exec as the unprivileged probe account instead. The account is
+# shipped by /usr/lib/sysusers.d/auros-policy.conf precisely so that the mode is PROVABLE -- it has
+# no password, so becoming it requires already being root.
+PROBE=${AUROS_ASSERT_USER:-aurosprobe}
+if [ "$(id -u)" = 0 ]; then
+    id "$PROBE" >/dev/null 2>&1 || die "the probe account '$PROBE' does not exist on this image. systemd-sysusers should have created it from /usr/lib/sysusers.d/auros-policy.conf. Without an unprivileged account there is no subject to prove the policy against, and a root-run assertion would be evidence of nothing."
+    if id -nG "$PROBE" 2>/dev/null | tr ' ' '\n' | grep -qx aurosadmin; then
+        die "the probe account '$PROBE' is in the aurosadmin group. It is supposed to be the unprivileged case; as an administrator it would be authorised for the things this run is meant to see refused."
+    fi
+    cd /tmp || true
+    if command -v runuser >/dev/null 2>&1; then
+        exec runuser -u "$PROBE" -- "$0" "$MODE" "${ARGS[@]+"${ARGS[@]}"}"
+    elif command -v setpriv >/dev/null 2>&1; then
+        exec setpriv --reuid="$(id -u "$PROBE")" --regid="$(id -g "$PROBE")" --init-groups -- "$0" "$MODE" "${ARGS[@]+"${ARGS[@]}"}"
+    else
+        die "neither runuser nor setpriv is available, so privilege cannot be dropped. Refusing to run the assertion as root and report a result that would mean nothing."
+    fi
+fi
+
+exec "$SCRIPT" "${ARGS[@]+"${ARGS[@]}"}"

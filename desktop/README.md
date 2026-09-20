@@ -141,10 +141,14 @@ The things that are **not** guesses, because they were read from the relevant do
   is worse than a page in English. This sits badly against check B4 ("in their language") and against a
   Marathi recipe in particular. It is a gap in *our two pages*; the rest of the wizard, the desktop, the
   folder names and every application are localised by their own projects.
-- **GAP-3 — network printer discovery needs `avahi-daemon`.** Without it, USB and
-  printer-by-IP-address work from the GUI and mDNS auto-discovery does not. Enabling a network-facing
-  daemon on every machine in a school is a hardening decision, so this layer does not make it. **Handed
-  to whoever owns the hardening layer**, and named in the audit output.
+- **GAP-3 — the mDNS port is open and nothing runs on it.** `build/10-hardening.sh` adds `mdns` to
+  the default firewall zone and says in its own build log that it does so *"because check B12 requires
+  that adding a printer works without a terminal"* — but no step in this build enables
+  `avahi-daemon`, and driverless printer discovery is mDNS. As it stands we have neither the discovery
+  nor the smaller attack surface. USB printers and printer-by-IP-address still work from the GUI.
+  Enabling a network-facing daemon on every machine in a school is a hardening decision, so this layer
+  does not make it: `40-windows-feel.sh` emits a `warn` naming the situation on every build, and the
+  audit prints it. **Owner: whoever owns `10-hardening.sh`.**
 - **GAP-4 — no GUI answer to "is my computer up to date?"** See decision 3 above. Belongs with A4.
 
 ---
@@ -154,8 +158,16 @@ The things that are **not** guesses, because they were read from the relevant do
 Nothing in this directory writes outside `desktop/` and `build/40-windows-feel.sh`. Three conventions
 are assumed, each chosen so that being wrong degrades quietly rather than breaking a build:
 
-1. **`Containerfile` COPYs `desktop/` to `/tmp/auros-build/desktop/`** and runs `build/*.sh` in numeric
-   order. If that path is wrong the script exits at line one with a message that says so.
+1. **`Containerfile` COPYs `desktop/` to `${AUROS_BUILD_DIR}/desktop/`** (`/tmp/auros-build/desktop/`)
+   and runs `build/*.sh` in numeric order. If that path is wrong the script dies at the top with a
+   message that says so. `40-windows-feel.sh` sources `build/00-common.sh` and goes through its
+   `pkg_ensure` / `install_file` / `install_text` / `record` helpers for everything, so every file it
+   writes is stamped with `SOURCE_DATE_EPOCH` and listed in the in-image manifest — check **S7**
+   (determinism) fails if a step writes files any other way. The one thing it does not borrow is
+   `enable_unit`, which is system-scope only; the two `systemd --user` units are enabled by a local
+   `enable_user_unit` built on the same verify-the-filesystem principle. Build-time facts land in
+   `/usr/lib/auros/desktop-facts.env`, with a stable symlink at `/usr/share/auros/desktop-facts.env`
+   that the audit reads, and **carry no timestamp**, for the same S7 reason.
 2. **A recipe with `compat_layer: true` emits a flatpak preinstall drop-in** at
    `/etc/flatpak/preinstall.d/<name>.preinstall` containing `[Flatpak Preinstall com.usebottles.bottles]`.
    This layer never writes that file. `auros-bottles-setup` checks for the app at run time and exits

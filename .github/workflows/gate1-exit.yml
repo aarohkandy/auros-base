@@ -119,8 +119,11 @@ jobs:
           # mounts the host store at its default path and then finds a libpod DB pointing elsewhere.
           # The store stays where it is. We have 110 GB; we do not need the gymnastics.
           sudo podman pull quay.io/centos-bootc/bootc-image-builder:latest
-          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # cosign uses the DOCKER keychain; skopeo/podman use containers auth.json; and root keeps
+          # its own copy of the latter. Three stores, three logins.
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
           ssh-keygen -t ed25519 -N '' -f /tmp/g1key -C gate1 >/dev/null
           df -h /
 
@@ -181,6 +184,13 @@ jobs:
           password = "auros"
           key = "$(cat /tmp/g1key.pub)"
           groups = ["wheel"]
+
+          # D26, measured: bootc-image-builder fails with "min-free-space-percent '3%' would be
+          # exceeded" on the default root filesystem, because the image is ~8.4 GB across 257 layers
+          # and ostree refuses the write rather than filling the disk. 20 GiB is the floor that works.
+          [[customizations.filesystem]]
+          mountpoint = "/"
+          minsize = "20 GiB"
           EOF
           mkdir -p /tmp/out
           # D25: this base wants --rootfs xfs. The image is pulled from the registry by TAG, on
@@ -375,13 +385,18 @@ jobs:
           # Half one: the real thing. D18 — the default GITHUB_TOKEN is issued for THIS repository
           # and cannot POST to another repo's /dispatches. Without a PAT this half is NOT PROVEN,
           # and saying so is more useful than a surrogate dressed up as the real result.
+          #
+          # The event type is `base-published`, VERIFIED against
+          # auros-recipes/.github/workflows/propagate.yml (`repository_dispatch: types:
+          # [base-published]`). That workflow re-resolves the published digest itself and ignores
+          # client_payload, so the payload below is for a human reading the run, not for the machine.
           if [ -n "${DISPATCH_TOKEN:-}" ]; then
             code=$(curl -sS -o /dev/null -w '%{http_code}' \
               -X POST "https://api.github.com/repos/${RECIPES}/dispatches" \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              -d "$(jq -nc --arg d '${{ steps.v2.outputs.d2 }}' '{event_type:"base-updated",client_payload:{base_digest:$d}}')") || code=000
+              -d "$(jq -nc --arg d '${{ steps.v2.outputs.d2 }}' '{event_type:"base-published",client_payload:{base_digest:$d}}')") || code=000
             [ "$code" = "204" ] && echo "dispatch=sent" >> "$GITHUB_OUTPUT" || echo "dispatch=http-$code" >> "$GITHUB_OUTPUT"
           else
             echo "dispatch=no-credential" >> "$GITHUB_OUTPUT"
@@ -486,7 +501,12 @@ jobs:
           # "within 20 minutes without human action" and a surrogate involved human action.
           LEG_A=FAIL; [ "$A" = "pass" ] && LEG_A=PASS
           [ "$A" = "surrogate-pass" ] && LEG_A="NOT PROVEN"
-          LEG_B=FAIL; [ "$B1" = "pass" ] && [ "$B3" = "pass" ] && LEG_B=PASS
+          # D8 is a PRECONDITION of Leg B, not a bonus. If enforcement is the upstream
+          # insecureAcceptAnything catch-all, then "the VM refused" is not evidence that signing
+          # works — it is evidence that something went wrong, and we would not know which.
+          LEG_B=FAIL
+          [ "$SIG" = "containerPolicy" ] && [ "$B1" = "pass" ] && [ "$B3" = "pass" ] && LEG_B=PASS
+          [ "$SIG" != "containerPolicy" ] && LEG_B="NOT PROVEN"
           VERDICT=FAIL; [ "$LEG_A" = "PASS" ] && [ "$LEG_B" = "PASS" ] && VERDICT=PASS
 
           R="$GITHUB_WORKSPACE/g1/report.md"

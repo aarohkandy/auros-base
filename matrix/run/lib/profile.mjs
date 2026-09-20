@@ -5,7 +5,8 @@
 import { loadProfiles } from './matrix.mjs';
 
 const id = process.argv[2];
-const { profiles } = loadProfiles();
+const { profiles, ids } = loadProfiles();
+if (id === '--list') { console.log(ids.join(',')); process.exit(0); }
 const p = profiles.find((x) => x.id === id);
 if (!p) { console.error(`profile.mjs: no profile "${id}" in profiles.yaml. Known: ${profiles.map((x) => x.id).join(' ')}`); process.exit(2); }
 

@@ -10,7 +10,8 @@
 #   * Its `workflow_call:` accepts NO `inputs:` and NO `secrets:`. A caller cannot parameterise it.
 #   * Nothing in this file reads an input, a repository variable, or an environment variable to decide
 #     whether to publish. The `publish` job's only gate is the exit status of `tools/gate.mjs`.
-#   * `continue-on-error` appears nowhere in this file.
+#   * No job and no step sets `continue-on-error` (the only occurrence of that string in this file
+#     is this sentence). A step that cannot fail is not a check — D19.
 #   * Every job that could publish `needs:` the gate job, so a skipped or failed gate skips publish.
 #   * The gate is FAIL-CLOSED: a missing gate.mjs, a missing ledger, a missing harness, an unreadable
 #     results.json and an unparseable fragment all stop the publish. Absence of evidence is a fail.
@@ -89,7 +90,7 @@ jobs:
       base_via:       ${{ steps.s1.outputs.base_via }}
       matrix_version: ${{ steps.cfg.outputs.matrix_version }}
       profiles:       ${{ steps.cfg.outputs.profiles }}
-      publishable:    ${{ env.IS_PUBLISHABLE }}
+      publishable:    ${{ steps.cfg.outputs.publishable }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -128,6 +129,9 @@ jobs:
           PROFILES=$(python3 -c 'import yaml,json;print(json.dumps([p["id"] for p in yaml.safe_load(open("matrix/profiles.yaml"))["profiles"]]))')
           echo "profiles=$PROFILES" >> "$GITHUB_OUTPUT"
           echo "profiles to boot: $PROFILES"
+
+          echo "publishable=${IS_PUBLISHABLE}" >> "$GITHUB_OUTPUT"
+          echo "publishable: ${IS_PUBLISHABLE}"
 
       - name: S1 — resolved FROM digest == base.lock
         id: s1
@@ -202,6 +206,14 @@ jobs:
           sudo docker system prune -af --volumes >/dev/null 2>&1 || true
           echo "--- after reclaim ---"; df -h /
 
+      - name: Registry login, as both users that need it
+        run: |
+          # `skopeo` runs as the runner user; every podman command here runs as root. They keep
+          # separate auth files, so logging in once is logging in for the wrong half of the build.
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | sudo skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: D21 — mirror the pinned upstream digest into our namespace
         if: env.IS_PUBLISHABLE == 'true'
         env:
@@ -214,7 +226,6 @@ jobs:
           #
           # Fork PRs cannot push to our registry, so this is scoped to publishable runs. A fork PR
           # that needs the mirror to build will find it already populated by an earlier run on main.
-          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
           ./tools/resolve-upstream.sh mirror --mirror "$MIRROR"
 
       - name: Deterministic inputs
@@ -246,7 +257,7 @@ jobs:
             # Record the pre-flatten identity too. When S7 goes red at 2am, the first question is
             # whether the nondeterminism is in our build or in the chunker, and this answers it
             # without a second CI run.
-            skopeo inspect --config "containers-storage:$raw" | jq -c '.rootfs.diff_ids' > "/tmp/raw-$n.diffids"
+            sudo skopeo inspect --config "containers-storage:$raw" | jq -c '.rootfs.diff_ids' > "/tmp/raw-$n.diffids"
             echo "::endgroup::"
 
             echo "::group::build $n — flatten (D11)"
@@ -259,7 +270,7 @@ jobs:
                 --output "containers-storage:$out"
             echo "::endgroup::"
 
-            skopeo inspect --config "containers-storage:$out" | jq -c '.rootfs.diff_ids' > "/tmp/chunked-$n.diffids"
+            sudo skopeo inspect --config "containers-storage:$out" | jq -c '.rootfs.diff_ids' > "/tmp/chunked-$n.diffids"
             # The content digest. diff_ids are the sha256 of each UNCOMPRESSED layer, so this is an
             # identity of the filesystem itself — immune to compression settings and to the `created`
             # field, both of which vary for reasons that have nothing to do with what we built.
@@ -324,7 +335,6 @@ jobs:
         env:
           IMAGE: ${{ needs.plan.outputs.image }}
         run: |
-          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
           sudo podman push --digestfile /tmp/digest \
             localhost/auros-base:chunked-a \
             "docker://${IMAGE}:${STAGE_TAG}"
@@ -355,6 +365,9 @@ jobs:
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ env.CHECKOUT_REF }}" }
@@ -385,6 +398,9 @@ jobs:
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false   # one profile failing must not hide what the other six would have said
       matrix:
@@ -449,6 +465,11 @@ jobs:
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
         run: |
+          # cosign uses the DOCKER keychain (~/.docker/config.json); skopeo and podman use
+          # containers auth.json; and root and the runner user keep separate copies of the latter.
+          # Three logins is not belt-and-braces, it is three different credential stores.
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
           cosign version
           # D17, in one paragraph, because the flag looks like noise and is not:
@@ -542,6 +563,11 @@ jobs:
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
         run: |
+          # cosign uses the DOCKER keychain (~/.docker/config.json); skopeo and podman use
+          # containers auth.json; and root and the runner user keep separate copies of the latter.
+          # Three logins is not belt-and-braces, it is three different credential stores.
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "${{ github.token }}" | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
           echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
 
           # U1-U3 need an OLD image and a NEW image. The old one is the digest we are trying to
@@ -743,8 +769,7 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      packages: write
+    permissions: {}
     steps:
       - name: Best effort, never fatal
         env:

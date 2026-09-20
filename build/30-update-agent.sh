@@ -99,8 +99,9 @@ else
     "${DNF}" install -y greenboot || die "could not install greenboot"
     info "installed $(rpm -q greenboot)"
 fi
-rpm -q greenboot-default-health-checks >/dev/null 2>&1 \
-    && info "NOTE: greenboot-default-health-checks is present (not installed by us). Its 01_repository_dns_check.sh is a REQUIRED check that fails when DNS is down -- review before shipping."
+if rpm -q greenboot-default-health-checks >/dev/null 2>&1; then
+    info "NOTE: greenboot-default-health-checks is present (not installed by us). Its 01_repository_dns_check.sh is a REQUIRED check that fails when DNS is down -- review before shipping."
+fi
 
 for f in /usr/libexec/greenboot/greenboot \
          /usr/libexec/greenboot/greenboot-grub2-set-counter \
@@ -146,7 +147,7 @@ cat >> "${CONF}" <<'EOF'
 # what "twice" means. Do not raise this without changing the sentence we sell.
 GREENBOOT_MAX_BOOT_ATTEMPTS=2
 EOF
-n="$(grep -cE '^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=2$' "${CONF}")"
+n="$(grep -cE '^[[:space:]]*GREENBOOT_MAX_BOOT_ATTEMPTS=2$' "${CONF}" || true)"
 [[ "${n}" == "1" ]] || die "expected exactly one GREENBOOT_MAX_BOOT_ATTEMPTS=2 in ${CONF}, found ${n}"
 grep -q 'DISABLED_HEALTHCHECKS=' "${CONF}" \
     || die "${CONF} no longer defines DISABLED_HEALTHCHECKS; greenboot sources this file under 'set -u' and expands that array unquoted-safe, so an undefined one breaks every health check"
@@ -189,7 +190,7 @@ info "installed /usr/libexec/auros/auros-update"
 for d in bootc-fetch-apply-updates.service.d bootc-fetch-apply-updates.timer.d greenboot-healthcheck.service.d; do
     [[ -d "${UA_SRC}/systemd/${d}" ]] || die "missing drop-in source ${UA_SRC}/systemd/${d}"
     install -d -m 0755 "/usr/lib/systemd/system/${d}"
-    install -D -m 0644 "${UA_SRC}/systemd/${d}/"*.conf "/usr/lib/systemd/system/${d}/"
+    install -m 0644 -t "/usr/lib/systemd/system/${d}/" "${UA_SRC}/systemd/${d}/"*.conf
     info "drop-in: /usr/lib/systemd/system/${d}/"
 done
 grep -q '^ExecStart=$' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf \
@@ -250,7 +251,9 @@ KEY_SRC="${SIGN_SRC}/keys/auros.pub"
  Generating the key pair is a human action -- it mints a long-lived organisational credential.
  See auros-base/signing/keys/README.md."
 grep -q 'BEGIN PUBLIC KEY' "${KEY_SRC}" || die "${KEY_SRC} is not a PEM public key"
-grep -q 'BEGIN .*PRIVATE KEY' "${KEY_SRC}" && die "${KEY_SRC} contains a PRIVATE key. Refusing to bake a private key into an image that ships to customers."
+if grep -q 'BEGIN .*PRIVATE KEY' "${KEY_SRC}"; then
+    die "${KEY_SRC} contains a PRIVATE key. Refusing to bake a private key into an image that ships to customers."
+fi
 
 install -d -m 0755 /usr/lib/pki/containers
 install -D -m 0644 "${KEY_SRC}" /usr/lib/pki/containers/auros.pub

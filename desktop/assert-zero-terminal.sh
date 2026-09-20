@@ -165,7 +165,15 @@ elif e=$(desktop_entry system-config-printer.desktop); then
 else
     fail "printer/settings-page" "no printer GUI at all — neither a print KCM nor system-config-printer"
 fi
-[[ $PRINTER_OK == true ]] || info "printer" "network discovery additionally needs avahi-daemon; see 40-windows-feel.sh §1"
+# Reported every run, pass or fail. B12 asks whether adding a printer is reachable from the GUI, and it
+# is without mDNS (USB, and printer-by-IP-address) — so this is an observation, not an assertion. It is
+# printed because 10-hardening.sh opened the mdns firewall port for exactly this and nothing listens on
+# it. desktop/README.md GAP-3.
+if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    info "printer/discovery" "avahi-daemon running — network printers are discovered automatically"
+else
+    info "printer/discovery" "avahi-daemon NOT running: USB and printer-by-IP work, mDNS auto-discovery does not (README GAP-3, owner: hardening layer)"
+fi
 
 # ── 4. CHANGE THE LANGUAGE ────────────────────────────────────────────────────────────────────────
 if k=$(first_kcm kcm_regionandlang kcm_translations kcm_formats regionandlang); then

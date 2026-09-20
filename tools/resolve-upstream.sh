@@ -374,6 +374,12 @@ cmd_update() {
   emit containerfile_changed "$cf_changed"
   emit old_digest "$locked"
   emit upstream_digest "$RESOLVED_DIGEST"
+  emit upstream_created "$RESOLVED_CREATED"
+  emit upstream_arch "$RESOLVED_ARCH"
+  # BLOCKED.md B6: this is a pull PER MACHINE when a low layer changes. A 180-machine site on one
+  # uplink is a ~630 GB event. It is emitted on every update so the number in front of a customer is
+  # always one we measured today, not one we remember from September.
+  emit upstream_pull_size_bytes "$RESOLVED_PULL_BYTES"
 }
 
 case "$CMD" in

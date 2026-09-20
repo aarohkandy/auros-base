@@ -193,14 +193,14 @@ jobs:
             exit 0
           fi
 
-          echo "dispatching base-updated to ${RECIPES}"
+          echo "dispatching base-published to ${RECIPES}"
           code=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' \
             -X POST "https://api.github.com/repos/${RECIPES}/dispatches" \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             -d "$(jq -nc --arg d "$DIGEST" --arg r "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-                  '{event_type:"base-updated", client_payload:{base_digest:$d, run_url:$r}}')" ) || code=000
+                  '{event_type:"base-published", client_payload:{base_digest:$d, run_url:$r}}')" ) || code=000
 
           if [ "$code" = "204" ]; then
             echo "## propagation · DISPATCHED" >> "$GITHUB_STEP_SUMMARY"
