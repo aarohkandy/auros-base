@@ -678,10 +678,12 @@ jobs:
           cosign-release: ${{ steps.cosign.outputs.version }}
 
       - name: Sign the digest with the key the image trusts
+        id: key
         env:
           IMAGE: ${{ needs.plan.outputs.image }}
           DIGEST: ${{ needs.build.outputs.digest }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          AUROS_DEV_SIGNING_KEY: ${{ secrets.AUROS_DEV_SIGNING_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           # KEYED, NOT KEYLESS — and this is deliberate, against an earlier instruction to use
@@ -696,28 +698,15 @@ jobs:
           # every machine in the field has to install an image containing the new policy before it
           # takes effect (see signing/keys/README.md on rotation — same ordering problem).
           #
-          # Fails closed: no key, no signature, no publish. An image that cannot be verified by the
-          # machine that has to install it is not a publishable image (spec §3).
-          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
-            echo "::error::COSIGN_PRIVATE_KEY is not set. signing/keys/README.md: the keypair is a §9-reserved human action — 'cosign generate-key-pair', commit auros.pub, set COSIGN_PRIVATE_KEY and COSIGN_PASSWORD as repo secrets. Nothing publishes until it exists, and that is the intended behaviour."
-            exit 1
-          fi
-          [ -f signing/keys/auros.pub ] || {
-            echo "::error::signing/keys/auros.pub is missing, so the image cannot carry the key it verifies against (D8). build/30-update-agent.sh should already have failed the build."; exit 1; }
-
+          # D32: the PRODUCTION key if signing/keys/auros.pub is committed, else the DEVELOPMENT key
+          # (AUROS_DEV_SIGNING_KEY) — the same rule build/30-update-agent.sh uses to pick the key the
+          # image ships, and no fallback across kinds. The script also proves the private key matches
+          # that public key BEFORE signing: a wrong key makes a valid signature every machine rejects,
+          # and S8 would still pass. A development-signed digest is refused at publish, not here.
+          # cosign prompts unless COSIGN_PASSWORD is SET; empty is a valid password (the dev key has none).
+          export COSIGN_PASSWORD="${COSIGN_PASSWORD-}"
           cosign version
-          printf '%s' "$COSIGN_PRIVATE_KEY" > /tmp/auros.key
-          chmod 600 /tmp/auros.key
-
-          # Prove the private key matches the public key baked into the image BEFORE signing.
-          # Signing with the wrong key produces a perfectly valid signature that every customer
-          # machine rejects — and S8 would still pass, because the .sig tag would be discoverable.
-          cosign public-key --key /tmp/auros.key > /tmp/derived.pub
-          if ! diff -q <(tr -d ' \n' < /tmp/derived.pub) <(tr -d ' \n' < signing/keys/auros.pub) >/dev/null; then
-            echo "::error::COSIGN_PRIVATE_KEY does not match signing/keys/auros.pub. Every image signed with it would be refused by every machine in the field."
-            exit 1
-          fi
-          echo "private key matches the public key the image ships"
+          tools/signing-key.sh prepare /tmp/auros.key
 
           # D17 belt and braces: on the pinned 2.6 line this flag is already the default, but
           # passing it explicitly documents the intent at the call site and survives a version bump.
@@ -741,8 +730,10 @@ jobs:
           # Half one. Necessary, and on its own worthless: it passed right through the cosign 3.x
           # regression while no consumer could see a signature. Verified against the SAME public key
           # the image ships, because that is the only key a customer machine will try.
-          if cosign verify --key signing/keys/auros.pub "${IMAGE}@${DIGEST}" > /tmp/cosign-verify.txt 2>&1; then
-            detail="cosign verify ok against signing/keys/auros.pub"
+          PUB='${{ steps.key.outputs.pub }}'
+          [ -n "$PUB" ] || { echo "::error::the signing step reported no public key"; exit 1; }
+          if cosign verify --key "$PUB" "${IMAGE}@${DIGEST}" > /tmp/cosign-verify.txt 2>&1; then
+            detail="cosign verify ok against $PUB (${{ steps.key.outputs.kind }} key)"
           else
             ok=0; detail="cosign verify FAILED"
             cat /tmp/cosign-verify.txt
@@ -809,6 +800,7 @@ jobs:
       - name: Update and rollback checks
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          AUROS_DEV_SIGNING_KEY: ${{ secrets.AUROS_DEV_SIGNING_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           # The harness stands up its own registry on the host, serves the image under the name the
@@ -816,13 +808,11 @@ jobs:
           # from CI is the image under test and the PRIVATE half of the key the image ships at
           # /usr/lib/pki/containers/auros.pub — without which it can only offer unsigned images,
           # which would let U4 pass while U1 fails, i.e. the exact opposite of proving anything.
-          if [ -z "${COSIGN_PRIVATE_KEY:-}" ]; then
-            echo "::error::COSIGN_PRIVATE_KEY is not set. U1-U5 and R1 cannot run, so this digest cannot qualify. See signing/keys/README.md."
-            exit 1
-          fi
+          # Same key, same rule as the sign job (tools/signing-key.sh, D32): production if committed,
+          # else the development key. run-update.sh signs with it under this step's COSIGN_PASSWORD
+          # (sudo -E keeps it), which is the password prepare encrypted it with.
+          tools/signing-key.sh prepare /tmp/auros.key
           echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-          printf '%s' "$COSIGN_PRIVATE_KEY" > /tmp/auros.key
-          chmod 600 /tmp/auros.key
           mkdir -p fragments
           # `--profile uefi-modern` so the fragment lands under a REAL profile rather than the
           # synthetic "update" bucket. matrix/profiles.yaml calls uefi-modern the always-bound
@@ -1103,6 +1093,8 @@ jobs:
           esac
 
       - name: A development-key image may never reach a customer-facing tag
+        env:
+          STAGE_REF: ${{ needs.build.outputs.stage_ref }}
         run: |
           # The build accepts a DEVELOPMENT key so that Gate 1 — "builds in CI and boots in a VM" —
           # is not blocked on a human minting a long-lived organisational credential. That is the
@@ -1113,25 +1105,15 @@ jobs:
           # can be set by whoever edits the workflow; a file inside the artifact travels with the
           # thing being judged. Same reasoning as the gate recomputing its verdict instead of reading
           # the harness's `verdict` field.
-          KIND=$(sudo podman run --rm --entrypoint= "$STAGE_REF" cat /usr/lib/auros/signing-key-kind 2>/dev/null | tr -d '[:space:]' || true)
-          case "$KIND" in
-            production) echo "signing key kind: production — publish permitted" ;;
-            development)
-              cat <<'MSG'
-          ::error::REFUSING TO PUBLISH. This image was built with the DEVELOPMENT signing key.
-
-          It built, it booted and it passed the check matrix — that is what the development key is
-          for. It must not become an image a machine will trust, because the private half is a
-          throwaway whose custody nobody is accountable for.
-
-          To publish: generate a production key pair, commit the public half as
-          signing/keys/auros.pub, and put the private half in the signing secret. See
-          signing/keys/DEVELOPMENT-KEY.md and signing/RISKS.md R3. That is a human action.
-          MSG
-              exit 1 ;;
-            "") echo "::error::the image carries no /usr/lib/auros/signing-key-kind. Either it was not built by build/30-update-agent.sh, or that step was skipped. An image that cannot say which key signed it is not one to publish."; exit 1 ;;
-            *) echo "::error::unrecognised signing key kind '$KIND'. Failing closed."; exit 1 ;;
-          esac
+          #
+          # The kind file alone is a filename test (docs/SYSTEM-REVIEW.md §2.14), so the KEY the image
+          # ships is checked too: never the development key (fingerprint pinned in the script), and
+          # exactly the production key committed in this checkout.
+          echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman pull -q "$STAGE_REF"
+          sudo podman run --rm --entrypoint= "$STAGE_REF" cat /usr/lib/auros/signing-key-kind > /tmp/image.kind || : > /tmp/image.kind
+          sudo podman run --rm --entrypoint= "$STAGE_REF" cat /usr/lib/pki/containers/auros.pub > /tmp/image.pub || : > /tmp/image.pub
+          tools/signing-key.sh publish-check /tmp/image.kind /tmp/image.pub
 
       - name: THE GATE
         env:
