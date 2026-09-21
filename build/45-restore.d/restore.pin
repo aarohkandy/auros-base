@@ -1,0 +1,15 @@
+# THE SWITCH for build/45-restore.sh — the Linux-side restore (BLOCKED.md B15, SYSTEM-REVIEW N2).
+#
+#   all five empty   OFF. The image has no restore, and the build log says so in a warning line.
+#   all five set     ON.  Both artifacts are fetched, checked against these hashes, and installed.
+#   anything else    the build fails. A half-pinned restore is not a state an image can be in.
+#
+# RESTORE_SOURCE_COMMIT is the auros-installer commit the artifacts were built from, 40 hex. It is
+# recorded in the image's build manifest; the hashes, not the commit, are what the build enforces.
+# Both URLs must be https. Nothing is fetched that is not named, and nothing is installed that does
+# not hash to the value on the line below its URL.
+RESTORE_SOURCE_COMMIT=
+RESTORE_BIN_URL=
+RESTORE_BIN_SHA256=
+RESTORE_UNIT_URL=
+RESTORE_UNIT_SHA256=
