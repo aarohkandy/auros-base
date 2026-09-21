@@ -37,15 +37,16 @@ emit OS_ID "$( . /usr/lib/os-release 2>/dev/null && printf '%s %s' "${ID:-?}" "$
 
 # ── S10: the protected set ───────────────────────────────────────────────────────────────────────
 emit BOOTC_BIN "$(command -v bootc || echo '')"
-# uupd.timer is probed but not required: Aurora preset-enables it and the Auros update agent
-# deliberately leaves it inert while enabling bootc's own timer (build/30-update-agent.sh, D22).
-# Two enabled updaters racing each other is worth seeing, which is why it is here at all.
-for u in bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service uupd.timer \
+# uupd is probed, not required. It stays for Flatpaks with its system module off (build/30-update-agent.sh
+# A4b); S10 decides from its triggers plus its config whether it is a second OS updater. Three things
+# start uupd.service on Aurora: uupd.timer, uupd-resume.timer and uupd-on-ac.service (udev, AC plug-in).
+for u in bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service uupd.timer uupd-resume.timer uupd-on-ac.service \
          greenboot-healthcheck.service greenboot-set-rollback-trigger.service NetworkManager.service; do
   k=$(printf '%s' "$u" | tr '.-' '__' | tr '[:lower:]' '[:upper:]')
   emit "UNIT_${k}_PRESENT" "$(unit_present "$u")"
   emit "UNIT_${k}_ENABLED" "$(unit_enabled "$u")"
 done
+[ -e /etc/uupd/config.json ] && emit UUPD_CONFIG_B64 "$(base64 -w0 < /etc/uupd/config.json 2>/dev/null || base64 < /etc/uupd/config.json | tr -d '\n')"
 emit SYSTEMD_BIN "$( [ -x /usr/lib/systemd/systemd ] && echo /usr/lib/systemd/systemd || command -v systemd || echo '' )"
 emit GREENBOOT_REQUIRED_D "$(exists /etc/greenboot/check/required.d)"
 

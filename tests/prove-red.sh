@@ -1088,6 +1088,53 @@ assert old in s
 open(p, 'w').write(s.replace(old, """FAILS=$(grep -c '"status":"fail"' "$CHECKS_FILE" || true)"""))
 MUT
 
+printf '\n%s\n' "$(c 1 'one OS updater — bootc timer; uupd keeps Flatpaks with its system module off')"
+
+mutate "S10a: the build leaves uupd's system module ON — two OS updaters ship" \
+       tests/30-update-agent.test.sh "uupd.system-off" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'c.setdefault("modules", {}).setdefault("system", {})["disable"] = True'
+assert old in s
+open(p, 'w').write(s.replace(old, 'c.setdefault("modules", {}).setdefault("system", {})["disable"] = False'))
+MUT
+
+mutate "S10b: the build stops asserting the Flatpak module is on — customer apps stop updating" \
+       tests/30-update-agent.test.sh "nothing would update the apps" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if m.get("flatpak", {}).get("disable") is not False: fail('
+assert old in s
+open(p, 'w').write(s.replace(old, 'if False: fail('))
+MUT
+
+mutate "S10c: S10 is back to timer-only — uupd with its system module on passes" \
+       tests/static-matrix.test.sh "S10-one-updater" <<'MUT'
+p = 'matrix/run/lib/analyze.mjs'
+s = open(p).read()
+old = 'if (!sysOff) problems.push(`two OS updaters'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if (!sysOff && on(kv.UNIT_UUPD_TIMER_ENABLED) && sysOff) problems.push(`two OS updaters'))
+MUT
+
+mutate "S10d: S10 forgets uupd-on-ac.service — uupd.timer off is taken to mean uupd never runs" \
+       tests/static-matrix.test.sh "uupd-on-ac.service still starts it" <<'MUT'
+p = 'matrix/run/lib/analyze.mjs'
+s = open(p).read()
+old = "kv.UNIT_UUPD_ON_AC_SERVICE_PRESENT === '1' && 'uupd-on-ac.service',"
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "S10e: S10 reads an absent config as system-module-off (uupd's default is ON)" \
+       tests/static-matrix.test.sh "config.json absent" <<'MUT'
+p = 'matrix/run/lib/analyze.mjs'
+s = open(p).read()
+old = "let sysOff = false, why"
+assert old in s
+open(p, 'w').write(s.replace(old, "let sysOff = true, why"))
+MUT
+
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
   printf '%s\n' "$(c 32 "$PASS/$((PASS+FAIL)) reintroduced bugs were caught by the suite that owns them.")"
