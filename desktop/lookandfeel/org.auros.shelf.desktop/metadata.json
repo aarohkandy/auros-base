@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Auros"
+            }
+        ],
+        "Category": "",
+        "Description": "A browser-first Plasma desktop in the shape pupils know from school laptops: a launcher at the bottom left, pinned apps centred on the shelf, clock and status at the right, double-click to open.",
+        "Id": "org.auros.shelf.desktop",
+        "License": "LicenseRef-Proprietary",
+        "Name": "Auros Shelf",
+        "Version": "1.0",
+        "Website": "https://github.com/aarohkandy/auros-base"
+    },
+    "X-KDE-PluginInfo-Category": "",
+    "X-Plasma-MainScript": "defaults",
+    "ServiceTypes": [
+        "Plasma/LookAndFeel"
+    ]
+}

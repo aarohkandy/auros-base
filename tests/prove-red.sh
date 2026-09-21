@@ -566,6 +566,35 @@ j = s.index('\n', i)
 open(p, 'w').write(s[:i] + '  :' + s[j:])
 MUT
 
+mutate "W07: the widget check goes back to a bare grep, so a comment naming a widget passes for it" \
+       tests/40-windows-feel.test.sh "only a comment still mentions" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '''grep -qF "addWidget(\\"org.kde.plasma.$w\\")" "$l"'''
+assert old in s
+open(p, 'w').write(s.replace(old, 'grep -q "org.kde.plasma.$w" "$l"'))
+MUT
+
+mutate "W08: a new layout ships in desktop/lookandfeel but the build never validates it" \
+       tests/40-windows-feel.test.sh "exactly the ones the build validates" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = 'LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop org.auros.simple.desktop"'
+assert old in s
+open(p, 'w').write(s.replace(old, 'LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop"'))
+MUT
+
+mutate "W09: the defaults-file id check is dropped, so a package copied from Windows and never edited ships" \
+       tests/40-windows-feel.test.sh "defaults names the Windows package" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '''  grep -qx "LookAndFeelPackage=$id" "$pkg/contents/defaults" 2>/dev/null \\
+    || die'''
+assert old in s
+open(p, 'w').write(s.replace(old, '''  true \\
+    || die'''))
+MUT
+
 printf '\n%s\n' "$(c 1 'build/90-cleanup.sh — the protected set')"
 
 mutate "an unknown kind in protected.list passes unconditionally again" \

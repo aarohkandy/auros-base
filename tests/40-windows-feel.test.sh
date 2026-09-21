@@ -208,6 +208,77 @@ run_check layout.taskbar red "a layout script with no start menu in it" \
   -- layout_case 'var panel = new Panel; panel.addWidget("org.kde.plasma.icontasks");'
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the other layouts — every look-and-feel package ships well-formed, not only the default"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# The Windows layout is the default (D4). The shelf (browser-first) and simple (three big buttons)
+# layouts are alternatives; the reasons and the evidence are in the control repo's
+# docs/DESKTOP-LAYOUTS.md. A layout a school picks and that then produces no panel is the same
+# failure as the taskbar missing, so each package gets the same scrutiny as the default one.
+LNF_IDS="$(extract_lines "$W" '^LNF_IDS=' | cut -d= -f2- | tr -d '"')"
+[ -n "$LNF_IDS" ] || t_abort "could not read LNF_IDS out of 40-windows-feel.sh"
+assert_has "the build still validates the default Windows package" "org.auros.windows.desktop" "$LNF_IDS"
+
+# The payload and the build's list must agree both ways: a package in the repo the build does not
+# check ships unvalidated, and a package the build lists but the repo lacks fails every build.
+SHIPPED="$(find "$D/lookandfeel" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | tr '\n' ' ')"
+assert_eq "the packages in desktop/lookandfeel are exactly the ones the build validates" \
+  "$(printf '%s\n' $LNF_IDS | sort | tr '\n' ' ')" "$SHIPPED"
+
+# Well-formed, statically: valid JSON with the right id and the proprietary licence (D30), and a
+# layout script that at least parses as JavaScript. Parsing is not running: nothing on this machine
+# is a plasmashell, so whether Plasma accepts every call is a VM question (desktop/README.md VERIFY-3).
+for id in $LNF_IDS; do
+  P="$D/lookandfeel/$id"
+  got="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); k=m["KPlugin"]; print(k["Id"], k["License"], m["KPackageStructure"])' "$P/metadata.json" 2>&1)"
+  assert_eq "$id: metadata.json parses, with its own id, the proprietary licence and the LookAndFeel structure" \
+    "$id LicenseRef-Proprietary Plasma/LookAndFeel" "$got"
+  if command -v node >/dev/null 2>&1; then
+    if node --check "$P/contents/layouts/org.kde.plasma.desktop-layout.js" 2>/dev/null; then
+      ok "$id: the layout script parses as JavaScript"
+    else
+      bad "$id: the layout script is not valid JavaScript — plasmashell would reject it and the user would get no panel"
+    fi
+  else
+    note "node is not installed here; $id's layout script was not syntax-checked"
+  fi
+done
+
+LNF_BLOCK="$(extract_between "$W" '^LNF_IDS=' '^did "look-and-feel packages' | rootify /usr/share/plasma/look-and-feel)"
+# lnf_case <mutation> — installs the real payload into a fake root, applies one mutation (shell, with
+# $L pointing at the installed tree), then runs the build's own block against it.
+lnf_case() {
+  local root; root="$(newroot)"
+  mkdir -p "$root/usr/share/plasma/look-and-feel"
+  cp -R "$D/lookandfeel/." "$root/usr/share/plasma/look-and-feel/"
+  # A mutation that fails to apply returns GREEN, so a red case whose bug never went in reports as a
+  # failure of this test instead of passing on a machine that was never broken.
+  ( L="$root/usr/share/plasma/look-and-feel"; eval "$1" ) || { echo "the mutation itself failed: $1"; return 0; }
+  ROOT="$root" bash -c "$PRE
+$LNF_BLOCK"
+}
+S=org.auros.shelf.desktop; M=org.auros.simple.desktop
+run_check layout.packages green "the real payload, all three packages" -- lnf_case ':'
+run_check layout.packages red   "the simple package did not install" -- lnf_case "rm -rf \"\$L/$M\""
+assert_has "names the package" "$M" "$T_LAST_OUT"
+run_check layout.packages red   "the shelf package did not install" -- lnf_case "rm -rf \"\$L/$S\""
+run_check layout.packages red   "metadata.json carries another package's id (a copy that was never edited)" \
+  -- lnf_case "sed -i 's/\"Id\": \"$S\"/\"Id\": \"org.auros.windows.desktop\"/' \"\$L/$S/metadata.json\""
+assert_has "says Plasma would not list it" "would not list it" "$T_LAST_OUT"
+run_check layout.packages red   "metadata.json lost its KPackageStructure" \
+  -- lnf_case "sed -i '/KPackageStructure/d' \"\$L/$M/metadata.json\""
+run_check layout.packages red   "defaults names the Windows package" \
+  -- lnf_case "sed -i 's/^LookAndFeelPackage=.*/LookAndFeelPackage=org.auros.windows.desktop/' \"\$L/$M/contents/defaults\""
+run_check layout.packages red   "the layout script is missing" \
+  -- lnf_case "rm \"\$L/$S/contents/layouts/org.kde.plasma.desktop-layout.js\""
+assert_has "says the user would have no panel" "no panel" "$T_LAST_OUT"
+run_check layout.packages red   "the layout drops the system tray (no Wi-Fi from the GUI, B12)" \
+  -- lnf_case "sed -i '/addWidget(\"org.kde.plasma.systemtray\")/d' \"\$L/$M/contents/layouts/org.kde.plasma.desktop-layout.js\""
+assert_has "names the missing widget" "org.kde.plasma.systemtray" "$T_LAST_OUT"
+# THE FALSE GREEN this check is shaped against: the widget is gone but a comment still names it.
+run_check layout.packages red   "the task buttons are gone and only a comment still mentions org.kde.plasma.icontasks" \
+  -- lnf_case "sed -i 's/.*addWidget(\"org.kde.plasma.icontasks\").*/\\/\\/ org.kde.plasma.icontasks used to be here/' \"\$L/$S/contents/layouts/org.kde.plasma.desktop-layout.js\""
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "the first-run stamp — the check that stops the wizard reopening every morning"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # If the unit's ConditionPathExists and the script's STAMP_VERSION disagree, the unit stops
