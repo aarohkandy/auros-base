@@ -8,12 +8,38 @@ Wants=network-online.target
 # machine whose report we need.
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+# Type=simple, NOT oneshot, AND THIS IS THE WHOLE BOOT PHASE.
+#
+# Measured, run 35548005729 (job 106177345027), the first boot run this harness ever completed:
+#
+#     [PASS] B1 — greeter within 17s (budget 120s, accel=kvm)
+#     poll 'agent ready to suspend' TIMED OUT after 900s
+#     poll 'agent done (boot 1)'    TIMED OUT after 2400s
+#     #AUROS-BOOT# 1
+#     #AUROS-STATUS#{"boot":1,"digest":"sha256:e66fd9a6…","deployments":1,"signature":""}
+#     (and then nothing, on both cold boots)
+#
+# The agent started, printed its boot line and its status line, and stopped at the very next
+# statement — B2's `systemctl is-system-running --wait`. That is a DEADLOCK, and it is structural:
+#
+#   * this unit is WantedBy=multi-user.target, so its start job is in the boot transaction;
+#   * as a ONESHOT its start job is not finished until ExecStart exits;
+#   * systemd reports the manager as "running" only once the job queue empties;
+#   * `is-system-running --wait` blocks until that happens.
+#
+# So the agent waited for a transaction that was waiting for the agent. Every check after the status
+# line — B2, B4 through B12, and B3's second-boot half — was unreachable on every image, forever.
+# It would have looked exactly like a broken IMAGE the first time the hardened base ran the matrix.
+#
+# Type=simple finishes the start job as soon as the process is forked, so the transaction drains,
+# `--wait` returns, and the agent carries on. Nothing about what is CHECKED changes; only whether
+# the checks can run at all. RemainAfterExit and TimeoutStartSec are dropped with the oneshot they
+# belonged to — both are meaningless for Type=simple, and leaving them would imply this is still a
+# oneshot to whoever reads it next.
+Type=simple
 ExecStart=/usr/local/lib/auros-matrix/auros-matrix-agent.sh
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=infinity
 
 [Install]
 WantedBy=multi-user.target
