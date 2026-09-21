@@ -62,14 +62,17 @@ if skopeo inspect --no-tags "${CREDS[@]+"${CREDS[@]/--dest-creds/--creds}"}" "do
   echo "  already mirrored — nothing to do"
 else
   echo "  copying (--all: every arch and the attached signatures, not just the one we happen to run)"
-  skopeo copy --all "${CREDS[@]+"${CREDS[@]}"}" "docker://${SRC}" "docker://${DST}"
+  skopeo copy --all --src-no-creds "${CREDS[@]+"${CREDS[@]}"}" "docker://${SRC}" "docker://${DST}"
 fi
 
 # Prove the mirror is byte-identical. A mirror that silently re-compressed or dropped a layer would be a
 # different operating system wearing the same digest field, which is worse than no mirror at all.
 RCREDS=()
 [ ${#CREDS[@]} -gt 0 ] && RCREDS=(--creds "${AUROS_REGISTRY_USER}:${AUROS_REGISTRY_TOKEN}")
-SRC_DIGEST=$(skopeo inspect --no-tags "docker://${SRC}" | jq -r .Digest)
+# The SOURCE is upstream's public image, read anonymously (--no-creds / --src-no-creds). Reading it
+# with the ambient auth file failed gate1-exit run 35604729895: an earlier `sudo podman login` left
+# that file root-owned, and skopeo died "getting username and password" before comparing anything.
+SRC_DIGEST=$(skopeo inspect --no-tags --no-creds "docker://${SRC}" | jq -r .Digest)
 DST_DIGEST=$(skopeo inspect --no-tags "${RCREDS[@]+"${RCREDS[@]}"}" "docker://${DST}" | jq -r .Digest)
 if [ "$SRC_DIGEST" != "$DST_DIGEST" ]; then
   echo "mirror-upstream: FATAL — mirrored digest ${DST_DIGEST} != source ${SRC_DIGEST}" >&2
