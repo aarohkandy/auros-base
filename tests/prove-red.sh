@@ -874,6 +874,15 @@ assert old in s
 open(p, 'w').write(s.replace(old, '  if ! runuser -u "$TEST_USER" -- "$ASSERT" "$POLICY_MODE" >'))
 MUT
 
+mutate "B11 run 35616444839: avc_summary drops the denied object, so 'unlabeled_t:file' names no file" \
+       tests/b11-diag.test.sh "fold to 2x" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = 'print comm " " s "->" t ":" c " {" p "}" obj'
+assert old in s
+open(p, 'w').write(s.replace(old, 'print comm " " s "->" t ":" c " {" p "}"'))
+MUT
+
 printf '\n%s\n' "$(c 1 'workflow run: blocks — pipe into grep -q under pipefail')"
 
 mutate "build.yml's cosign flag probe goes back to piping its --help into grep -q (SIGPIPE drops the flag)" \
