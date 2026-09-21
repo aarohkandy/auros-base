@@ -543,4 +543,65 @@ for uu in welcome/auros-first-run.service compat/auros-bottles-setup.service; do
   assert_file "the repo ships $uu" "$D/$uu"
 done
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "KDE plasma-setup is suppressed — first boot is ours alone (owner decision 2026-09-21)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# plasma-setup 6.7.5's unit runs before the display manager unless /etc/plasma-setup-done exists
+# (files/plasma-setup.service.in). The build writes the marker and asserts the unit still keys on it.
+PS_BLOCK="$(extract_between "$W" '^PS_DONE=/etc/plasma-setup-done' '^fi$' \
+  | rootify /usr/lib/systemd/system/plasma-setup.service)"
+# The two lines of the real 6.7.5 unit that decide whether it runs.
+PS_REAL='ConditionPathExists=!/etc/plasma-setup-done
+ConditionKernelCommandLine=!rd.live.image'
+
+ps_case() { # <unit body or 'absent'> -> exit 0 iff the build accepted it; the marker must be written
+  local root; root="$(newroot)"; mkdir -p "$root/usr/lib/systemd/system"
+  [ "$1" = absent ] || printf '[Unit]\n%s\n' "$1" > "$root/usr/lib/systemd/system/plasma-setup.service"
+  ROOT="$root" bash -c "$PRE
+install_text() { mkdir -p \"\$ROOT\$(dirname \"\$1\")\"; cat > \"\$ROOT\$1\"; }
+$PS_BLOCK" || return 1
+  [ -s "$root/etc/plasma-setup-done" ] || { echo "no /etc/plasma-setup-done written"; return 1; }
+}
+
+run_check plasma-setup green "plasma-setup 6.7.5's own conditions" -- ps_case "$PS_REAL"
+run_check plasma-setup green "plasma-setup not installed at all" -- ps_case absent
+run_check plasma-setup red "KDE renamed the flag — our marker would suppress nothing" \
+  -- ps_case 'ConditionPathExists=!/var/lib/plasma-setup/done'
+assert_has "says the wizard would take seat0" "would take seat0" "$T_LAST_OUT"
+run_check plasma-setup red "the unit has no done-flag condition — it runs every boot" \
+  -- ps_case 'ConditionKernelCommandLine=!rd.live.image'
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "with no wizard, who is at seat0 on first boot — the account gap detector"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# Nothing creates an account today (no recipe field, no provisioning step). The detector must say
+# NONE for that image — it is the shipping state — and must see the paths that would close the gap.
+ACCT_BLOCK="$(extract_between "$W" '^FIRST_BOOT_ACCOUNT=none' '^fi$' \
+  | rootify /etc/systemd/system/display-manager.service /etc/passwd /usr/lib/passwd)"
+
+acct_case() { # <passwd lines> [kiosk] -> exit 0 iff some account path was found
+  local root; root="$(newroot)"; mkdir -p "$root/etc/systemd/system"
+  printf '%s\n' "$1" > "$root/etc/passwd"
+  printf 'root:x:0:0:root:/root:/bin/bash\n' > "$root/usr/lib/passwd"
+  if [ "${2:-}" = kiosk ]; then ln -s /dev/null "$root/etc/systemd/system/display-manager.service"
+  else ln -s /usr/lib/systemd/system/plasmalogin.service "$root/etc/systemd/system/display-manager.service"; fi
+  ROOT="$root" bash -c "$PRE
+$ACCT_BLOCK
+echo \"seat0=\$FIRST_BOOT_ACCOUNT\"; [ \"\$FIRST_BOOT_ACCOUNT\" != none ]"
+}
+SYSTEM_ONLY='aurosprobe:x:980:980:Auros policy assertion probe:/var/lib/aurosprobe:/usr/bin/bash
+auroskiosk:x:979:979::/var/lib/auroskiosk:/usr/sbin/nologin
+nobody:x:65534:65534::/:/usr/sbin/nologin'
+run_check first-boot.account red "today's image: system accounts only, a display manager — nobody to log in" \
+  -- acct_case "$SYSTEM_ONLY"
+assert_has "names the gap" "FIRST-BOOT ACCOUNT GAP" "$T_LAST_OUT"
+run_check first-boot.account green "kiosk: the display manager is masked, auroskiosk has the seat" \
+  -- acct_case "$SYSTEM_ONLY" kiosk
+assert_has "and says so" "seat0=kiosk" "$T_LAST_OUT"
+run_check first-boot.account green "a provisioned human account" -- acct_case "$SYSTEM_ONLY
+teacher:x:1000:1000:Teacher:/var/home/teacher:/bin/bash"
+assert_has "and names it" "seat0=users:teacher" "$T_LAST_OUT"
+run_check first-boot.account red "a uid-1000 account with no shell is not a person" -- acct_case "$SYSTEM_ONLY
+svc:x:1001:1001::/:/sbin/nologin"
+
 t_finish "40-windows-feel.sh"
