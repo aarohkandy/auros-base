@@ -74,7 +74,7 @@ PHYSICAL_ONLY="wifi trackpad suspend brightness webcam"
 
 # DMI placeholders. Vendors ship these instead of leaving the field blank, so treating them as data
 # is how "System Product Name" becomes a model in the table competitors cannot copy.
-DMI_JUNK="none|not specified|not available|to be filled by o.e.m.|to be filled by oem|system product name|system version|default string|o.e.m.|oem|unknown|x.x.x|\\\$(default string)"
+DMI_JUNK="none|not specified|not available|system manufacturer|to be filled by o.e.m.|to be filled by oem|system product name|system version|default string|o.e.m.|oem|unknown|x.x.x|\\\$(default string)"
 
 die() { printf '%s: %s\n' "$ME" "$*" >&2; exit 2; }
 warn() { printf '%s: %s\n' "$ME" "$*" >&2; }
@@ -306,9 +306,17 @@ probe_tpm() {
     printf ''; return 0
   fi
   # Pre-4.x kernels expose a TPM 1.2 through caps instead. Read it rather than concluding from age.
-  if caps="$(rd $d/caps)" && printf '%s' "$caps" | grep -qi '1\.2'; then
-    fact tpm 1.2 "$d/caps: $caps"
-    printf '1.2'; return 0
+  #
+  # NOT through rd(): caps is the one MULTI-LINE file this script reads, and the version is on the
+  # second line ("Manufacturer: 0x53544d20" / "TCG version: 1.2" / "Firmware version: 8.16").
+  # rd() returns the first line by design, so this branch was unreachable — a TPM 1.2 machine would
+  # have been recorded as "version unreadable" forever, and nothing would have looked wrong.
+  if [ -r "$R$d/caps" ]; then
+    caps="$(grep -i 'TCG version' "$R$d/caps" 2>/dev/null | head -1 | sed 's/[[:space:]]*$//')"
+    case "$caps" in
+      *1.2*) fact tpm 1.2 "$d/caps: $caps"; printf '1.2'; return 0 ;;
+      *2.0*) fact tpm 2.0 "$d/caps: $caps"; printf '2.0'; return 0 ;;
+    esac
   fi
   fact tpm "" "$d exists but neither tpm_version_major nor caps gave a version. $d contains: $(lsdir $d)"
   printf ''
@@ -342,15 +350,15 @@ pci_by_class() { # <class prefix, e.g. 0x0300> -> one id per line
 wifi_ids() {
   # The exact answer first: a netdev with an 802.11 phy. This is the wifi, not something that looks
   # like one. Only if there is no wireless netdev do we fall back to the PCI class.
-  local n base dev found=""
+  local n base found=""
   for n in "$R"/sys/class/net/*; do
     [ -e "$n" ] || continue
     base="${n#$R}"
     if [ -d "$n/phy80211" ] || [ -d "$n/wireless" ]; then
-      dev="$(cd "$n/device" 2>/dev/null && pwd -P)" || continue
-      dev="${dev#$R}"
-      local id; id="$(pci_id "$dev")" || continue
-      fact "ids.wifi" "pci:$id" "$base/phy80211 -> $dev"
+      local id link
+      id="$(pci_id "$base/device")" || continue
+      link="$(readlink "$n/device" 2>/dev/null || printf '(not a symlink)')"
+      fact "ids.wifi" "pci:$id" "$base/phy80211 — $base/device -> $link"
       found="${found:+$found,}pci:$id"
     fi
   done

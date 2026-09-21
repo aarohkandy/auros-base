@@ -62,7 +62,10 @@ on:
   push:
     branches: [main]
     # A README change must not re-run a fifty-minute image build. It did, once.
-    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore']
+    # Probe workflows are measurement scaffolding; changing one must not rebuild the image. Several
+    # agents push to this repo, and each build takes ~50 minutes and QUEUES behind the last, so an
+    # unrelated push can put the build everyone is waiting on an hour further away.
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore', '.github/workflows/probe-*.yml']
   pull_request:
     branches: [main]
     paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore']
