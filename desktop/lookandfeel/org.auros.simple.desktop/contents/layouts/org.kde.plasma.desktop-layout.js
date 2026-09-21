@@ -61,6 +61,18 @@ tasks.writeConfig("iconSpacing", 2);
 
 panel.addWidget("org.kde.plasma.panelspacer");
 
+// ── Input method indicator ───────────────────────────────────────────────────────────────────────
+// The same condition as upstream's default panel (plasma-desktop layout-templates/
+// org.kde.plasma.desktop.defaultPanel/contents/layout.js), copied verbatim including the list: for
+// languages that pull in an input method (Marathi, Hindi, Tamil, ...) Plasma's own default panel adds
+// kimpanel, so a user can see and switch how they are typing.  Without it our panel was the odd one out.
+var langIds = ["as", "bn", "bo", "brx", "doi", "gu", "hi", "ja", "kn", "ko", "kok", "ks", "lep",
+               "mai", "ml", "mni", "mr", "ne", "or", "pa", "sa", "sat", "sd", "si", "ta", "te",
+               "th", "ur", "vi", "zh_CN", "zh_TW"];
+if (langIds.indexOf(languageId) != -1) {
+    panel.addWidget("org.kde.plasma.kimpanel");
+}
+
 // ── Tray and clock ───────────────────────────────────────────────────────────────────────────────
 // Wi-Fi from the tray is one of check B12's four tasks, so the tray stays in every Auros layout.
 panel.addWidget("org.kde.plasma.systemtray");

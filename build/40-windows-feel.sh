@@ -278,6 +278,10 @@ LAYOUT=/usr/share/plasma/look-and-feel/org.auros.windows.desktop/contents/layout
 for w in kickoff icontasks systemtray digitalclock showdesktop; do
   grep -q "org.kde.plasma.$w" "$LAYOUT" || die "the layout script does not add org.kde.plasma.$w"
 done
+# A taskbar sits flush on the screen edge. Plasma panels float with a gap unless told otherwise
+# (plasma-workspace shell/scripting/panel.cpp: readEntry("floating", true)).
+grep -qx 'panel.floating = false;' "$LAYOUT" \
+  || die "the Windows layout does not set panel.floating = false — the taskbar would float above the screen edge with a gap under it"
 did "taskbar layout installed: start menu, task buttons, system tray, clock, show desktop"
 
 # Every look-and-feel package we ship, not only the default one. The Windows layout stays the default
@@ -289,9 +293,10 @@ did "taskbar layout installed: start menu, task buttons, system tray, clock, sho
 # layout — the right id in metadata.json, a defaults file naming that same id, a layout script — and
 # for the four widgets without which a layout breaks a promise: a menu and task buttons (B12's
 # windows-shape check reads the user's panel for exactly these two), a tray (Wi-Fi is a B12 task) and
-# a clock. The widget match is on the addWidget("...") call, not the bare id, so a comment that
+# a clock — plus the input-method indicator, which Plasma's own default panel adds for Marathi, Hindi
+# and ~30 other languages and which every Auros layout adds under the same condition. The widget match is on the addWidget("...") call, not the bare id, so a comment that
 # mentions a widget cannot stand in for the widget.
-LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop org.auros.simple.desktop"
+LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop org.auros.simple.desktop org.auros.mac.desktop"
 for id in $LNF_IDS; do
   pkg="/usr/share/plasma/look-and-feel/$id"
   grep -qE "\"Id\": *\"$id\"" "$pkg/metadata.json" 2>/dev/null \
@@ -302,12 +307,24 @@ for id in $LNF_IDS; do
     || die "look-and-feel $id: contents/defaults is missing or names a different package — applying it would record the wrong theme"
   l="$pkg/contents/layouts/org.kde.plasma.desktop-layout.js"
   [ -f "$l" ] || die "look-and-feel $id: no layout script — choosing it would leave the user with no panel"
-  for w in kickoff icontasks systemtray digitalclock; do
+  for w in kickoff icontasks systemtray digitalclock kimpanel; do
     grep -qF "addWidget(\"org.kde.plasma.$w\")" "$l" \
       || die "look-and-feel $id: the layout never adds org.kde.plasma.$w"
   done
 done
 did "look-and-feel packages installed and well-formed: $LNF_IDS"
+
+# Which layout a new user gets. One mechanism: a recipe's derived layer runs
+#     RUN /usr/libexec/auros/set-desktop-layout <windows|browser-first|simple|mac>
+# which records the choice in /etc/auros/desktop-layout (read by auros-first-run) and in [KDE]
+# LookAndFeelPackage of /etc/xdg/kdeglobals. The base does not call it: no file means Windows (D4).
+# Every package shipped above must have a name there, or no recipe could ever choose it.
+install_file "$SRC/set-desktop-layout" "${AUROS_LIBEXEC}/set-desktop-layout" 0755
+for id in $LNF_IDS; do
+  grep -qE "^ +[a-z-]+\) +ID=$id ;;" "${AUROS_LIBEXEC}/set-desktop-layout" \
+    || die "look-and-feel $id ships, but set-desktop-layout has no name for it — no recipe could choose it"
+done
+did "recipes choose the layout with: RUN ${AUROS_LIBEXEC}/set-desktop-layout <windows|browser-first|simple|mac> (default windows)"
 
 # /etc/skel — only the two things that genuinely belong there.
 install_file "$SRC/xdg/kglobalshortcutsrc" /etc/skel/.config/kglobalshortcutsrc 0644

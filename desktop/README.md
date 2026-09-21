@@ -30,6 +30,8 @@ desktop/
 │   └── contents/layouts/org.kde.plasma.desktop-layout.js   ← this file IS the taskbar
 ├── lookandfeel/org.auros.shelf.desktop/    alternative: browser-first, apps centred (same structure)
 ├── lookandfeel/org.auros.simple.desktop/   alternative: three big buttons, a menu, the clock
+├── lookandfeel/org.auros.mac.desktop/      alternative: top bar (menu, app menus, tray, clock) + centred dock
+├── set-desktop-layout              recipe picks the default layout: RUN …/set-desktop-layout <windows|browser-first|simple|mac>
 ├── flatpak/flathub.flatpakrepo     pinned, hash-checked → /etc/flatpak/remotes.d/
 ├── welcome/                        first-run flow (plasma-welcome + our pages + the oneshot)
 ├── compat/                         the .exe capability, D16-shaped

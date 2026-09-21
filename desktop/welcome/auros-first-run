@@ -4,7 +4,7 @@
 #
 # WHAT IT DOES, in order:
 #   1. creates the Windows-named user folders
-#   2. applies the Auros look-and-feel
+#   2. applies the Auros look-and-feel the image chose (/etc/auros/desktop-layout; Windows if none)
 #   3. feeds the layout script to plasmashell, which is what actually builds the taskbar
 #   4. opens the welcome wizard
 #   5. writes the stamp
@@ -19,11 +19,27 @@ STAMP_VERSION=v1
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/auros"
 STAMP="$STATE_DIR/first-run.${STAMP_VERSION}.stamp"
 LOG="$STATE_DIR/first-run.log"
-LAYOUT=/usr/share/plasma/look-and-feel/org.auros.windows.desktop/contents/layouts/org.kde.plasma.desktop-layout.js
 
 mkdir -p "$STATE_DIR"
 exec >>"$LOG" 2>&1
 echo "=== auros-first-run $(date -Is) user=$(id -un) ==="
+
+# Which layout. A recipe chooses one with /usr/libexec/auros/set-desktop-layout, which records the
+# package id in /etc/auros/desktop-layout. No file means the Windows layout, the default D4 requires.
+# Anything that is not a shipped package falls back to Windows too, and says so: a typo in /etc must
+# cost a school its chosen layout, never its taskbar.
+LNF=org.auros.windows.desktop
+if [[ -r /etc/auros/desktop-layout ]]; then
+    chosen="$(head -n1 /etc/auros/desktop-layout)"
+    if [[ $chosen =~ ^org\.auros\.[a-z]+\.desktop$ \
+          && -r /usr/share/plasma/look-and-feel/$chosen/contents/layouts/org.kde.plasma.desktop-layout.js ]]; then
+        LNF="$chosen"
+    else
+        echo "desktop-layout: '$chosen' in /etc/auros/desktop-layout is not a shipped layout — using $LNF"
+    fi
+fi
+LAYOUT=/usr/share/plasma/look-and-feel/$LNF/contents/layouts/org.kde.plasma.desktop-layout.js
+echo "desktop-layout: $LNF"
 
 if [[ -e "$STAMP" ]]; then
     echo "stamp present ($STAMP) — nothing to do"
@@ -59,7 +75,7 @@ if [[ "$ready" == true ]]; then
     echo "plasmashell: on the bus"
 
     if command -v plasma-apply-lookandfeel >/dev/null 2>&1; then
-        if plasma-apply-lookandfeel -a org.auros.windows.desktop; then
+        if plasma-apply-lookandfeel -a "$LNF"; then
             echo "look-and-feel: applied"
         else
             echo "look-and-feel: FAILED (non-fatal; /etc/xdg defaults still apply)"

@@ -1,0 +1,72 @@
+#!/usr/bin/bash
+# set-desktop-layout -- choose which Auros desktop layout every new user of this image starts with.
+#
+#   /usr/libexec/auros/set-desktop-layout <windows|browser-first|simple|mac>
+#
+# Runs at IMAGE BUILD TIME, in a customer recipe's derived layer, as one line -- the same pattern as
+# apply-policy:
+#
+#     RUN /usr/libexec/auros/set-desktop-layout simple
+#
+# The base never calls it. With no call, nothing below exists and every reader falls back to the
+# Windows layout, which is the default D4 requires.
+#
+# It does exactly two things, and they are the only two places the layout is chosen:
+#   1. writes the package id to /etc/auros/desktop-layout, which auros-first-run reads to decide which
+#      look-and-feel to apply and which layout script to feed plasmashell;
+#   2. rewrites the one key [KDE] LookAndFeelPackage in /etc/xdg/kdeglobals, so the system-wide
+#      default (what System Settings > Global Theme shows as current) names the same package. Every
+#      other line of that shared file is left byte-for-byte alone (apply-policy owns other groups in
+#      it, the theme layer owns others still).
+#
+# An unknown name is refused with a non-zero exit, which fails the image build. The vocabulary is the
+# recipe's `desktop.layout` field (control repo docs/DESKTOP-LAYOUTS.md §3): no free-form ids, no paths.
+#
+# AUROS_LAYOUT_ROOT prefixes every path, for tests. Unset on a real build.
+set -euo pipefail
+
+R="${AUROS_LAYOUT_ROOT:-}"
+LNF_DIR="$R/usr/share/plasma/look-and-feel"
+KDEGLOBALS="$R/etc/xdg/kdeglobals"
+CHOICE="$R/etc/auros/desktop-layout"
+
+die() { printf 'auros[desktop-layout]  x %s\n' "$*" >&2; exit 1; }
+log() { printf 'auros[desktop-layout] %s\n' "$*"; }
+
+case "${1:-}" in
+  windows)       ID=org.auros.windows.desktop ;;
+  browser-first) ID=org.auros.shelf.desktop ;;
+  simple)        ID=org.auros.simple.desktop ;;
+  mac)           ID=org.auros.mac.desktop ;;
+  *) die "usage: set-desktop-layout <windows|browser-first|simple|mac> (got '${1:-nothing}'). These are the only layouts the image ships and tests; there is no way to name any other." ;;
+esac
+
+LAYOUT="$LNF_DIR/$ID/contents/layouts/org.kde.plasma.desktop-layout.js"
+[ -r "$LAYOUT" ] || die "$1 means $ID, but $LAYOUT is not in this image -- every new user would get no panel. Is this image built from an Auros base that ships it?"
+
+[ -f "$KDEGLOBALS" ] || die "$KDEGLOBALS does not exist -- this is not an Auros base image (its Windows-familiarity layer writes that file)"
+grep -qx '\[KDE\]' "$KDEGLOBALS" || die "$KDEGLOBALS has no [KDE] group -- the base's Windows-familiarity layer owns it and it is missing"
+
+# Group-aware: KConfig reads LookAndFeelPackage from [KDE] only, so the key is replaced where it
+# stands inside [KDE] (or added right after the header if [KDE] lacks it), never matched wherever it
+# happens to appear in the file. A second copy inside [KDE] is dropped rather than left to disagree.
+tmp="$(mktemp)"
+key="LookAndFeelPackage=$ID"
+if awk '/^[[:space:]]*\[/ { k = ($0 == "[KDE]") } k && index($0, "LookAndFeelPackage=") == 1 { f = 1 } END { exit !f }' "$KDEGLOBALS"; then
+  awk -v key="$key" '
+    /^[[:space:]]*\[/ { k = ($0 == "[KDE]") }
+    k && index($0, "LookAndFeelPackage=") == 1 { if (!done) print key; done = 1; next }
+    { print }' "$KDEGLOBALS" > "$tmp"
+else
+  awk -v key="$key" '{ print } $0 == "[KDE]" && !done { print key; done = 1 }' "$KDEGLOBALS" > "$tmp"
+fi
+cat "$tmp" > "$KDEGLOBALS"
+rm -f "$tmp"
+
+install -d -m 0755 "$(dirname "$CHOICE")"
+printf '%s\n' "$ID" > "$CHOICE"
+chmod 0644 "$CHOICE"
+
+log "desktop layout for every new user: $1 ($ID)"
+log "  recorded in /etc/auros/desktop-layout; /etc/xdg/kdeglobals [KDE] LookAndFeelPackage=$ID"
+log "  users who already finished first run keep the panel they have"

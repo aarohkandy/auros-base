@@ -26,6 +26,10 @@ panel.location = "bottom";
 // 1366x768 screen.  Legibility beats pixel thrift.
 panel.height = 44;
 panel.hiding = "none";
+// Flush with the bottom edge, as the Windows taskbar is.  Unset, a scripted panel floats with a gap
+// under it: floating is a Panel property (plasma-workspace shell/scripting/panel.h, Q_PROPERTY floating)
+// whose getter falls back to readEntry("floating", true) (shell/scripting/panel.cpp).
+panel.floating = false;
 
 // ── Start ────────────────────────────────────────────────────────────────────────────────────────
 // Kickoff is the Windows-7-shaped menu: search box at the top, categories, power buttons.  The
@@ -51,6 +55,18 @@ tasks.writeConfig("showOnlyCurrentScreen", false);
 
 // ── Spacer, so the tray and clock sit hard right the way they do on Windows ───────────────────────
 panel.addWidget("org.kde.plasma.marginsseparator");
+
+// ── Input method indicator ───────────────────────────────────────────────────────────────────────
+// The same condition as upstream's default panel (plasma-desktop layout-templates/
+// org.kde.plasma.desktop.defaultPanel/contents/layout.js), copied verbatim including the list: for
+// languages that pull in an input method (Marathi, Hindi, Tamil, ...) Plasma's own default panel adds
+// kimpanel, so a user can see and switch how they are typing.  Without it our panel was the odd one out.
+var langIds = ["as", "bn", "bo", "brx", "doi", "gu", "hi", "ja", "kn", "ko", "kok", "ks", "lep",
+               "mai", "ml", "mni", "mr", "ne", "or", "pa", "sa", "sat", "sd", "si", "ta", "te",
+               "th", "ur", "vi", "zh_CN", "zh_TW"];
+if (langIds.indexOf(languageId) != -1) {
+    panel.addWidget("org.kde.plasma.kimpanel");
+}
 
 // ── System tray ──────────────────────────────────────────────────────────────────────────────────
 // Network, volume, battery, removable media, clipboard.  This is the notification area.

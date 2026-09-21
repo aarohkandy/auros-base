@@ -579,9 +579,9 @@ mutate "W08: a new layout ships in desktop/lookandfeel but the build never valid
        tests/40-windows-feel.test.sh "exactly the ones the build validates" <<'MUT'
 p = 'build/40-windows-feel.sh'
 s = open(p).read()
-old = 'LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop org.auros.simple.desktop"'
+old = 'LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop org.auros.simple.desktop org.auros.mac.desktop"'
 assert old in s
-open(p, 'w').write(s.replace(old, 'LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop"'))
+open(p, 'w').write(s.replace(old, 'LNF_IDS="org.auros.windows.desktop org.auros.shelf.desktop org.auros.mac.desktop"'))
 MUT
 
 mutate "W09: the defaults-file id check is dropped, so a package copied from Windows and never edited ships" \
@@ -593,6 +593,60 @@ old = '''  grep -qx "LookAndFeelPackage=$id" "$pkg/contents/defaults" 2>/dev/nul
 assert old in s
 open(p, 'w').write(s.replace(old, '''  true \\
     || die'''))
+MUT
+
+mutate "W10: the mac layout ships in desktop/lookandfeel but the build never validates it" \
+       tests/40-windows-feel.test.sh "exactly the ones the build validates" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = 'org.auros.simple.desktop org.auros.mac.desktop"'
+assert old in s
+open(p, 'w').write(s.replace(old, 'org.auros.simple.desktop"'))
+MUT
+
+mutate "W11: the Windows taskbar's floating check is dropped, so a floating taskbar ships again" \
+       tests/40-windows-feel.test.sh "the taskbar floats" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = "grep -qx 'panel.floating = false;' \"$LAYOUT\" \\"
+assert old in s
+open(p, 'w').write(s.replace(old, "true \\"))
+MUT
+
+mutate "W12: kimpanel leaves the build's widget list, so a layout without the input-method indicator ships" \
+       tests/40-windows-feel.test.sh "drops the input-method indicator" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = 'for w in kickoff icontasks systemtray digitalclock kimpanel; do'
+assert old in s
+open(p, 'w').write(s.replace(old, 'for w in kickoff icontasks systemtray digitalclock; do'))
+MUT
+
+mutate "W13: set-desktop-layout passes an unknown name through instead of refusing it" \
+       tests/40-windows-feel.test.sh "says which names exist" <<'MUT'
+p = 'desktop/set-desktop-layout'
+s = open(p).read()
+old = '  *) die "usage: set-desktop-layout'
+assert old in s
+open(p, 'w').write(s.replace(old, '  *) ID="org.auros.$1.desktop" ;;\n  --never-matches--) die "usage: set-desktop-layout'))
+MUT
+
+mutate "W14: set-desktop-layout matches LookAndFeelPackage in any group, not only [KDE]" \
+       tests/40-windows-feel.test.sh "not the [General] copy" <<'MUT'
+p = 'desktop/set-desktop-layout'
+s = open(p).read()
+old = 'k && index($0, "LookAndFeelPackage=") == 1'
+assert s.count(old) == 2
+open(p, 'w').write(s.replace(old, 'index($0, "LookAndFeelPackage=") == 1'))
+MUT
+
+mutate "W15: auros-first-run trusts /etc/auros/desktop-layout without checking the package ships" \
+       tests/40-windows-feel.test.sh "does not ship → Windows" <<'MUT'
+p = 'desktop/welcome/auros-first-run'
+s = open(p).read()
+i = s.index('    if [[ $chosen =~')
+j = s.index('; then', i)
+open(p, 'w').write(s[:i] + '    if [[ -n $chosen ]]' + s[j:])
 MUT
 
 printf '\n%s\n' "$(c 1 'build/90-cleanup.sh — the protected set')"

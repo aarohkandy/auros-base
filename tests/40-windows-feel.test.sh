@@ -206,6 +206,10 @@ run_check layout.taskbar red   "the layout script did not install" -- layout_cas
 assert_has "says there would be no taskbar" "no taskbar" "$T_LAST_OUT"
 run_check layout.taskbar red "a layout script with no start menu in it" \
   -- layout_case 'var panel = new Panel; panel.addWidget("org.kde.plasma.icontasks");'
+# DESKTOP-LAYOUTS.md §2.1: the script never set floating, and a scripted panel floats by default.
+run_check layout.taskbar red "the real layout with its panel.floating = false line removed (the taskbar floats)" \
+  -- layout_case "$(grep -vx 'panel.floating = false;' "$LAYOUT")"
+assert_has "says the taskbar would float" "would float" "$T_LAST_OUT"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "the other layouts — every look-and-feel package ships well-formed, not only the default"
@@ -256,8 +260,17 @@ lnf_case() {
   ROOT="$root" bash -c "$PRE
 $LNF_BLOCK"
 }
-S=org.auros.shelf.desktop; M=org.auros.simple.desktop
-run_check layout.packages green "the real payload, all three packages" -- lnf_case ':'
+S=org.auros.shelf.desktop; M=org.auros.simple.desktop; A=org.auros.mac.desktop
+run_check layout.packages green "the real payload, all four packages" -- lnf_case ':'
+run_check layout.packages red   "the mac package did not install" -- lnf_case "rm -rf \"\$L/$A\""
+assert_has "names the mac package" "$A" "$T_LAST_OUT"
+run_check layout.packages red   "the mac layout drops the input-method indicator (Marathi users cannot see how they are typing)" \
+  -- lnf_case "sed -i '/addWidget(\"org.kde.plasma.kimpanel\")/d' \"\$L/$A/contents/layouts/org.kde.plasma.desktop-layout.js\""
+assert_has "names kimpanel" "org.kde.plasma.kimpanel" "$T_LAST_OUT"
+run_check layout.packages red   "the Windows layout drops the input-method indicator" \
+  -- lnf_case "sed -i '/addWidget(\"org.kde.plasma.kimpanel\")/d' \"\$L/org.auros.windows.desktop/contents/layouts/org.kde.plasma.desktop-layout.js\""
+run_check layout.packages red   "the mac layout has no task buttons in its dock" \
+  -- lnf_case "sed -i '/addWidget(\"org.kde.plasma.icontasks\")/d' \"\$L/$A/contents/layouts/org.kde.plasma.desktop-layout.js\""
 run_check layout.packages red   "the simple package did not install" -- lnf_case "rm -rf \"\$L/$M\""
 assert_has "names the package" "$M" "$T_LAST_OUT"
 run_check layout.packages red   "the shelf package did not install" -- lnf_case "rm -rf \"\$L/$S\""
@@ -277,6 +290,96 @@ assert_has "names the missing widget" "org.kde.plasma.systemtray" "$T_LAST_OUT"
 # THE FALSE GREEN this check is shaped against: the widget is gone but a comment still names it.
 run_check layout.packages red   "the task buttons are gone and only a comment still mentions org.kde.plasma.icontasks" \
   -- lnf_case "sed -i 's/.*addWidget(\"org.kde.plasma.icontasks\").*/\\/\\/ org.kde.plasma.icontasks used to be here/' \"\$L/$S/contents/layouts/org.kde.plasma.desktop-layout.js\""
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "choosing the layout — one setting, Windows unless a recipe says otherwise, nothing unknown"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# One mechanism: a recipe's derived layer runs `set-desktop-layout <name>`, which writes the package id
+# to /etc/auros/desktop-layout and into [KDE] LookAndFeelPackage of /etc/xdg/kdeglobals; auros-first-run
+# reads the file. These run the REAL helper against a fake root holding the real payload.
+HELPER="$D/set-desktop-layout"
+assert_file "the helper is in the payload" "$HELPER"
+
+# fresh_root — a new fake root holding the real payload, in $CHOSEN_ROOT. Made in THIS shell, not in
+# choose_case, because run_check runs its command in a subshell and a root made there is invisible here.
+fresh_root() {
+  CHOSEN_ROOT="$(newroot)"; T_TMPDIRS+=("$CHOSEN_ROOT")
+  mkdir -p "$CHOSEN_ROOT/etc/xdg" "$CHOSEN_ROOT/usr/share/plasma/look-and-feel"
+  cp -R "$D/lookandfeel/." "$CHOSEN_ROOT/usr/share/plasma/look-and-feel/"
+  cp "$D/xdg/kdeglobals" "$CHOSEN_ROOT/etc/xdg/kdeglobals"
+}
+# choose_case <mutation> <args...> — the mutation is shell run with $R as the root, before the helper.
+choose_case() {
+  ( R="$CHOSEN_ROOT"; eval "$1" ) || { echo "the mutation itself failed: $1"; return 0; }
+  shift
+  AUROS_LAYOUT_ROOT="$CHOSEN_ROOT" bash "$HELPER" "$@"
+}
+kde_lnf() { awk '/^[[:space:]]*\[/ { k = ($0 == "[KDE]"); next } k && index($0, "LookAndFeelPackage=") == 1 { sub(/^[^=]*=/, ""); print }' "$1"; }
+
+for pair in windows:org.auros.windows.desktop browser-first:org.auros.shelf.desktop \
+            simple:org.auros.simple.desktop mac:org.auros.mac.desktop; do
+  name="${pair%%:*}"; id="${pair#*:}"
+  fresh_root; CHOSEN_ROOT_SAVED="$CHOSEN_ROOT"
+  run_check layout.choose green "set-desktop-layout $name" -- choose_case ':' "$name"
+  assert_eq "$name: /etc/auros/desktop-layout names $id" "$id" "$(cat "$CHOSEN_ROOT_SAVED/etc/auros/desktop-layout" 2>&1)"
+  assert_eq "$name: kdeglobals [KDE] LookAndFeelPackage is $id, once" "$id" "$(kde_lnf "$CHOSEN_ROOT_SAVED/etc/xdg/kdeglobals")"
+  assert_eq "$name: every other line of the shared kdeglobals is untouched" \
+    "$(grep -v '^LookAndFeelPackage=' "$D/xdg/kdeglobals")" "$(grep -v '^LookAndFeelPackage=' "$CHOSEN_ROOT_SAVED/etc/xdg/kdeglobals")"
+done
+# Every name the helper knows is a package the build ships, and every shipped package has a name.
+NAMES_IDS="$(sed -nE 's/^ +[a-z-]+\) +ID=(org\.auros\.[a-z]+\.desktop) ;;$/\1/p' "$HELPER" | sort | tr '\n' ' ')"
+assert_eq "the helper's names map onto exactly the packages the build validates" \
+  "$(printf '%s\n' $LNF_IDS | sort | tr '\n' ' ')" "$NAMES_IDS"
+
+fresh_root; run_check layout.choose red "an unknown name (macos)" -- choose_case ':' macos
+assert_has "says which names exist" "windows|browser-first|simple|mac" "$T_LAST_OUT"
+assert_nofile "and records nothing" "$CHOSEN_ROOT/etc/auros/desktop-layout"
+assert_eq "and leaves kdeglobals alone" "$(cat "$D/xdg/kdeglobals")" "$(cat "$CHOSEN_ROOT/etc/xdg/kdeglobals")"
+fresh_root; run_check layout.choose red "no name at all" -- choose_case ':'
+fresh_root; run_check layout.choose red "a raw package id instead of a name" -- choose_case ':' org.auros.mac.desktop
+fresh_root; run_check layout.choose red "a path instead of a name" -- choose_case ':' ../../../tmp/evil
+fresh_root; run_check layout.choose red "the named package is not in this image" \
+  -- choose_case 'rm -rf "$R/usr/share/plasma/look-and-feel/org.auros.mac.desktop"' mac
+assert_has "says users would get no panel" "no panel" "$T_LAST_OUT"
+fresh_root; run_check layout.choose red "this image has no /etc/xdg/kdeglobals (not an Auros base)" \
+  -- choose_case 'rm "$R/etc/xdg/kdeglobals"' simple
+fresh_root; run_check layout.choose green "[KDE] exists without the key: it is added under [KDE]" \
+  -- choose_case 'printf "[General]\nLookAndFeelPackage=wrong\n[KDE]\nSingleClick=false\n" > "$R/etc/xdg/kdeglobals"' simple
+assert_eq "…into [KDE], not the [General] copy KConfig never reads for it" "org.auros.simple.desktop" "$(kde_lnf "$CHOSEN_ROOT/etc/xdg/kdeglobals")"
+assert_has "…and the [General] line is left as it was" "LookAndFeelPackage=wrong" "$(cat "$CHOSEN_ROOT/etc/xdg/kdeglobals")"
+fresh_root; choose_case ':' simple >/dev/null
+run_check layout.choose green "run again on the same image, simple then mac" -- choose_case ':' mac
+assert_eq "…the second wins, with exactly one LookAndFeelPackage line in the file" \
+  "1 org.auros.mac.desktop" "$(grep -c '^LookAndFeelPackage=' "$CHOSEN_ROOT/etc/xdg/kdeglobals") $(cat "$CHOSEN_ROOT/etc/auros/desktop-layout")"
+
+# The build refuses a package that has no name in the helper — else no recipe could choose it.
+NAME_BLOCK="$(extract_between "$W" '^install_file "\$SRC/set-desktop-layout"' '^did "recipes choose the layout')"
+name_case() { # <sed program applied to a copy of the helper>
+  local root; root="$(newroot)"; mkdir -p "$root/src"
+  sed "$1" "$HELPER" > "$root/src/set-desktop-layout"
+  SRC="$root/src" AUROS_LIBEXEC="$root/usr/libexec/auros" LNF_IDS="$LNF_IDS" bash -c "$PRE
+install_file() { mkdir -p \"\$(dirname \"\$2\")\"; cp \"\$1\" \"\$2\"; }
+$NAME_BLOCK"
+}
+run_check layout.choose green "the build's name check, on the real helper" -- name_case ''
+run_check layout.choose red   "the build's name check, on a helper that lost its mac line" -- name_case '/ID=org.auros.mac.desktop ;;/d'
+assert_has "says no recipe could choose it" "no recipe could choose it" "$T_LAST_OUT"
+
+# auros-first-run: the file decides; no file, or anything not shipped, means Windows.
+FR_BLOCK="$(extract_between "$D/welcome/auros-first-run" '^# Which layout\. A recipe' '^echo "desktop-layout: \$LNF"' \
+  | rootify /etc/auros/desktop-layout /usr/share/plasma/look-and-feel)"
+firstrun_case() { # <content of /etc/auros/desktop-layout, or 'absent'>
+  local root; root="$(newroot)"; mkdir -p "$root/etc/auros" "$root/usr/share/plasma/look-and-feel"
+  cp -R "$D/lookandfeel/." "$root/usr/share/plasma/look-and-feel/"
+  [ "$1" = absent ] || printf '%s\n' "$1" > "$root/etc/auros/desktop-layout"
+  ROOT="$root" bash -c "$FR_BLOCK" | tail -1
+}
+assert_eq "first-run: no setting → the Windows layout" "desktop-layout: org.auros.windows.desktop" "$(firstrun_case absent)"
+assert_eq "first-run: the mac setting → the mac layout" "desktop-layout: org.auros.mac.desktop" "$(firstrun_case org.auros.mac.desktop)"
+assert_eq "first-run: the simple setting → the simple layout" "desktop-layout: org.auros.simple.desktop" "$(firstrun_case org.auros.simple.desktop)"
+assert_eq "first-run: a well-formed id this image does not ship → Windows" "desktop-layout: org.auros.windows.desktop" "$(firstrun_case org.auros.nope.desktop)"
+assert_eq "first-run: a path in the file → Windows" "desktop-layout: org.auros.windows.desktop" "$(firstrun_case ../../etc/passwd)"
+assert_eq "first-run: an empty file → Windows" "desktop-layout: org.auros.windows.desktop" "$(firstrun_case '')"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "the first-run stamp — the check that stops the wizard reopening every morning"
