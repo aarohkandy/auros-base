@@ -54,6 +54,19 @@ build_testwrap() {
   return 0
 }
 
+# bib_image — the bootc-image-builder to run: $BIB_IMAGE if set, else bib.lock's pin. Refuses anything
+# not pinned by digest. It used to be `:latest` with `podman pull … || true`, so the builder could
+# change between two runs of the same matrix and a failed pull was silently replaced by the cache.
+bib_image() {
+  local img="${BIB_IMAGE:-}"
+  [ -n "$img" ] || img="$(sed -n 's/^BIB_IMAGE=//p' "$BASE_REPO/bib.lock" 2>/dev/null | head -1)"
+  [[ "$img" =~ @sha256:[a-f0-9]{64}$ ]] || {
+    echo "bootc-image-builder '${img:-<unset>}' is not pinned by digest (bib.lock BIB_IMAGE / \$BIB_IMAGE) — refusing" >&2
+    return 1
+  }
+  printf '%s\n' "$img"
+}
+
 # build_qcow2 <image> <outdir> — bootc-image-builder. Never pipe this through anything (D19).
 build_qcow2() {
   local img=$1 out=$2
@@ -72,13 +85,15 @@ groups = ["wheel"]
 mountpoint = "/"
 minsize = "${ROOTFS_MINSIZE:-20 GiB}"
 TOML
-  podman pull "${BIB_IMAGE:-quay.io/centos-bootc/bootc-image-builder:latest}" >/dev/null 2>&1 || true
+  local bib; bib=$(bib_image) || return 1
+  podman pull "$bib" > "$AUROS_RUN_DIR/logs/bib-pull.log" 2>&1 \
+    || { tail -20 "$AUROS_RUN_DIR/logs/bib-pull.log" >&2; echo "could not pull bootc-image-builder $bib" >&2; return 1; }
   log "bootc-image-builder -> qcow2 (this is the slow step)"
   podman run --rm --privileged --security-opt label=type:unconfined_t \
     -v "$out":/output \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     -v "$AUROS_RUN_DIR/work/bib-config.toml":/config.toml:ro \
-    "${BIB_IMAGE:-quay.io/centos-bootc/bootc-image-builder:latest}" \
+    "$bib" \
     --type qcow2 --rootfs "${BIB_ROOTFS:-xfs}" --local "$img" \
     > "$AUROS_RUN_DIR/logs/bib.log" 2>&1 \
     || { tail -40 "$AUROS_RUN_DIR/logs/bib.log" >&2; return 1; }
