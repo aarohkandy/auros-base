@@ -1,0 +1,20 @@
+# The pinned bootc-image-builder. Read by matrix/run/lib/vm.sh and tools/make-install-media.sh;
+# nothing else names a bib image.
+#
+# Pinned BY DIGEST. bib is the program that turns our image into the bytes a laptop boots, and it ran
+# as `:latest` with `podman pull … || true` — so the builder could change under us between two runs of
+# the same matrix, and a failed pull was silently ignored in favour of whatever was cached.
+#
+# Both consumers REFUSE a value that is not `<repo>@sha256:<64 hex>`. To move the pin, resolve the
+# tag read-only and paste the index digest here, in a commit of its own:
+#   skopeo inspect --raw docker://quay.io/centos-bootc/bootc-image-builder:latest | sha256sum
+#   (or: skopeo inspect --format '{{.Digest}}' docker://quay.io/centos-bootc/bootc-image-builder:latest)
+#
+# 2026-09-20: skopeo was not installed where this was resolved. The digest below was read from two
+# independent read-only registry answers that agreed: the `Docker-Content-Digest` header of
+# GET /v2/centos-bootc/bootc-image-builder/manifests/latest (content-type OCI image index), and
+# quay's tag API `manifest_digest` for `latest` (is_manifest_list=true, 4 child manifests,
+# last_modified 2026-06-18). It is the multi-arch INDEX digest, so podman picks the host's platform.
+BIB_IMAGE=quay.io/centos-bootc/bootc-image-builder@sha256:2b52843ea2bfda73b0a08d97e76b734393b1d3a804681b9fabb26723bd3a2f0b
+BIB_RESOLVED_FROM=quay.io/centos-bootc/bootc-image-builder:latest
+BIB_RESOLVED_AT=2026-09-20
