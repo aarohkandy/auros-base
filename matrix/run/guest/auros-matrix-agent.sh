@@ -237,7 +237,9 @@ tick
 ASSERT=/usr/libexec/auros/assert-policy
 P_PROBLEMS=''
 if [ -x "$ASSERT" ]; then
-  if ! runuser -u "$TEST_USER" -- "$ASSERT" "$POLICY_MODE" > /tmp/policy-assert.log 2>&1; then
+  # As ROOT, not $TEST_USER: assert-policy drops to aurosprobe itself. $TEST_USER is in wheel
+  # (Containerfile.testwrap), an administrator -- run 35616444839 B5 measured that subject, not the unprivileged one.
+  if ! "$ASSERT" "$POLICY_MODE" > /tmp/policy-assert.log 2>&1; then
     P_PROBLEMS="${ASSERT} ${POLICY_MODE} exited non-zero: $(grep -m3 '^FAIL' /tmp/policy-assert.log | tr '\n' ' ')… $(tail -3 /tmp/policy-assert.log | tr '\n' ' ')"
   fi
   STAMPED=$(cat /usr/lib/auros/policy-mode 2>/dev/null || echo '')

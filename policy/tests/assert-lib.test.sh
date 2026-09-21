@@ -47,6 +47,20 @@ cat > "$BIN/pkcheck" <<'EOS'
 [ "${PK_RC:-1}" = 0 ] || echo "stub pkcheck: answer ${PK_RC:-1}" >&2
 exit "${PK_RC:-1}"
 EOS
+# A stub pkaction: the live authority's enumeration. $PKACTION=dead fails it as a dead polkitd would.
+# org.example.gone is the one id it never lists -- an action no installed mechanism registers.
+cat > "$BIN/pkaction" <<'EOS'
+#!/usr/bin/env bash
+[ "${PKACTION:-live}" = dead ] && { echo 'Error enumerating actions: Cannot connect' >&2; exit 1; }
+printf '%s\n' org.auros.policy.control-allow org.example.action org.freedesktop.policykit.exec \
+    org.freedesktop.NetworkManager.enable-disable-network ${PK_EXTRA:-}
+EOS
+# A stub id that reports $ID_GROUPS for -nG and defers to the real one otherwise.
+cat > "$BIN/id" <<'EOS'
+#!/usr/bin/env bash
+if [ "${1:-}" = -nG ] && [ -n "${ID_GROUPS:-}" ]; then echo "$ID_GROUPS"; exit 0; fi
+exec /usr/bin/id "$@"
+EOS
 # A stub dbus-send that enforces what the stock system-bus policy enforces for an unprivileged sender
 # (measured on dbus-broker 37 and dbus-daemon 1.16, Fedora 43): methods on the org.freedesktop.DBus
 # interface of the driver are allowed, org.freedesktop.DBus.Peer.Ping is refused. $BUS=dead refuses
@@ -82,6 +96,7 @@ exit "$rc"
 EOS
 fi
 chmod 0755 "$BIN"/*
+export ID_GROUPS="${ID_GROUPS:-aurosprobe}"  # never the host user's own groups
 export PATH="$BIN:$PATH"
 export AUROS_KDE_SETTLE=3 AUROS_ASSERT_TIMEOUT=6
 
@@ -163,6 +178,31 @@ out="$(PK_RC=127 ctl)"; rc=$?
 grep -q 'control-allow returned pkcheck 127 (stub pkcheck: answer 127)' <<<"$(tail -3 <<<"$out")" \
     && ok "  ...naming the pkcheck answer and its message in the last three lines" \
     || no "  ...naming the pkcheck answer and its message" "$out"
+
+echo "── an unregistered action (run 35616444839: PackageKit is not on this base) ───────────────"
+reset; PK_RC=127 a_deny hard pkg.gone org.example.gone >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "locked + action polkit does not enumerate => pass" || no "locked + unregistered => pass" "$(last)"
+[ "${#A_CORROBORATING[@]}" = 1 ] && ok "  ...counted as corroborating, never primary" || no "  ...counted as corroborating"
+reset; PK_RC=127 a_deny control pkg.gone org.example.gone >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && grep -q '^note|control.pkg.gone|.*not registered' <<<"$(last)" \
+    && ok "open control + unregistered => a note, not a failure" || no "open control + unregistered => note" "$(last)"
+reset; PKACTION=dead PK_RC=127 a_deny hard pkg.gone org.example.gone >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "pkaction cannot enumerate + pkcheck 127 => FAIL (an error is never absence)" || no "dead pkaction + 127 => FAIL" "$(last)"
+reset; PK_RC=127 a_deny control x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "a REGISTERED action answering 127 => FAIL (an error is not an answer)" || no "registered + 127 => FAIL" "$(last)"
+
+echo "── the probe subject is not an administrator ───────────────────────────────────────────────"
+out="$(ID_GROUPS='auros wheel' PK_RC=0 ctl)"; rc=$?
+[ "$rc" = 1 ] && grep -q 'is in wheel' <<<"$(tail -3 <<<"$out")" \
+    && ok "a subject in wheel => ABORT, named in the last three lines" || no "a subject in wheel => ABORT" "$out"
+out="$(ID_GROUPS='aurosprobe' PK_RC=0 ctl)"; rc=$?
+[ "$rc" = 0 ] && ok "a subject in no admin group => controls pass" || no "a non-admin subject => controls pass" "$out"
+AGENT="$HERE/../../matrix/run/guest/auros-matrix-agent.sh"
+if grep -q runuser <<<"$(grep -E '"\$ASSERT" "\$POLICY_MODE"' "$AGENT")"; then
+    no "B5 runs assert-policy via runuser as the harness's wheel user, so it never drops to aurosprobe"
+else
+    ok "B5 runs assert-policy as root, so assert-policy itself drops to aurosprobe"
+fi
 
 echo "── a_deny refuses to guess ─────────────────────────────────────────────────────────────────"
 reset; a_deny nonsense x org.example.action >/dev/null 2>&1
