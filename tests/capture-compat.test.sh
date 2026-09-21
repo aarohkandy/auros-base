@@ -113,6 +113,32 @@ mkmachine() { # -> prints the root dir. Options as KEY=VALUE arguments; see the 
         printf '04f2\n' > "$d/sys/bus/usb/devices/1-1/idVendor"
         printf 'b39a\n' > "$d/sys/bus/usb/devices/1-1/idProduct"
         printf '0e\n'   > "$d/sys/bus/usb/devices/1-1:1.0/bInterfaceClass" ;;
+      # ── virtual machines, one per piece of evidence probe_source() reads ──────────────────────
+      # Each is a SINGLE signal on top of the LENOVO baseline, so a pass or a refusal is attributable
+      # to exactly one reader — except `qemu`, which is the attack as it was run: every signal a
+      # real QEMU guest shows, all at once.
+      qemu)
+        printf 'QEMU\n' > "$d/sys/class/dmi/id/sys_vendor"
+        printf 'Standard PC (i440FX + PIIX4, 1996)\n' > "$d/sys/class/dmi/id/product_name"
+        printf 'pc-i440fx-9.0\n' > "$d/sys/class/dmi/id/product_version"
+        printf 'model name\t: QEMU Virtual CPU version 2.5+\nflags\t\t: fpu vme de pse hypervisor lahf_lm\n' > "$d/proc/cpuinfo"
+        _pci "$d" 0000:00:03.0 1af4 1000 020000 ;;           # virtio-net
+      hv-flag)       printf 'flags\t\t: fpu vme de pse tsc msr hypervisor lahf_lm\n' >> "$d/proc/cpuinfo" ;;
+      flags-plain)   printf 'flags\t\t: fpu vme de pse tsc msr pae mce lahf_lm\n' >> "$d/proc/cpuinfo" ;;
+      xen-hyp)       mkdir -p "$d/sys/hypervisor"; printf 'xen\n' > "$d/sys/hypervisor/type" ;;
+      dmi-vmware)    printf 'VMware, Inc.\n' > "$d/sys/class/dmi/id/sys_vendor" ;;
+      dmi-qemu-product) printf 'Standard PC (Q35 + ICH9, 2009)\n' > "$d/sys/class/dmi/id/product_name" ;;
+      hyperv)
+        printf 'Microsoft Corporation\n' > "$d/sys/class/dmi/id/sys_vendor"
+        printf 'Virtual Machine\n' > "$d/sys/class/dmi/id/product_name" ;;
+      # Microsoft DOES make laptops. The vendor alone must not be enough.
+      surface)
+        printf 'Microsoft Corporation\n' > "$d/sys/class/dmi/id/sys_vendor"
+        printf 'Surface Laptop 2\n' > "$d/sys/class/dmi/id/product_name"
+        printf '124I:00036T:000M:0300000D:03P:0\n' > "$d/sys/class/dmi/id/product_version" ;;
+      vbox-oracle)
+        printf 'Oracle Corporation\n' > "$d/sys/class/dmi/id/sys_vendor"
+        printf 'VirtualBox\n' > "$d/sys/class/dmi/id/product_name" ;;
       usb-not-a-webcam)
         mkdir -p "$d/sys/bus/usb/devices/2-1" "$d/sys/bus/usb/devices/2-1:1.0"
         printf '0bda\n' > "$d/sys/bus/usb/devices/2-1/idVendor"
@@ -183,8 +209,12 @@ M="$(mkmachine efi-sb-on tpm2 pci-full wlan-netdev webcam)"
 ROW="$(capture "$M")"
 assert_eq "model is vendor + product + the human-recognisable version" \
   "LENOVO-20AQ006HUS-ThinkPad-T440s" "$(field "$ROW" model)"
-assert_eq "source is always physical — this script only runs on a real machine" \
-  "physical" "$(field "$ROW" source)"
+# This line used to read: assert_eq "source is always physical — this script only runs on a real
+# machine" "physical". Nothing enforced the premise: emit_row() hard-coded the value, so the
+# assertion could not fail and a QEMU-shaped tree produced a physical row that quoted as
+# TESTED · WORKS. Group 1b is where source is tested now, in both directions.
+assert_eq "source is vm under a test root — a directory is not a machine" \
+  "vm" "$(field "$ROW" source)"
 assert_eq "year comes from the BIOS date" "2014" "$(field "$ROW" year)"
 assert_eq "cpu drops the trademark noise and the clock speed" \
   "Intel-Core-i5-4300U" "$(field "$ROW" cpu)"
@@ -205,6 +235,88 @@ assert_has "every fact names where it was read" "/sys/class/dmi/id/sys_vendor" "
 assert_has "a MISS is recorded too, with the path that was tried" "absent or unreadable" "$(cat "$FACTS")"
 assert_has "the raw cpu string is kept, so the cleanup is checkable" "Intel(R) Core(TM) i5-4300U" "$(cat "$FACTS")"
 assert_has "the test root is recorded loudly — this is not a real machine" "THIS IS NOT A REAL MACHINE" "$(cat "$FACTS")"
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+group "1b — source is OBSERVED: a hypervisor is seen, recorded, and refuses the physical-only columns"
+
+# What probe_source() concluded, read out of the facts file. Under a test root the ROW's source is
+# forced to vm, so this recorded fact is the only place the probe's own answer is visible — which is
+# exactly why the script writes it.
+facts_of() { # <root> [args...] -> facts file contents
+  local root="$1"; shift
+  local f; f="$(newroot)/facts.tsv"
+  AUROS_TEST_ROOT="$root" bash "$TOOL" --row-only --tester t --facts-out "$f" "$@" >/dev/null 2>&1
+  cat "$f" 2>/dev/null
+}
+# green when the probe saw a physical machine, red when it saw a guest. One check id, both ways.
+observed_physical() { # <root>
+  local got; got="$(facts_of "$1" | awk -F'\t' '$1=="source.observed"{print $2}')"
+  case "$got" in
+    physical) return 0 ;;
+    vm)       return 1 ;;
+    *)        printf 'source.observed is [%s] — neither vm nor physical; the fact was not recorded\n' "$got"; return 2 ;;
+  esac
+}
+
+run_check source-observed green "a 2014 ThinkPad with no hypervisor signal is physical" -- observed_physical "$(mkmachine)"
+run_check source-observed green "a cpuinfo flags line WITHOUT the hypervisor bit is still physical" -- observed_physical "$(mkmachine flags-plain)"
+run_check source-observed green "a Microsoft Surface is physical — the vendor alone is not evidence" -- observed_physical "$(mkmachine surface)"
+run_check source-observed red   "the attack: a QEMU-shaped tree (vendor, product, cpu flag, virtio NIC)" -- observed_physical "$(mkmachine qemu)"
+run_check source-observed red   "the cpuinfo hypervisor flag alone" -- observed_physical "$(mkmachine hv-flag)"
+run_check source-observed red   "/sys/hypervisor/type alone" -- observed_physical "$(mkmachine xen-hyp)"
+run_check source-observed red   "a hypervisor DMI vendor alone (VMware, Inc.)" -- observed_physical "$(mkmachine dmi-vmware)"
+run_check source-observed red   "a hypervisor DMI product alone (QEMU's Q35 machine type)" -- observed_physical "$(mkmachine dmi-qemu-product)"
+run_check source-observed red   "Microsoft Corporation + Virtual Machine (Hyper-V)" -- observed_physical "$(mkmachine hyperv)"
+run_check source-observed red   "Oracle Corporation + VirtualBox" -- observed_physical "$(mkmachine vbox-oracle)"
+
+QF="$(facts_of "$(mkmachine qemu)")"
+assert_has "the evidence names the path it read and the value it found" \
+  "/sys/class/dmi/id/sys_vendor = QEMU" "$QF"
+assert_has "…including the cpu flag" "/proc/cpuinfo flags contains 'hypervisor'" "$QF"
+assert_has "a MISS is recorded too: /sys/hypervisor/type was looked at" \
+  "/sys/hypervisor/type (absent" "$(facts_of "$(mkmachine)")"
+
+group "a synthetic tree NEVER produces source=physical, whatever it looks like"
+assert_eq "a physical-looking tree under a test root: the row says vm" \
+  "vm" "$(field "$(capture "$(mkmachine efi-sb-on tpm2 pci-full wlan-netdev webcam)")" source)"
+assert_eq "a QEMU-shaped tree under a test root: the row says vm" \
+  "vm" "$(field "$(capture "$(mkmachine qemu)")" source)"
+assert_has "the facts say WHY it is vm" "a directory is not a machine" "$(facts_of "$(mkmachine)")"
+
+group "on an observed guest the five physical-only columns are refused, with what was read"
+for col in $PHYSICAL_ONLY; do
+  run_capture guest-refusal red "a QEMU guest answering --$col ok is REFUSED" "$(mkmachine qemu)" "--$col" ok
+  assert_has "the refusal for $col prints the sysfs path and value it read" \
+    "/sys/class/dmi/id/sys_vendor = QEMU" "$T_LAST_OUT"
+done
+run_capture guest-refusal red "one signal is enough: the cpu flag alone refuses --wifi ok" "$(mkmachine hv-flag)" --wifi ok
+assert_has "…and names the flag" "/proc/cpuinfo flags contains 'hypervisor'" "$T_LAST_OUT"
+# The green halves. Without them a guard that refused everything would pass every line above.
+run_capture guest-refusal green "a QEMU guest answering only gpu and audio — a guest has those" "$(mkmachine qemu)" --gpu ok --audio ok
+run_capture guest-refusal green "a QEMU guest answering nothing" "$(mkmachine qemu)"
+run_capture guest-refusal green "a physical tree answering --wifi ok (no hypervisor seen)" "$(mkmachine)" --wifi ok
+run_capture guest-refusal green "a Surface answering --wifi ok — Microsoft makes laptops" "$(mkmachine surface)" --wifi ok
+
+group "the REAL-machine branch: with the test-root override removed, the row says what was observed"
+# On a real machine AUROS_TEST_ROOT is unset, so `source` is whatever probe_source() saw. That branch
+# cannot be reached from a test root by design — so it is reached by mutating the one guard that
+# forces vm, the same way group 7 reaches the physical-only guard. If the anchor moves, the mutant is
+# byte-identical and would score the forcing as absent; that aborts instead.
+REALBRANCH="$(newroot)/real-branch.sh"
+awk '
+  /^if \[ -n "\$R" \]; then$/ && !done { getline nxt
+    if (nxt ~ /^  SOURCE="vm"$/) { print "if false; then   # MUTANT: behave as on a real machine"; print nxt; done=1; next }
+    print; print nxt; next }
+  { print }
+' "$TOOL" > "$REALBRANCH"
+cmp -s "$REALBRANCH" "$TOOL" && t_abort "the real-branch mutation changed nothing — the test-root override for source moved. Fix this test before trusting group 1b."
+row_physical() { # <script> <root> -> 0 when the ROW says physical
+  local got; got="$(field "$(AUROS_TEST_ROOT="$2" bash "$1" --row-only --tester t --date 2026-09-21)" source)"
+  [ "$got" = physical ]
+}
+run_check real-branch green "real branch, no hypervisor: the row says physical" -- row_physical "$REALBRANCH" "$(mkmachine)"
+run_check real-branch red   "real branch, a QEMU guest: the row says vm" -- row_physical "$REALBRANCH" "$(mkmachine qemu)"
+run_check real-branch red   "the SHIPPING script, a physical-looking tree: still vm — the override is what fires" -- row_physical "$TOOL" "$(mkmachine)"
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 group "2 — firmware and Secure Boot: read, never inferred"
@@ -524,17 +636,36 @@ if [ -n "$LINT" ] && [ -f "$LINT" ] && command -v node >/dev/null 2>&1; then
   }
   FULL="$(capture "$(mkmachine efi-sb-on tpm2 pci-full wlan-netdev webcam)" \
     --wifi ok --trackpad ok --suspend ok --brightness ok --gpu ok --audio ok --webcam ok)"
-  run_check lint-accepts green "compat-lint accepts a completed row from this tool" -- lint_a_row "$FULL"
-  run_check lint-accepts green "compat-lint accepts a PARTIAL row (human columns still empty)" -- \
+  # THE ATTACK, end to end. This used to be a GREEN assertion — "compat-lint accepts a completed row
+  # from this tool" — over a row captured from a directory, with seven human answers, stamped
+  # physical. That is the row that quoted TESTED · WORKS. It is a vm row now, and a vm row carrying
+  # the physical-only columns is refused by the lint and takes the file with it.
+  run_check lint-accepts red "a test-root row with all seven answered is REFUSED — it can never be quoted" -- lint_a_row "$FULL"
+  assert_has "…for the physical-only rule, not incidentally" "vm row claims wifi" "$T_LAST_OUT"
+  run_check lint-accepts green "compat-lint accepts a PARTIAL test-root row (an honest vm row)" -- \
     lint_a_row "$(capture "$(mkmachine efi-sb-on tpm2 pci-full wlan-netdev webcam)")"
+
+  # What this tool emits ON A REAL MACHINE, which a test root cannot produce by design: the same row
+  # with source=physical, exactly as the real branch writes it (group 1b drives that branch). The
+  # rest of this group is about the lint's other rules, so it starts from that.
+  s_i="$(col_index source)"
+  PHYS="$(printf '%s' "$FULL" | awk -F'\t' -v OFS='\t' -v n="$s_i" '{ $n="physical"; print }')"
+  run_check lint-accepts green "compat-lint accepts the completed row as a real machine emits it" -- lint_a_row "$PHYS"
   # The red half, so this is a check rather than a demonstration: the same row with the ids column
   # replaced by the marketing name the whole column exists to keep out.
   i="$(col_index ids)"
+  FULL="$PHYS"
   MARKETED="$(printf '%s' "$FULL" | awk -F'\t' -v OFS='\t' -v n="$i" '{ $n="wifi=Intel Wireless-AC 7260"; print }')"
   run_check lint-accepts red "and REFUSES the same row with a marketing name in ids" -- lint_a_row "$MARKETED"
   # …and with no ids at all, which is the other way a row stops being matchable.
   EMPTY_IDS="$(printf '%s' "$FULL" | awk -F'\t' -v OFS='\t' -v n="$i" '{ $n=""; print }')"
   run_check lint-accepts red "and REFUSES a physical row with no ids at all" -- lint_a_row "$EMPTY_IDS"
+  # …and with nobody's name on it: the other half of the ThinkPad attack, which was a physical row
+  # with seven oks and an empty tester and tested_on.
+  t_i="$(col_index tester)"; d_i="$(col_index tested_on)"
+  UNSIGNED="$(printf '%s' "$PHYS" | awk -F'\t' -v OFS='\t' -v a="$t_i" -v b="$d_i" '{ $a=""; $b=""; print }')"
+  run_check lint-accepts red "and REFUSES a physical row nobody signed or dated" -- lint_a_row "$UNSIGNED"
+  assert_has "…naming the missing tester" "empty tester" "$T_LAST_OUT"
 else
   t_exempt lint-accepts "hardware/compat.tsv + tools/compat-lint.mjs (meta repo, D6) are not checked out beside auros-base, or node is absent — the end-to-end lint assertion did not run. Looked for: $REPO/../hardware/compat.tsv"
   note "end-to-end lint check SKIPPED — see the exemption above."

@@ -376,6 +376,77 @@ describe('finding the table — it says where it looked', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// PROVENANCE, and the ids rule, RE-DERIVED here — this tool's header says it does not trust
+// compat-lint to have run, and both of these were absent from it.
+//
+// The attack: a physical row for ThinkPad-T440s, seven `ok`s, verdict supported, valid ids, and
+// `tester` and `tested_on` both EMPTY. It came back TESTED · WORKS, --require-quotable exited 0, and
+// the evidence line read "tested (no date) by (no tester)". The strongest sentence this tool can
+// say required nobody's name and no date. And a physical row with an EMPTY ids column quoted
+// TESTED · WORKS too, because the ids rule lived only in compat-lint.
+describe('RULE 4 — the WORKS answer needs a person and a date on the row', () => {
+  test('the attack exactly as it was run: no tester, no date → CAVEAT, never WORKS', () => {
+    const r = ask(file(WORKING({ tester: '', tested_on: '' })))
+    assert.notEqual(r.answer, ANSWER.WORKS, `an unsigned, undated row quoted as WORKS:\n${r.say}`)
+    assert.equal(r.answer, ANSWER.CAVEAT)
+    assert.equal(r.quotable, false)
+    assert.match(r.say, /nobody's name and no date/, `the caveat did not say what is missing:\n${r.say}`)
+  })
+
+  test('each half on its own is still a caveat, and says which half', () => {
+    const noName = ask(file(WORKING({ tester: '' })))
+    assert.equal(noName.answer, ANSWER.CAVEAT)
+    assert.match(noName.say, /nobody's name/)
+    assert.doesNotMatch(noName.say, /no date/, 'a dated row was said to have no date')
+
+    const noDate = ask(file(WORKING({ tested_on: '' })))
+    assert.equal(noDate.answer, ANSWER.CAVEAT)
+    assert.match(noDate.say, /no date/)
+    assert.doesNotMatch(noDate.say, /nobody's name/, 'a signed row was said to have no name')
+  })
+
+  test('one unsigned row among two signed ones still blocks WORKS', () => {
+    // Worst case across every row, as for the capabilities: a clean majority does not launder an
+    // unsigned observation into the quote.
+    const r = ask(file(WORKING(), WORKING({ tester: '' }), WORKING()))
+    assert.equal(r.answer, ANSWER.CAVEAT)
+    assert.deepEqual(r.unsigned, [3], 'the unsigned row must be named by line')
+  })
+
+  test('the control still holds: signed and dated is WORKS', () => {
+    assert.equal(ask(file(WORKING())).answer, ANSWER.WORKS)
+  })
+})
+
+describe('RULE 5 — a physical row with no ids cannot be quoted from', () => {
+  test('an empty ids column on a physical row refuses the file', () => {
+    const e = refuses(file(WORKING({ ids: '' })), 'a physical row with no ids')
+    assert.match(e.message, /empty ids column/, `the refusal did not name the column:\n${e.message}`)
+    assert.match(e.message, /fixture\.tsv:2/, 'the refusal did not name the line')
+  })
+
+  test('the control: the same row WITH ids loads and quotes', () => {
+    assert.equal(ask(file(WORKING())).answer, ANSWER.WORKS)
+  })
+
+  test('a vm row needs no ids — it has no hardware to identify', () => {
+    assert.doesNotThrow(() => loadRows(file(WORKING({
+      source: 'vm', ids: '', wifi: '', trackpad: '', suspend: '', brightness: '', webcam: '',
+    })), 'fixture.tsv'))
+  })
+
+  test('a table whose header has no provenance or ids columns is refused as a schema error', () => {
+    // Not quietly caveating every row for a reason that is really "the column is missing".
+    for (const col of ['ids', 'tester', 'tested_on']) {
+      const header = COLS.filter((c) => c !== col)
+      const body = WORKING().split('\t').filter((_, i) => COLS[i] !== col).join('\t')
+      const e = refuses(`${header.join('\t')}\n${body}\n`, `a header with no ${col}`)
+      assert.match(e.message, new RegExp(`missing required column\\(s\\): ${col}`), e.message)
+    }
+  })
+})
+
 describe('the CLI, as a real process, with real exit codes', () => {
   let ROOT
   const root = () => (ROOT ??= mkdtempSync(join(tmpdir(), 'auros-quote-cli-')))
@@ -395,6 +466,20 @@ describe('the CLI, as a real process, with real exit codes', () => {
     const r = run(['--file', write(file(WORKING())), MODEL])
     assert.equal(r.exit, 0, r.out)
     assert.match(r.out, /TESTED · WORKS/)
+  })
+
+  test('the attack end to end: an unsigned, undated row fails --require-quotable', () => {
+    const path = write(file(WORKING({ tester: '', tested_on: '' })))
+    const r = run(['--file', path, '--require-quotable', MODEL])
+    assert.equal(r.exit, 3, `--require-quotable accepted an unsigned, undated row:\n${r.out}`)
+    assert.doesNotMatch(r.out, /TESTED · WORKS/)
+    assert.match(r.out, /TESTED · CAVEAT/)
+  })
+
+  test('a physical row with no ids exits 2 — refused, not quoted', () => {
+    const r = run(['--file', write(file(WORKING({ ids: '' }))), MODEL])
+    assert.equal(r.exit, 2, r.out)
+    assert.match(r.out, /empty ids column/)
   })
 
   test('exit 0 — but NEVER SEEN — for a model with no row', () => {

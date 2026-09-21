@@ -6,9 +6,11 @@
 // not-guessing. Given a list of models — the list a school reads off their asset register — it
 // returns, per model, exactly one of FOUR answers and the evidence behind it:
 //
-//   TESTED · WORKS      a physical row, every capability observed ok, verdict supported.
+//   TESTED · WORKS      a physical row, every capability observed ok, verdict supported, and a
+//                       person's name and a date on it.
 //   TESTED · CAVEAT     a physical row with something partial, something failing, something
-//                       untested, or a human verdict of supported-with-caveat.
+//                       untested, a human verdict of supported-with-caveat, or nobody's name or no
+//                       date on it.
 //   NEVER SEEN          no physical row exists. THIS IS THE COMMON ANSWER TODAY and it is the one
 //                       the tool is built to protect, because it is the one there is pressure to
 //                       dress up as the first.
@@ -113,7 +115,11 @@ export function loadRows (text, path = 'compat.tsv') {
   const lines = text.split('\n').filter((l) => l.trim() !== '')
   if (lines.length === 0) throw new Refusal(`${path} is empty — not even a header. Refusing to quote from nothing.`)
   const header = lines[0].split('\t').map((h) => h.trim())
-  const required = ['model', 'source', 'verdict', ...CAPABILITIES]
+  // `ids`, `tester` and `tested_on` are required because they are READ below: with the column
+  // absent, `at()` returns '' for every row and each rule that reads it would either refuse the
+  // whole file with a misleading message or — for provenance — caveat every row for a reason
+  // that is really a schema error. Name the schema error as one.
+  const required = ['model', 'source', 'verdict', 'ids', 'tester', 'tested_on', ...CAPABILITIES]
   const missing = required.filter((c) => !header.includes(c))
   if (missing.length) {
     throw new Refusal(
@@ -163,6 +169,18 @@ export function loadRows (text, path = 'compat.tsv') {
       }
       caps[c] = v
     }
+    // compat-lint's ids rule, RE-DERIVED rather than trusted (see the header of this function). A
+    // physical row with no numeric IDs cannot be matched against the next machine of that model,
+    // and a quote is exactly that match. It was absent here, so an unidentified row quoted
+    // TESTED · WORKS whenever compat-lint had not been run — and nothing requires it to have been.
+    const ids = at(cells, 'ids')
+    if (source === 'physical' && ids === '') {
+      throw new Refusal(`${where} is a physical row with an empty ids column. Without the numeric ` +
+        'PCI/USB IDs nobody can tell whether the next machine sold under this model name has the same ' +
+        'silicon inside, which is the only thing a quote is. Refusing to quote from this file until the ' +
+        'row is fixed; run tools/compat-lint.mjs.')
+    }
+
     rows.push({
       line: lineNo, source, model, verdict, caps,
       year: at(cells, 'year'), notes: at(cells, 'notes'),
@@ -231,8 +249,18 @@ export function classify (model, allRows) {
   const caveatVerdict = mine.some((r) => r.verdict === 'supported-with-caveat')
   const noVerdict = mine.some((r) => r.verdict === 'untested' || r.verdict === '')
 
+  // PROVENANCE. The strongest sentence this tool can say — "We have imaged this model and every one
+  // of … worked" — used to need no human's name and no date: a physical row with seven `ok`s and an
+  // empty `tester` and `tested_on` quoted TESTED · WORKS, and the evidence line printed
+  // "tested (no date) by (no tester)" underneath it. A row nobody signed and nobody dated is an
+  // anecdote, which is the word compat-lint's own ids rule already uses. It is never the WORKS
+  // answer; it is a caveat that names what is missing.
+  const unsigned = mine.filter((r) => r.tester === '').map((r) => r.line)
+  const undated = mine.filter((r) => r.tested_on === '').map((r) => r.line)
+
   const clean = untested.length === 0 && failing.length === 0 && partial.length === 0 &&
-                !caveatVerdict && !noVerdict && disagreements.length === 0
+                !caveatVerdict && !noVerdict && disagreements.length === 0 &&
+                unsigned.length === 0 && undated.length === 0
 
   if (clean) {
     return {
@@ -247,12 +275,19 @@ export function classify (model, allRows) {
   if (partial.length) bits.push(`${partial.join(', ')} only partly worked`)
   if (untested.length) bits.push(`${untested.join(', ')} ${untested.length === 1 ? 'was' : 'were'} never tested, so we do not know`)
   if (disagreements.length) bits.push(`two machines of this model disagreed about ${disagreements.join(', ')}`)
+  if (unsigned.length && undated.length &&
+      unsigned.length === undated.length && unsigned.every((l, i) => l === undated[i])) {
+    bits.push(`nobody's name and no date are on ${unsigned.length === 1 ? 'the row' : 'the rows'} this rests on`)
+  } else {
+    if (unsigned.length) bits.push(`nobody's name is on ${unsigned.length === 1 ? 'the row' : `${unsigned.length} of the rows`} this rests on`)
+    if (undated.length) bits.push(`no date is on ${undated.length === 1 ? 'the row' : `${undated.length} of the rows`} this rests on`)
+  }
   if (!bits.length && noVerdict) bits.push('nobody has written a verdict for it yet')
   if (!bits.length && caveatVerdict) bits.push('a person recorded a caveat against it')
 
   return {
     model, answer: ANSWER.CAVEAT, rows: mine, quotable: false,
-    untested, failing, partial, disagreements,
+    untested, failing, partial, disagreements, unsigned, undated,
     say: `We have imaged this model, with caveats: ${bits.join('; ')}.` +
          (mine.map((r) => r.notes).filter(Boolean).length
            ? ` Recorded: ${mine.map((r) => r.notes).filter(Boolean).join(' / ')}`

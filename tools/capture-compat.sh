@@ -13,9 +13,11 @@
 # It only becomes that if capturing a row is EASY and HONEST. Those pull in opposite directions, and
 # the resolution is the line this script draws down the middle of the row:
 #
-#   OBSERVABLE      model, year, cpu, ram_gb, firmware, ids, tpm
+#   OBSERVABLE      model, year, source, cpu, ram_gb, firmware, ids, tpm
 #                   Machine-readable facts with a path behind each one. The script fills these,
-#                   records where it read them, and refuses rather than inventing one.
+#                   records where it read them, and refuses rather than inventing one. `source` is
+#                   `vm` when a hypervisor is seen and ALWAYS `vm` under AUROS_TEST_ROOT — it used
+#                   to be the literal "physical", which is a constant, not an observation.
 #
 #   HUMAN-ONLY      wifi, trackpad, suspend, brightness, gpu, audio, webcam
 #                   Somebody has to shut the lid, press the brightness key, and watch. The script
@@ -114,11 +116,16 @@ lsdir() {
 # looking exactly like a script that was recording everything. Same shape as every bug D34 lists: it
 # could not fail visibly. A file survives the subshell, so the evidence survives with it.
 FACTS_TMP="$(mktemp "${TMPDIR:-/tmp}/auros-capture-facts.XXXXXX")" || die "mktemp failed"
-trap 'rm -f "$FACTS_TMP"' EXIT HUP INT TERM
+# What told us this is a virtual machine, one reason per line, each naming the path and the value.
+# A FILE for the same reason the facts file is one: probe_source() runs inside `$( )`, and a shell
+# variable assigned in a subshell is gone the moment it exits.
+VM_TMP="$(mktemp "${TMPDIR:-/tmp}/auros-capture-vm.XXXXXX")" || die "mktemp failed"
+trap 'rm -f "$FACTS_TMP" "$VM_TMP"' EXIT HUP INT TERM
 fact() { # <key> <value> <observed_from>
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FACTS_TMP"
 }
 facts_text() { cat "$FACTS_TMP"; }
+vm_hit() { printf '%s\n' "$1" >> "$VM_TMP"; }
 
 # probe <key> <abs-path> — read it, record it, echo it. Records a miss as a fact too, because
 # "/sys/class/tpm/tpm0 is absent" is an observation and the next person needs to know we looked.
@@ -236,6 +243,89 @@ probe_ram_gb() {
   [ "$gb" -gt 0 ] || return 1
   fact ram_gb "$gb" "ceil(MemTotal / 1 GiB) — MemTotal excludes firmware-reserved memory"
   printf '%s' "$gb"
+}
+
+# ── is this a machine, or something shaped like one? ─────────────────────────────────────────────
+#
+# `source` USED TO BE A CONSTANT. emit_row() had `source) v="physical"` and nothing anywhere probed
+# for a hypervisor, so a run inside QEMU produced a row saying `physical` — and
+# tests/capture-compat.test.sh asserted "source is always physical — this script only runs on a real
+# machine", which made a premise nothing enforced into an assertion that could not fail (D34).
+#
+# It matters because of where the row goes. A `physical` row with seven `ok` answers is the strongest
+# sentence either of our tools can say: *"We have imaged this model and every one of wifi, trackpad,
+# suspend, brightness, gpu, audio, webcam worked."* A QEMU guest has no wifi chipset, no trackpad, no
+# backlight and no webcam. compat-lint refuses a LABELLED vm row that claims those columns — but the
+# label was a constant, so the refusal had nothing to fire on.
+#
+# So `source` is an observation now, from three independent places, and every one of them records
+# what it read INCLUDING when it read nothing. A miss is evidence too: the next person needs to know
+# we looked at /sys/hypervisor/type and it was not there.
+probe_source() {  # prints vm|physical; records its reasons into VM_TMP via vm_hit
+  local hit=0 v p flags vendor product
+
+  # 1. The paravirtual interface announces itself by name. Xen writes "xen" here; several others do
+  #    the same. Absent on a physical machine, which is the fact we want recorded when it is absent.
+  p=/sys/hypervisor/type
+  if v="$(rd "$p")" && [ -n "$v" ]; then
+    fact hypervisor.type "$v" "$p"
+    vm_hit "$p = $v"
+    hit=1
+  else
+    fact hypervisor.type "" "$p (absent — nothing here announces a hypervisor)"
+  fi
+
+  # 2. The CPU flag. Set by KVM, QEMU, VMware, Hyper-V and VirtualBox: it is the hypervisor-present
+  #    bit out of CPUID leaf 1, which a guest cannot clear without lying to its own kernel.
+  flags="$(grep -m1 -E '^flags[[:space:]]*:' "$R/proc/cpuinfo" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')"
+  case " $flags " in
+    *" hypervisor "*)
+      fact cpu.hypervisor_flag present "/proc/cpuinfo flags contains 'hypervisor'"
+      vm_hit "/proc/cpuinfo flags contains 'hypervisor'"
+      hit=1 ;;
+    *)
+      fact cpu.hypervisor_flag absent "/proc/cpuinfo flags (read: ${flags:-(no flags line)})" ;;
+  esac
+
+  # 3. DMI. Read with rd() rather than probe(), because probe_model has already recorded these two
+  #    with their paths and a second copy would read as two observations of one fact.
+  vendor="$(lc "$(rd "$DMI_DIR/sys_vendor" || printf '')")"
+  product="$(lc "$(rd "$DMI_DIR/product_name" || printf '')")"
+
+  # Vendors that make no physical machine anybody images. A substring match, because the strings
+  # carry punctuation that differs between releases ("VMware, Inc." and "VMware Inc.").
+  case "$vendor" in
+    *qemu*|*bochs*|*kvm*|*vmware*|"innotek gmbh"*|*parallels*|*xen*|*openstack*|*qumranet*|\
+    *"amazon ec2"*|*"alibaba cloud"*|*nutanix*|*scaleway*)
+      fact dmi.vm_vendor "$vendor" "$DMI_DIR/sys_vendor — a hypervisor vendor string"
+      vm_hit "$DMI_DIR/sys_vendor = $(rd "$DMI_DIR/sys_vendor")"
+      hit=1 ;;
+  esac
+
+  # Vendors that DO make physical machines and also appear on guests. The vendor alone would refuse
+  # a Surface laptop and a Sun workstation, so these need the product as well. Getting this wrong in
+  # the safe direction still costs a real row we could have quoted.
+  case "$vendor:$product" in
+    "microsoft corporation":*"virtual machine"*|\
+    "oracle corporation":*virtualbox*|\
+    *"red hat"*:*kvm*|\
+    *google*:*"google compute engine"*)
+      fact dmi.vm_vendor_product "$vendor / $product" "$DMI_DIR/sys_vendor + product_name"
+      vm_hit "$DMI_DIR/sys_vendor = $(rd "$DMI_DIR/sys_vendor"), product_name = $(rd "$DMI_DIR/product_name")"
+      hit=1 ;;
+  esac
+
+  # Product strings that only a hypervisor emits. "Standard PC (i440FX + PIIX4, 1996)" is QEMU's
+  # default machine type and is the shape a synthetic QEMU root takes.
+  case "$product" in
+    *"standard pc"*|*virtualbox*|*"vmware virtual"*|*"virtual machine"*|*kvm*|*bochs*|\
+    *"hvm domu"*|*"openstack nova"*|*qemu*|*"pc-q35"*|*"pc-i440fx"*)
+      fact dmi.vm_product "$product" "$DMI_DIR/product_name — a hypervisor machine type"
+      vm_hit "$DMI_DIR/product_name = $(rd "$DMI_DIR/product_name")"
+      hit=1 ;;
+  esac
+
+  if [ "$hit" = 1 ]; then printf 'vm'; else printf 'physical'; fi
 }
 
 probe_firmware() {
@@ -587,7 +677,7 @@ emit_row() {
     case "$col" in
       model)     v="$MODEL" ;;
       year)      v="$YEAR" ;;
-      source)    v="physical" ;;
+      source)    v="$SOURCE" ;;
       cpu)       v="$CPU" ;;
       ram_gb)    v="$RAM" ;;
       firmware)  v="$FIRMWARE" ;;
@@ -715,6 +805,53 @@ RAM="$(probe_ram_gb || true)"
 FIRMWARE="$(probe_firmware)"
 TPM="$(probe_tpm)"
 IDS="$(probe_ids)"
+
+# ── source ───────────────────────────────────────────────────────────────────────────────────────
+SOURCE_OBSERVED="$(probe_source)"
+VM_EVIDENCE="$(cat "$VM_TMP" 2>/dev/null)"
+# What the machine — or the tree — LOOKED like, recorded before anything below overrides it. On a
+# real machine this is `source`. Under a test root it is the only way to see probe_source() answer,
+# because the row's source is forced to vm there; the suite reads this fact in both directions.
+fact source.observed "$SOURCE_OBSERVED" "$([ -n "$VM_EVIDENCE" ] && printf '%s' "$VM_EVIDENCE" | tr '\n' ';' || printf 'no hypervisor found by /sys/hypervisor/type, the cpuinfo hypervisor flag, or DMI')"
+
+# A SYNTHETIC TREE IS NOT A MACHINE. AUROS_TEST_ROOT is the seam the test suite drives this script
+# through, and a row captured through it describes a directory somebody created. With `source`
+# hard-coded to `physical`, a tree shaped like a QEMU guest produced a row that compat-lint called
+# honest and quote-from-compat turned into "We have imaged this model and every one of wifi,
+# trackpad, suspend, brightness, gpu, audio, webcam worked."
+#
+# It is `vm` here, unconditionally, so that no row captured under a test root can ever support a
+# quote: quote-from-compat drops vm rows before it classifies anything, and a vm row carrying the
+# physical-only columns is refused by both tools and takes the whole file with it. The human answers
+# are still accepted, because the machinery that handles them has to stay testable — what changes is
+# that the result is unquotable by construction rather than by anybody remembering.
+if [ -n "$R" ]; then
+  SOURCE="vm"
+  fact source vm "AUROS_TEST_ROOT=$R — a directory is not a machine. source is vm whatever the tree says, so that nothing captured here can reach a customer quote."
+else
+  SOURCE="$SOURCE_OBSERVED"
+  fact source "$SOURCE" "= source.observed"
+fi
+
+# ── the refusal: a guest has no wifi chipset to report on ────────────────────────────────────────
+# Keyed on EVIDENCE, not on `$SOURCE`. Under a test root source is vm with nothing observed, and the
+# suite has to be able to drive the human-answer machinery; on a machine where a hypervisor was
+# actually seen, there is a real card that does not exist and the answer is a fabrication.
+if [ -n "$VM_EVIDENCE" ]; then
+  for col in $PHYSICAL_ONLY; do
+    a="$(get_answer "$col")"
+    [ -n "$a" ] || continue
+    die "--$col $a, but this is a virtual machine.
+
+    Observed:
+$(printf '%s\n' "$VM_EVIDENCE" | sed 's/^/      /')
+
+    hardware/README.md: a source=vm row leaves $PHYSICAL_ONLY EMPTY. A hypervisor has no wifi
+    chipset, no trackpad, no backlight and no webcam, so \"$col=$a\" is an observation of something
+    that is not there — and it is the kind of row we would later quote a school from.
+    gpu and audio are still yours to answer: a guest really does have those, of a sort."
+  done
+fi
 DATE="${DATE:-$(date +%F)}"
 TESTER="${TESTER:-${SUDO_USER:-${USER:-unknown}}}"
 VERDICT="$(compute_verdict)"
@@ -742,6 +879,14 @@ if [ -n "$PROBED_YEAR" ] && [ "$YEAR" = "$PROBED_YEAR" ]; then
   printf '\n  \033[33myear=%s came from the BIOS date, which is not the model year.\033[0m\n' "$YEAR"
   printf '  A 2012 laptop with a 2018 firmware update reports 2018. Confirm it against the label\n'
   printf '  on the bottom of the machine and pass --year if it is wrong.\n'
+fi
+
+if [ "$SOURCE" = vm ]; then
+  printf '\n\033[1msource=vm.\033[0m '
+  if [ -n "$R" ]; then printf 'AUROS_TEST_ROOT is set: this row describes a directory, not a machine.\n'
+  else printf 'A hypervisor was observed:\n'; printf '%s\n' "$VM_EVIDENCE" | sed 's/^/    /'; fi
+  printf 'A vm row is evidence about our build pipeline, never about anybody'"'"'s laptops. No quote is ever\n'
+  printf 'generated from one (hardware/README.md), and wifi, trackpad, suspend, brightness and webcam stay empty.\n'
 fi
 
 printf '\n\033[1m── the row so far ─────────────────────────────────────────────────────────────\033[0m\n'
