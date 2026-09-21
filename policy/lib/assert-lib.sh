@@ -41,7 +41,7 @@
 #   `root.sudo` as proof of the mode.
 #
 #   The discriminating half is the pkcheck calls, because pkcheck distinguishes 1 (refused outright)
-#   from 3 (an administrator could authorise this). `open` answers 3 where `locked` answers 1, and
+#   from 2 (an administrator could authorise this). `open` answers 2 where `locked` answers 1, and
 #   open/assert.sh now asserts exactly that with a_deny at level `control`: if an action answers 1
 #   on an image with no Auros rules installed, the negative control FAILS and says so, because a
 #   denial of that action under `locked` would be an artefact of the probe rather than our policy.
@@ -78,9 +78,12 @@ a_ok()  { A_PASS=$(( A_PASS + 1 )); A_LINES+=("pass|$1|$2"); printf 'PASS  %-34s
 a_bad() { A_FAIL=$(( A_FAIL + 1 )); A_LINES+=("fail|$1|$2"); printf 'FAIL  %-34s %s\n' "$1" "$2"; }
 a_note(){ A_LINES+=("note|$1|$2"); printf '      %-34s %s\n' "$1" "$2"; }
 
+# The reason goes on the RESULT line as well as the FAIL line: B5's detail is the TAIL of this
+# output (auros-matrix-agent.sh), and run 35566336512 reported an abort whose reason had been cut
+# off above the last three lines -- a red nobody could act on without re-booting the image.
 a_abort() {
     printf 'FAIL  %-34s %s\n' "control" "$1"
-    printf '\nRESULT: fail (assertion aborted before it could prove anything)\n'
+    printf '\nRESULT: fail (assertion aborted before it could prove anything): %s\n' "$1"
     printf 'The run was stopped rather than reported, because an assertion that cannot observe a\n'
     printf 'permitted action cannot prove a forbidden one. A green result here would be a false green.\n'
     exit 1
@@ -149,8 +152,14 @@ a_absent() {  # a_absent <id> <binary> -- the forbidden thing cannot be attempte
 }
 
 # ── polkit ───────────────────────────────────────────────────────────────────────────────────────
-# pkcheck exit codes: 0 authorised, 1 not authorised, 2 error, 3 authorisation could be obtained by
-# authenticating. We care about the difference between 1 and 3, because it IS the difference between
+# pkcheck exit codes, from polkit's src/programs/pkcheck.c (measured on Fedora 43, polkit 126):
+#   0 authorised; 1 not authorised; 2 a CHALLENGE -- authorisation could be obtained by authenticating
+#   ("Authorization requires authentication and -u wasn't passed"); 3 the authentication dialog was
+#   DISMISSED, which cannot happen without -u; 126/127 an error (no authority, polkitd not running).
+# This file used to read 3 as the challenge and 2 as an error. It was never observed doing so, because
+# every B5 run until 35566336512 aborted before the first pkcheck; on the first real one an
+# auth_admin action would have read as "pkcheck returned 2 (error)" in every mode.
+# We care about the difference between 1 and 2, because it IS the difference between
 # `locked` and `managed` -- and, per THE THIRD RULE, it is the only thing in a_suite_no_root,
 # a_suite_no_software and a_suite_no_network_change that discriminates at all.
 a_pk() { pkcheck --action-id "$1" --process "$$" >/dev/null 2>&1; echo $?; }
@@ -160,7 +169,7 @@ a_pk_hard_deny() {  # locked/kiosk: the answer is no, and no password changes it
     case "$rc" in
         0) a_bad "$id" "$action -- AUTHORISED. The mode is not in force for this action." ;;
         1) a_ok  "$id" "$action -- refused outright (pkcheck 1)" ;;
-        3) a_bad "$id" "$action -- answerable with an administrator password (pkcheck 3). That is 'managed' behaviour; 'locked' requires a hard refusal." ;;
+        2) a_bad "$id" "$action -- answerable with an administrator password (pkcheck 2). That is 'managed' behaviour; 'locked' requires a hard refusal." ;;
         *) a_bad "$id" "$action -- pkcheck returned $rc (error). An error is not a denial." ;;
     esac
 }
@@ -169,7 +178,7 @@ a_pk_admin_only() {  # managed: not now, but an administrator at this machine co
     local id="$1" action="$2" rc; rc="$(a_pk "$action")"
     case "$rc" in
         0) a_bad "$id" "$action -- AUTHORISED without any administrator. The mode is not in force." ;;
-        1|3) a_ok "$id" "$action -- not authorised for this user (pkcheck $rc)" ;;
+        1|2) a_ok "$id" "$action -- not authorised for this user (pkcheck $rc)" ;;
         *) a_bad "$id" "$action -- pkcheck returned $rc (error). An error is not a denial." ;;
     esac
 }
@@ -177,7 +186,7 @@ a_pk_admin_only() {  # managed: not now, but an administrator at this machine co
 # a_pk_not_hard_denied -- THE NEGATIVE CONTROL, run only by open/assert.sh.
 #
 # On an image with no Auros policy rules installed, an action that `locked` denies must still be
-# answerable: 0 (yes) or 3 (an administrator could authorise this). If it answers 1 HERE, then the
+# answerable: 0 (yes) or 2 (an administrator could authorise this). If it answers 1 HERE, then the
 # same answer under `locked` was never our doing -- it is the base's own default for a subject with
 # no session -- and the corresponding line in locked/assert.sh is decoration. That is a FAIL of this
 # control, not a pass, and it is the check that stops this whole directory from rotting into a list
@@ -186,7 +195,7 @@ a_pk_not_hard_denied() {
     local id="$1" action="$2" rc; rc="$(a_pk "$action")"
     case "$rc" in
         0) a_ok  "$id" "$action -- permitted here (pkcheck 0). A refusal under managed/locked/kiosk is ours." ;;
-        3) a_ok  "$id" "$action -- answerable with an administrator password here (pkcheck 3). A HARD refusal under locked is ours." ;;
+        2) a_ok  "$id" "$action -- answerable with an administrator password here (pkcheck 2). A HARD refusal under locked is ours." ;;
         1) a_bad "$id" "$action -- refused OUTRIGHT (pkcheck 1) on an image carrying no Auros policy rules. A denial of this action under locked/kiosk is therefore an artefact of the probe subject, not evidence of the mode. Either give the probe a session, or drop this action from the suite -- do not leave it reporting a pass it did not earn." ;;
         *) a_bad "$id" "$action -- pkcheck returned $rc (error) on the negative control. An error is not an answer." ;;
     esac
@@ -208,12 +217,19 @@ a_controls() {
 
     command -v pkcheck >/dev/null 2>&1 || a_abort "pkcheck is not installed. Without it the difference between 'refused outright' and 'an administrator could authorise this' cannot be observed, and that difference is the difference between locked and managed."
 
-    timeout 10 dbus-send --system --print-reply --dest=org.freedesktop.DBus \
-        / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 \
-        || a_abort "the system D-Bus is not reachable from this process. Every polkit denial below would then be a dead bus rather than a policy decision."
+    # GetId on the bus driver, NOT org.freedesktop.DBus.Peer.Ping. The stock system-bus policy
+    # (/usr/share/dbus-1/system.conf: default deny send_type=method_call, re-allowing only the
+    # org.freedesktop.DBus, Introspectable and Properties interfaces on the driver) refuses Peer.Ping
+    # from any unprivileged sender -- "AccessDenied: Sender is not authorized to send message" on
+    # dbus-broker 37, the same on dbus-daemon 1.16. This probe used Ping, so on a real image it
+    # reported a live bus as dead and aborted every non-root run: run 35566336512, B5, in 56 ms.
+    local out rc
+    out="$(timeout 10 dbus-send --system --print-reply --dest=org.freedesktop.DBus \
+        /org/freedesktop/DBus org.freedesktop.DBus.GetId 2>&1)" \
+        || a_abort "the system D-Bus is not reachable from this process (dbus-send ... org.freedesktop.DBus.GetId said: $(printf '%s' "$out" | head -2 | tr '\n' ' ')). Every polkit denial below would then be a dead bus rather than a policy decision."
 
-    local rc; rc="$(a_pk org.auros.policy.control-allow)"
-    [ "$rc" = 0 ] || a_abort "the positive control action org.auros.policy.control-allow returned pkcheck $rc. It is our own action, allow_any=yes, and no mode rule touches it. If this subject cannot be authorised for THAT, it cannot be authorised for anything, and every denial in this run would be an artefact of the probe rather than evidence of the policy."
+    out="$(pkcheck --action-id org.auros.policy.control-allow --process "$$" 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || a_abort "the positive control action org.auros.policy.control-allow returned pkcheck $rc ($(printf '%s' "$out" | head -2 | tr '\n' ' ')). It is our own action, allow_any=yes, and no mode rule touches it. If this subject cannot be authorised for THAT, it cannot be authorised for anything, and every denial in this run would be an artefact of the probe rather than evidence of the policy."
 
     a_ok "control.subject" "running unprivileged as $(id -un) (uid $(id -u)), not in aurosadmin"
     a_ok "control.bus"    "the system D-Bus answers this process"
@@ -263,7 +279,7 @@ a_expect_mode() {
 #                      negative control REPORTS it rather than failing the base image on a guess
 #                      about an upstream default that none of us has measured on this base.
 #
-#                      When the control observes 0 or 3 for one of these on the open image, it says
+#                      When the control observes 0 or 2 for one of these on the open image, it says
 #                      PROMOTE: that is a measurement showing the action does discriminate, and the
 #                      classification should be tightened to `primary` in the same commit that
 #                      records the measurement (D24 -- the measurement wins).
@@ -288,7 +304,7 @@ a_pk_control_record() {
     case "$rc" in
         1) A_CONTROL_NON_DISCRIMINATING+=("$id")
            a_note "control.$id" "$action -- refused outright (pkcheck 1) on this unlocked image too. CORROBORATING ONLY: a refusal of it under locked/kiosk is the base's own default for a sessionless subject, not our rule." ;;
-        0|3) A_CONTROL_DISCRIMINATING+=("$id")
+        0|2) A_CONTROL_DISCRIMINATING+=("$id")
            a_note "control.$id" "$action -- answerable here (pkcheck $rc). PROMOTE: this action DOES discriminate on this base, so change its a_deny evidence argument from session-dependent to primary and record the measurement." ;;
         *) a_bad "control.$id" "$action -- pkcheck returned $rc (error) on the negative control. An error is not an answer." ;;
     esac
@@ -360,7 +376,7 @@ a_suite_no_network_change() {
     printf '\n-- try to change the network -----------------------------------------------------------\n'
     # settings.modify.system is auth_admin_keep for allow_any upstream, so it discriminates for a
     # sessionless subject and is primary. The other two carry allow_active=yes in NetworkManager's
-    # own policy, so whether a sessionless probe is answered 1 or 3 on an OPEN image depends on the
+    # own policy, so whether a sessionless probe is answered 1 or 2 on an OPEN image depends on the
     # base's defaults and not on us. Nobody here has measured that on this base -- D5: this machine
     # cannot boot one -- so they are classified session-dependent rather than guessed at, and the
     # control prints PROMOTE if the measurement turns out to support tightening them.
@@ -609,7 +625,7 @@ a_finish() {
         printf '  account, /etc is root-owned and /usr is read-only), so their failure here is\n'
         printf '  consistent with the mode but does not on its own prove it. open/assert.sh runs the\n'
         printf '  same attempts as an explicit negative control and prints which of them succeeded.\n'
-        printf '  The primary evidence for this mode is the pkcheck answers (1 vs 3) and the KDE\n'
+        printf '  The primary evidence for this mode is the pkcheck answers (1 vs 2) and the KDE\n'
         printf '  KAuthorized doors, both of which differ between open and locked for this subject.\n\n'
     fi
     if [ "${#A_CONTROL_NON_DISCRIMINATING[@]}" -gt 0 ] || [ "${#A_CONTROL_DISCRIMINATING[@]}" -gt 0 ]; then

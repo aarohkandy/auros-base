@@ -817,6 +817,34 @@ assert old in s
 open(p, 'w').write(s.replace(old, 'MODE="${AUROS_POLICY:-locked}"'))
 MUT
 
+# Run 35566336512 — B5's first real boot aborted in 56 ms, and the fragment could not say why.
+mutate "B5 run 35566336512: the bus probe is Peer.Ping, which the stock system bus refuses to a non-root sender" \
+       policy/tests/assert-lib.test.sh "a live bus that refuses Peer.Ping" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = '/org/freedesktop/DBus org.freedesktop.DBus.GetId 2>&1)'
+assert old in s
+open(p, 'w').write(s.replace(old, '/ org.freedesktop.DBus.Peer.Ping 2>&1)'))
+MUT
+
+mutate "B5 run 35566336512: the abort reason sits above the three lines B5 keeps" \
+       policy/tests/assert-lib.test.sh "named in the last three lines" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = "printf '\\nRESULT: fail (assertion aborted before it could prove anything): %s\\n' \"$1\""
+assert old in s
+open(p, 'w').write(s.replace(old, "printf '\\nRESULT: fail (assertion aborted before it could prove anything)\\n'"))
+MUT
+
+mutate "pkcheck 3 read as the challenge: every auth_admin answer (2) becomes an 'error' under managed" \
+       policy/tests/assert-lib.test.sh "managed accepts pkcheck 2" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = '1|2) a_ok "$id" "$action -- not authorised for this user (pkcheck $rc)" ;;'
+assert old in s
+open(p, 'w').write(s.replace(old, '1|3) a_ok "$id" "$action -- not authorised for this user (pkcheck $rc)" ;;'))
+MUT
+
 printf '\n%s\n' "$(c 1 'workflow run: blocks — pipe into grep -q under pipefail')"
 
 mutate "build.yml's cosign flag probe goes back to piping its --help into grep -q (SIGPIPE drops the flag)" \

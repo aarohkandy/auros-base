@@ -21,7 +21,7 @@
 #      right that a `locked` run counting those as proof was padding its result line.
 #
 #      So this file runs the SAME shared suites that locked/kiosk run, at level `control`, and:
-#        * asserts that every polkit action locked denies is still ANSWERABLE here (pkcheck 0 or 3,
+#        * asserts that every polkit action locked denies is still ANSWERABLE here (pkcheck 0 or 2,
 #          never 1). A hard refusal here would mean the matching refusal under locked was never our
 #          doing, and that is a FAIL of this control -- it is what would catch the rot.
 #        * runs the non-polkit attempts and RECORDS which of them succeeded, so the matrix output
