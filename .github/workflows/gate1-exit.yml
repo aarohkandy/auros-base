@@ -380,12 +380,12 @@ jobs:
       - name: Leg A · what is the machine's update schedule, really?
         id: timer
         run: |
-          # D22: `uupd`, not `bootc-fetch-apply-updates`, is the update driver on this base.
-          # /etc/rpm-ostreed.conf's AutomaticUpdatePolicy=stage is a decoy. Getting this wrong
-          # produces an agent that looks configured and never runs, which is the failure this step
-          # exists to make impossible to miss.
+          # D44 (owner, 2026-09-21): bootc-fetch-apply-updates.timer is the ONE OS updater; uupd runs
+          # with modules.system.disable and updates Flatpaks only, so its daily timer says nothing about
+          # when an OS image arrives. Measuring uupd.timer here would measure the wrong unit — the
+          # "looks configured, never runs" failure this step exists to make impossible to miss.
           UNIT=none
-          for u in uupd.timer bootc-fetch-apply-updates.timer; do
+          for u in bootc-fetch-apply-updates.timer; do
             if vm "systemctl cat $u" >/dev/null 2>&1; then UNIT=$u; break; fi
           done
           echo "unit=$UNIT" >> "$GITHUB_OUTPUT"
