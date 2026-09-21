@@ -716,7 +716,9 @@ jobs:
           # D17 belt and braces: on the pinned 2.6 line this flag is already the default, but
           # passing it explicitly documents the intent at the call site and survives a version bump.
           FLAG='${{ steps.cosign.outputs.flag }}'
-          if [ -n "$FLAG" ] && ! cosign sign --help 2>&1 | grep -q -- "${FLAG%%=*}"; then
+          # A here-string, not `cosign sign --help | grep -q`: under pipefail grep -q exits on the match,
+          # cosign dies of SIGPIPE mid-write, and the MATCH reads as a miss — silently dropping the flag.
+          if [ -n "$FLAG" ] && ! grep -q -- "${FLAG%%=*}" <<<"$(cosign sign --help 2>&1)"; then
             echo "::warning::this cosign has no ${FLAG%%=*} flag; relying on S8 to prove the signature is still discoverable"
             FLAG=""
           fi

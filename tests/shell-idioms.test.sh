@@ -76,18 +76,35 @@ echo "producer | grep -q under pipefail (grep -q exits on the match, the produce
 # idiom to warn against it). Plain substrings again: find "| grep -", then read the flag word after it
 # with shell string operations. No regex, for the reason at the top of this file.
 # ponytail: only the first flag word after grep is read, so `| grep -E -q` slips through; none exist today.
+# Workflows too: every `run:` in .github/workflows/*.yml executes under build.yml's `bash -euo pipefail`
+# default (workflow-lint enforces it), so a pipe into grep -q there is the same race. Only lines inside
+# a `run:` (block or one-line) are read; a `run: |` block ends at the first non-blank line indented no
+# deeper than its key. A `cosign sign --help | grep -q FLAG` there silently dropped a flag when it lost.
 sigpipe_scan() { # <dir> — prints file:line for every pipe into an early-exiting grep
-  local f line n pre rest flags
+  local f line n pre rest flags yml s ind runind
   while IFS= read -r f; do
+    yml=0
     case "$f" in
+      */.github/workflows/*.yml|*/.github/workflows/*.yaml) yml=1 ;;
       *.sh) ;;
       *) IFS= read -r line < "$f" || true
          case "$line" in '#!'*sh*) ;; *) continue ;; esac ;;
     esac
-    n=0
+    n=0; runind=-1
     while IFS= read -r line || [ -n "$line" ]; do
       n=$((n+1))
-      case "${line#"${line%%[![:space:]]*}"}" in '#'*) continue ;; esac
+      s="${line#"${line%%[![:space:]]*}"}"
+      if [ "$yml" = 1 ]; then
+        ind=$(( ${#line} - ${#s} ))
+        [ "$runind" -ge 0 ] && [ -n "$s" ] && [ "$ind" -le "$runind" ] && runind=-1
+        case "$s" in
+          'run: |'*|'run: >'*)     runind=$ind; continue ;;
+          '- run: |'*|'- run: >'*) runind=$((ind+2)); continue ;;
+          'run:'*|'- run:'*) ;;                       # one-line run: scan this line only
+          *) [ "$runind" -ge 0 ] || continue ;;
+        esac
+      fi
+      case "$s" in '#'*) continue ;; esac
       rest="$line"
       while [ "${rest#*| grep -}" != "$rest" ]; do
         pre="${rest%%"| grep -"*}"; rest="${rest#*| grep -}"; flags="${rest%% *}"
@@ -101,7 +118,7 @@ sigpipe_scan() { # <dir> — prints file:line for every pipe into an early-exiti
         printf '%s:%s: %s\n' "${f#"$1"/}" "$n" "$line"; break
       done
     done < "$f"
-  done < <(grep -rlIF -e '| grep -' "$1" --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.github 2>/dev/null \
+  done < <(grep -rlIF -e '| grep -' "$1" --exclude-dir=.git --exclude-dir=node_modules 2>/dev/null \
            | grep -v '/tests/shell-idioms\.test\.sh$' || true)
 }
 
@@ -122,15 +139,24 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail' 'if journalctl -k | grep 
 printf '%s\n' 'x() { kcmshell6 --list | grep -Eq "$1"; }' 'y() { dnf --help | grep --quiet flag; }' > "$PLANT/lib.sh"
 printf '%s\n' 'set -uo pipefail' 'grep -q oops <<<"$(journalctl -k)"' '  # never x | grep -q y' \
               'n=$(x | grep -c y || true)' 'x | grep -v y | sort' 'a || grep -q b f' > "$PLANT/fine.sh"
+mkdir -p "$PLANT/.github/workflows"
+printf '%s\n' 'name: planted' 'description: "a | grep -q b is only prose here"' 'jobs:' '  j:' '    steps:' \
+  '      - name: block' '        run: |' '          # a | grep -q b in a comment' '          if ! x --help | grep -q -- "$F"; then F=; fi' \
+  '      - run: y | grep -qE z' '      - name: after the block' '        with: { note: "c | grep -q d" }' \
+  '      - run: |' '          grep -q e <<<"$(x)"' > "$PLANT/.github/workflows/p.yml"
 got=$(sigpipe_scan "$PLANT")
 case "$got" in *"planted:3:"*) ok "the scan catches a planted 'journalctl | grep -qE' in an extensionless script" ;;
   *) no "the scan MISSED the planted example: [$got]" ;; esac
 case "$got" in *"lib.sh:1:"*) ok "  ...and 'grep -Eq' (q not first) in a sourced library" ;; *) no "  ...missed grep -Eq: [$got]" ;; esac
 case "$got" in *"lib.sh:2:"*) ok "  ...and 'grep --quiet'" ;; *) no "  ...missed grep --quiet: [$got]" ;; esac
+case "$got" in *"p.yml:9:"*) ok "  ...and a pipe into grep -q inside a workflow run: | block" ;; *) no "  ...missed the workflow run block: [$got]" ;; esac
+case "$got" in *"p.yml:10:"*) ok "  ...and in a one-line '- run:'" ;; *) no "  ...missed the one-line run: [$got]" ;; esac
+case "$got" in *"p.yml:2:"*|*"p.yml:8:"*|*"p.yml:12:"*|*"p.yml:14:"*) no "the scan flagged workflow prose, a comment, or a here-string: [$got]" ;;
+  *) ok "  ...and leaves workflow keys outside run:, comments and here-strings alone" ;; esac
 case "$got" in *"fine.sh"*) no "the scan flagged a safe form: [$got]" ;; *) ok "  ...and leaves here-strings, comments, grep -c and grep -v alone" ;; esac
 
 hits=$(sigpipe_scan "$HERE")
-if [ -z "$hits" ]; then ok "no pipe into grep -q anywhere in auros-base's shell"
+if [ -z "$hits" ]; then ok "no pipe into grep -q anywhere in auros-base's shell or workflow run: blocks"
 else no "pipe into grep -q (use: grep -q PATTERN <<<\"\$(producer)\", or capture first):"; printf '%s\n' "$hits" | sed 's/^/          /'; fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

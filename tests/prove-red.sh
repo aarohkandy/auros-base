@@ -817,6 +817,18 @@ assert old in s
 open(p, 'w').write(s.replace(old, 'MODE="${AUROS_POLICY:-locked}"'))
 MUT
 
+printf '\n%s\n' "$(c 1 'workflow run: blocks — pipe into grep -q under pipefail')"
+
+mutate "build.yml's cosign flag probe goes back to piping its --help into grep -q (SIGPIPE drops the flag)" \
+       tests/shell-idioms.test.sh "build.yml:" <<'MUT'
+p = '.github/workflows/build.yml'
+s = open(p).read()
+old = '! grep -q -- "${FLAG%%=*}" <<<"$(cosign sign --help 2>&1)"'
+assert old in s
+# The pipe is chr(124) so this file does not itself carry the idiom shell-idioms.test.sh scans for.
+open(p, 'w').write(s.replace(old, '! cosign sign --help 2>&1 ' + chr(124) + ' grep -q -- "${FLAG%%=*}"'))
+MUT
+
 printf '\n%s\n' "$(c 1 'the harness itself')"
 
 mutate "an extraction stops matching — the suite must ABORT, not quietly test an empty program" \
