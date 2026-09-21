@@ -18,7 +18,7 @@ defaults:
 
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # D23: ubuntu-latest moves to 26.04 from 2026-10-19
     timeout-minutes: 30
     steps:
       - name: Disk before any reclamation

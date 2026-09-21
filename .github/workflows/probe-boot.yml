@@ -21,7 +21,7 @@ defaults:
 
 jobs:
   boot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # D23: ubuntu-latest moves to 26.04 from 2026-10-19
     timeout-minutes: 90
     steps:
       - name: Reclaim disk
