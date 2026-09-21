@@ -70,12 +70,16 @@ if (kv.REMOVAL_REPORT_PATH) {
   try { report = JSON.parse(b64('REMOVAL_REPORT_B64') ?? '{}'); }
   catch (e) { reportErr = `parse error in ${kv.REMOVAL_REPORT_PATH}: ${e.message}`; }
 }
-// Accept either {"packages":[{name,bytes}...]} or {"packages":["name",...]} or {"removed":[...]}.
+// The one producer is auros-recipes: removalReportShape() in src/prune.ts writes the plan, and the
+// prune runner embedded in every customer Containerfile fills in each item's version,
+// bytes_reclaimed and outcome. So the set lives in "planned", as {package, bytes_reclaimed, outcome}.
+// An item whose outcome is "already-absent" was never in the image, so it is not part of what was
+// removed. auros-recipes/test/prune.test.ts runs that runner's real output through this file.
 function reportEntries(r) {
-  if (!r) return null;
-  const arr = r.packages ?? r.removed ?? r.removals ?? null;
-  if (!Array.isArray(arr)) return null;
-  return arr.map((e) => (typeof e === 'string' ? { name: e, bytes: null } : { name: e.name ?? e.package ?? e.nevra, bytes: e.bytes ?? e.size ?? e.bytes_reclaimed ?? null }));
+  if (!r || !Array.isArray(r.planned)) return null;
+  return r.planned
+    .filter((e) => e?.outcome !== 'already-absent')
+    .map((e) => ({ name: e?.package, bytes: e?.bytes_reclaimed ?? null }));
 }
 const entries = reportEntries(report);
 const declaredRemove = lines(args['declared-remove']);
@@ -117,7 +121,7 @@ const declaredRemove = lines(args['declared-remove']);
   else if (!kv.REMOVAL_REPORT_PATH) {
     rec('S5', 'fail', `no removal report found. Searched: ${SEARCHED}. The harness assumes the prune engine writes one there — if it lands somewhere else, this check is the thing to update, not to silence. A base build must still emit one declaring an empty set, so that "we removed nothing" is a recorded measurement rather than a missing file.`);
   } else if (!entries) {
-    rec('S5', 'fail', `${kv.REMOVAL_REPORT_PATH} has no "packages" (or "removed") array — cannot read a package set from it`);
+    rec('S5', 'fail', `${kv.REMOVAL_REPORT_PATH} has no "planned" array — cannot read a package set from it`);
   } else {
     const problems = [];
     const names = entries.map((e) => e.name);
