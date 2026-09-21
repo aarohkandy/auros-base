@@ -311,9 +311,10 @@ found "executable, so Plasma opens the desktop icon without an untrusted-file pr
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 step "first boot is a guided setup"
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-# We use KDE's own plasma-welcome rather than writing a wizard. It already covers language, network
-# and finding applications, it is translated far beyond anything we could manage, and it is maintained
-# by the people who maintain the desktop it introduces. Its README documents exactly two extension
+# We use KDE's own plasma-welcome rather than writing a wizard. It already covers network (its Network
+# page, src/qml/Main.qml) and finding applications, it is translated far beyond anything we could
+# manage, and it is maintained by the people who maintain the desktop it introduces. It does NOT ask
+# language, keyboard or time zone: a recipe sets those image-wide (auros-recipes src/compile.ts). Its README documents exactly two extension
 # points and we use both: intro-customization.desktop for the first screen, and numbered QML files in
 # extra-pages/ for our own pages — the orientation, and the honest page about Windows programs.
 install_file "$SRC/welcome/intro-customization.desktop" \
@@ -339,6 +340,47 @@ u="$(grep -o 'first-run\.v[0-9]*\.stamp' /usr/lib/systemd/user/auros-first-run.s
 s="$(grep -o 'STAMP_VERSION=v[0-9]*' "${AUROS_LIBEXEC}/auros-first-run" | head -1 | cut -d= -f2)"
 [ "$u" = "first-run.${s}.stamp" ] || die "first-run stamp version mismatch: the unit says '$u', the script says '$s' — the wizard would reopen at every login"
 did "first run: ${WELCOME_IMPL}, ${pages} Auros pages, stamp ${u}, reopenable from Start → Help and Getting Started"
+
+# KDE's own first-boot wizard is SUPPRESSED (owner decision 2026-09-21): a school user sees only the
+# Auros first run above, and accounts come from provisioning, not from a stranger at the keyboard.
+# Aurora ships plasma-setup 6.7.5; its unit (files/plasma-setup.service.in) is
+# Before=display-manager.service with ConditionPathExists=!/etc/plasma-setup-done, and otherwise runs
+# bootutil, which gives seat0 to the wizard's own plasma-setup user. The marker is the mechanism KDE
+# documents (README.md "Completion flag file") and exactly what the wizard's Finish writes
+# (src/auth/authhelper.cpp) — so the machine looks like one whose setup was completed. Chosen over
+# masking the unit: both live in /etc, and on bootc /etc is three-way merged, so an image-shipped file
+# the machine never touched follows the image across updates, and a local deletion (KDE's documented
+# "re-run the wizard") is kept rather than resurrected. The condition line is asserted, not assumed:
+# if KDE renames the flag, this build fails instead of every machine booting into the wizard.
+PS_DONE=/etc/plasma-setup-done
+PS_UNIT=/usr/lib/systemd/system/plasma-setup.service
+printf 'Plasma Setup suppressed by the Auros image: first boot is auros-first-run (build/40-windows-feel.sh).\n' \
+  | install_text "$PS_DONE" 0644
+if [ -f "$PS_UNIT" ]; then
+  grep -qxF "ConditionPathExists=!$PS_DONE" "$PS_UNIT" \
+    || die "plasma-setup.service no longer skips itself on $PS_DONE (its conditions: $(grep '^Condition' "$PS_UNIT" | tr '\n' ' ')) — KDE changed the suppression mechanism and its wizard would take seat0 on every first boot"
+  did "plasma-setup suppressed: $PS_DONE satisfies its ConditionPathExists"
+else
+  found "plasma-setup is not in this image — nothing to suppress (the marker is harmless)"
+fi
+
+# With no wizard, SOMETHING must put a person at seat0 on first boot, or the machine boots to a login
+# screen with nobody on it. Today the only path is kiosk (apply-policy masks the display manager and
+# auros-kiosk.service runs as auroskiosk). No recipe field and no provisioning step creates an account
+# (auros-recipes schema has none; tools/make-install-media.sh passes bootc-image-builder no
+# [[customizations.user]]) — a KNOWN BLOCKING GAP, recorded in the facts file and warned, not died on:
+# the base is always built `open` and a recipe applies its mode later, so dying here would block every
+# build without closing the gap. Whoever closes it teaches this detector the new path.
+FIRST_BOOT_ACCOUNT=none
+[ "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)" != /dev/null ] || FIRST_BOOT_ACCOUNT=kiosk
+humans="$(cat /etc/passwd /usr/lib/passwd 2>/dev/null \
+  | awk -F: '$3>=1000 && $3<60000 && $7 !~ /(nologin|false)$/ {print $1}' | sort -u | paste -sd, - || true)"
+[ -z "$humans" ] || FIRST_BOOT_ACCOUNT="users:$humans"
+if [ "$FIRST_BOOT_ACCOUNT" = none ]; then
+  warn "FIRST-BOOT ACCOUNT GAP: no account exists and nothing creates one — outside kiosk mode this image boots to a login screen with no users"
+else
+  did "first boot seat0: $FIRST_BOOT_ACCOUNT"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 step "the .exe capability (DECISIONS.md D16)"
@@ -386,6 +428,7 @@ AUROS_DISCOVER_BACKENDS=${present}
 AUROS_LOOKANDFEEL=org.auros.windows.desktop
 AUROS_FIRST_RUN_STAMP=${u}
 AUROS_WINDOWS_APPS_STAMP=${bu}
+AUROS_FIRST_BOOT_ACCOUNT=${FIRST_BOOT_ACCOUNT}
 FACTS
 # The audit reads this path. Kept as a symlink under /usr/share/auros so the fact file lives with the
 # rest of the image's self-knowledge in ${AUROS_PREFIX} (00-common.sh's rule) while the documented
