@@ -104,7 +104,7 @@ PROBE_UNITS="$(extract_raw "$PROBE" '^for u in bootc-fetch-apply-updates' 'Netwo
   | grep -oE 'greenboot[a-z0-9-]*\.service' | sort -u)"
 [ -n "$PROBE_UNITS" ] || t_abort "parsed zero greenboot units from the probe's unit loop"
 KNOWN="$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$REPO/units.known")"
-all_known() { local u; for u in "$@"; do printf '%s\n' "$KNOWN" | grep -qxF "$u" || { echo "not in units.known: $u"; return 1; }; done; }
+all_known() { local u; for u in "$@"; do grep -qxF "$u" <<<"$KNOWN" || { echo "not in units.known: $u"; return 1; }; done; }
 # shellcheck disable=SC2086
 run_check probe-units-known green "probe's greenboot units: $(echo $PROBE_UNITS)" -- all_known $PROBE_UNITS
 run_check probe-units-known red   'greenboot-rollback.service (the name run 35557609009 probed)' -- all_known greenboot-rollback.service

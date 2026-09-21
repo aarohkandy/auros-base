@@ -36,12 +36,12 @@ arg() { local k=\$1; shift; while [ \$# -gt 0 ]; do [ "\$1" = "\$k" ] && { echo 
 case "\$1" in
   import-key-pair)
     k=\$(arg --key "\$@"); o=\$(arg --output-key-prefix "\$@")
-    head -1 "\$k" | grep -q ENCRYPTED && { echo "unsupported" >&2; exit 1; }
+    grep -q ENCRYPTED <<<"\$(head -1 "\$k")" && { echo "unsupported" >&2; exit 1; }
     m=\$(grep marker= "\$k"); printf -- '-----BEGIN ENCRYPTED SIGSTORE PRIVATE KEY-----\n%s\n-----END ENCRYPTED SIGSTORE PRIVATE KEY-----\n' "\$m" > "\$o.key"
     echo pub > "\$o.pub" ;;
   public-key)
     k=\$(arg --key "\$@")
-    head -1 "\$k" | grep -q 'BEGIN ENCRYPTED SIGSTORE PRIVATE KEY' || { echo "unsupported pem type" >&2; exit 1; }
+    grep -q 'BEGIN ENCRYPTED SIGSTORE PRIVATE KEY' <<<"\$(head -1 "\$k")" || { echo "unsupported pem type" >&2; exit 1; }
     m=\$(sed -n 's/^marker=//p' "\$k"); cat "$d/fix/\$m.pub" ;;
   *) exit 1 ;;
 esac

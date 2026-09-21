@@ -54,9 +54,9 @@ for kv in "RESTORE_SOURCE_COMMIT=$COMMIT" "RESTORE_BIN_URL=$BIN_URL" "RESTORE_BI
           "RESTORE_UNIT_URL=$UNIT_URL" "RESTORE_UNIT_SHA256=$UNIT_SHA"; do
   [ -n "${kv#*=}" ] || die "restore.pin is half-filled: ${kv%%=*} is empty. Pin all five or none."
 done
-printf '%s' "$COMMIT" | grep -qxE '[0-9a-f]{40}' || die "RESTORE_SOURCE_COMMIT is not a 40-hex commit: $COMMIT"
+grep -qxE '[0-9a-f]{40}' <<<"$COMMIT" || die "RESTORE_SOURCE_COMMIT is not a 40-hex commit: $COMMIT"
 for h in "$BIN_SHA" "$UNIT_SHA"; do
-  printf '%s' "$h" | grep -qxE '[0-9a-f]{64}' || die "restore.pin sha256 is not 64 lowercase hex: $h"
+  grep -qxE '[0-9a-f]{64}' <<<"$h" || die "restore.pin sha256 is not 64 lowercase hex: $h"
 done
 for u in "$BIN_URL" "$UNIT_URL"; do
   case "$u" in https://*) ;; *) die "restore.pin URL is not https: $u" ;; esac
