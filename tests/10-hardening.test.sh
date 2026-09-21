@@ -56,6 +56,18 @@ auros_stamp(){ :; }
 AUROS_WRITTEN_LIST=/dev/null
 '
 
+# mask_unit() and enable_unit() live in 00-common.sh and are extracted from it. Three blocks in
+# 10-hardening.sh are nothing but calls to them (sshd, the telemetry loop, dnf-automatic), and a
+# stubbed-out mask_unit would make all three test their own stub. 00-common.test.sh owns proving
+# that mask_unit/enable_unit are themselves correct; here they are the real thing so that the CALLS
+# are what is under test.
+MASK_FN="$(extract_fn "$REPO/build/00-common.sh" mask_unit | rootify /etc/systemd/system /usr/lib/systemd/system)"
+ENABLE_FN="$(extract_fn "$REPO/build/00-common.sh" _unit_wantedby | rootify /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system)
+$(extract_fn "$REPO/build/00-common.sh" enable_unit | rootify /etc/systemd/system /usr/lib/systemd/system)"
+UNIT_STUBS='have_unit() { [ -e "$ROOT/usr/lib/systemd/system/$1" ]; }
+_systemctl_offline() { return 0; }   # exits 0 and does nothing — the realistic adversary
+'
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "SELinux — the config file assertion, at build time"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -273,7 +285,6 @@ group "telemetry — every unit-mask row in telemetry.tsv actually ends up maske
 # table, and assert one /dev/null symlink per unit-mask row.
 TSV="$REPO/hardening/telemetry.tsv"
 TELEM_BLOCK="$(extract_between "$H" '^while IFS=.*read -r -u 3 kind target rationale' '^done 3< ')"
-MASK_FN="$(extract_fn "$REPO/build/00-common.sh" mask_unit | rootify /etc/systemd/system /usr/lib/systemd/system)"
 
 TELEM_PRE="$PRE"'
 have_unit() { [ -e "$ROOT/usr/lib/systemd/system/$1" ]; }
@@ -281,8 +292,8 @@ have_pkg()  { case " $FAKE_PKGS " in *" $1 "*) return 0;; *) return 1;; esac; }
 have_cmd()  { command -v "$1" >/dev/null 2>&1; }
 rpm() { echo "1.0-1"; }
 _systemctl_offline() { return 0; }
-enable_unit() { echo "ENABLED $1"; }
-'"$MASK_FN"
+'"$MASK_FN
+$ENABLE_FN"
 
 MASK_ROWS="$(awk -F'\t' '$1=="unit-mask"{print $2}' "$TSV")"
 KEEP_ROWS="$(awk -F'\t' '$1=="unit-keep"{print $2}' "$TSV")"
@@ -295,7 +306,11 @@ $TELEM_BLOCK"
 
 # All units present: every unit-mask row must produce a /dev/null symlink.
 R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
-for u in $MASK_ROWS $KEEP_ROWS; do : > "$R/usr/lib/systemd/system/$u"; done
+for u in $MASK_ROWS; do : > "$R/usr/lib/systemd/system/$u"; done
+# A unit-keep row's unit needs a real [Install] section, because "KEPT ON" is a claim that
+# enable_unit() succeeded on it — and enable_unit resolves WantedBy=. An empty file here would make
+# the kept units die, which would have hidden the hole rather than exposing it.
+for u in $KEEP_ROWS; do printf '[Install]\nWantedBy=timers.target\n' > "$R/usr/lib/systemd/system/$u"; done
 run_check telemetry.loop green "the whole table runs against an image containing every unit" -- telem_run "$R"
 for u in $MASK_ROWS; do
   assert_symlink_to "masked $u" "$R/etc/systemd/system/$u" /dev/null
@@ -304,6 +319,11 @@ done
 for u in $KEEP_ROWS; do
   assert_nofile "did NOT mask the deliberately-kept $u" "$R/etc/systemd/system/$u"
   assert_has "and named it as kept on purpose" "KEPT ON   $u" "$T_LAST_OUT"
+  # THE ASSERTION THAT MAKES "KEPT ON" TRUE RATHER THAN PRINTED. A unit-keep row that is reported
+  # but never enabled is a false statement in a build console a customer reads (spec §7), and it is
+  # exactly what the arm looks like with its enable_unit call deleted.
+  assert_symlink_to "and actually ENABLED $u, not merely announced it" \
+    "$R/usr/lib/systemd/system/timers.target.wants/$u" "../$u"
 done
 
 # Units absent: the loop must say ABSENT rather than claim it masked something that was never there.
@@ -335,5 +355,241 @@ t_exempt telemetry.unknown-kind \
   "a warn(), not a die(): the table is data other layers append to, and an unknown kind must be
        visible without stopping a build over a row nobody is using. Asserted on the MESSAGE above
        rather than on an exit code, so there is no exit code to score in two directions."
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "sshd — BOTH units, because sshd.socket starts sshd on an incoming connection"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# The file's own header says "masked, not disabled ... sshd.socket would start on connection even
+# while sshd.service is disabled". Nothing tested that the LOOP actually covers sshd.socket: deleting
+# it from `for u in sshd.service sshd.socket` left every suite green while the image shipped a socket
+# unit that starts sshd on demand. The claim was in a comment; the check was not anywhere.
+SSHD_BLOCK="$(extract_between "$H" '^masked_any=0' 'may not ship openssh-server')"
+
+sshd_run() { # <root>
+  ROOT="$1" bash -c "$PRE
+$UNIT_STUBS
+$MASK_FN
+$SSHD_BLOCK"
+}
+
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+: > "$R/usr/lib/systemd/system/sshd.service"; : > "$R/usr/lib/systemd/system/sshd.socket"
+run_check hardening.sshd-mask green "an image that ships both sshd units" -- sshd_run "$R"
+assert_symlink_to "sshd.service is a symlink to /dev/null" "$R/etc/systemd/system/sshd.service" /dev/null
+assert_symlink_to "SO IS sshd.socket — the unit that starts sshd on connection while the service is masked" \
+  "$R/etc/systemd/system/sshd.socket" /dev/null
+assert_has "the build console names the service" "masked sshd.service" "$T_LAST_OUT"
+assert_has "and names the socket separately"     "masked sshd.socket"  "$T_LAST_OUT"
+
+# The socket alone. Some layouts ship socket activation without the service being enabled at all,
+# and a loop that only knew about sshd.service would report "not present" and mask nothing.
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+: > "$R/usr/lib/systemd/system/sshd.socket"
+run_check hardening.sshd-mask green "an image that ships ONLY sshd.socket" -- sshd_run "$R"
+assert_symlink_to "the socket is still masked" "$R/etc/systemd/system/sshd.socket" /dev/null
+assert_has "and the absent service is reported, not claimed" "sshd.service not present" "$T_LAST_OUT"
+
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+run_check hardening.sshd-mask green "a base with no openssh-server at all" -- sshd_run "$R"
+assert_has "warns rather than silently claiming success" "no sshd units were found to mask" "$T_LAST_OUT"
+
+# The refusal: a unit is present and cannot be masked. Printing "masked sshd.socket" for a socket
+# that is still live is the false-claim failure the whole telemetry section is written against.
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+: > "$R/usr/lib/systemd/system/sshd.service"; : > "$R/usr/lib/systemd/system/sshd.socket"
+chmod 0500 "$R/etc/systemd/system"
+run_check hardening.sshd-mask red "sshd is present and masking cannot be completed" -- sshd_run "$R"
+chmod 0700 "$R/etc/systemd/system"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "firewalld DefaultZone — the post-check exists because the sed has silently failed before"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# `sed -i` is edited in place rather than the file being replaced, so that the other knobs in a
+# package-owned firewalld.conf survive. The failure that makes the post-check necessary is not
+# hypothetical: a BSD `sed -i` in this repository already exited 0 while writing nothing. In that
+# state the machine's default zone stays `public` — inbound ACCEPT for whatever public allows — and
+# every downstream check reads a file that looks configured.
+#
+# So the post-check is `grep -qx 'DefaultZone=auros'`. Weakened to `grep -q 'DefaultZone'` it matches
+# the UNCHANGED line and can never fail. That is the permanently-green shape again, in a new place.
+FW_BLOCK="$(extract_between "$H" '^\[ -f /etc/firewalld/firewalld\.conf \]' '^record wrote-file /etc/firewalld/firewalld\.conf$' \
+  | rootify /etc/firewalld/firewalld.conf)"
+
+STOCK_FWCONF='DefaultZone=public
+CleanupOnExit=yes
+Lockdown=no
+IPv6_rpfilter=yes
+FirewallBackend=nftables'
+
+fw_run() { # <root> [nosed]
+  local sdir path="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin"
+  if [ "${2:-}" = nosed ]; then
+    sdir="$1/sedbin"; mkdir -p "$sdir"
+    # A sed that exits 0 and changes nothing. This is not a straw man: it is what GNU-style
+    # `sed -i 's/…/…/' file` does on a BSD sed, which is how this repo lost an edit once already.
+    stub "$sdir" sed <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    path="$sdir:$path"
+  fi
+  ROOT="$1" PATH="$path" bash -c "$PRE
+$FW_BLOCK"
+}
+
+R="$(newroot)"; mkdir -p "$R/etc/firewalld"; printf '%s\n' "$STOCK_FWCONF" > "$R/etc/firewalld/firewalld.conf"
+run_check hardening.defaultzone green "a stock firewalld.conf with DefaultZone=public" -- fw_run "$R"
+assert_has "the default zone is now ours"  "DefaultZone=auros"  "$(cat "$R/etc/firewalld/firewalld.conf")"
+assert_not "and the old value is gone"     "DefaultZone=public" "$(cat "$R/etc/firewalld/firewalld.conf")"
+# In place, not replaced: the other knobs in a package-owned file must survive.
+assert_has "FirewallBackend survived the edit" "FirewallBackend=nftables" "$(cat "$R/etc/firewalld/firewalld.conf")"
+assert_has "IPv6_rpfilter survived the edit"   "IPv6_rpfilter=yes"        "$(cat "$R/etc/firewalld/firewalld.conf")"
+
+# THE CASE THE POST-CHECK EXISTS FOR. sed exits 0, writes nothing, and the file still says `public`.
+R="$(newroot)"; mkdir -p "$R/etc/firewalld"; printf '%s\n' "$STOCK_FWCONF" > "$R/etc/firewalld/firewalld.conf"
+run_check hardening.defaultzone red "sed exits 0 and changes nothing — the machine keeps zone 'public'" -- fw_run "$R" nosed
+assert_has "says the edit did not take" "DefaultZone did not take" "$T_LAST_OUT"
+assert_has "and the file really was left alone" "DefaultZone=public" "$(cat "$R/etc/firewalld/firewalld.conf")"
+
+# A conf with the key spelled some other way, or absent: appending blind would put DefaultZone=auros
+# into a file firewalld may not read the same way, so the build refuses instead.
+R="$(newroot)"; mkdir -p "$R/etc/firewalld"; printf 'CleanupOnExit=yes\nFirewallBackend=nftables\n' > "$R/etc/firewalld/firewalld.conf"
+run_check hardening.defaultzone red "firewalld.conf has no DefaultZone line at all" -- fw_run "$R"
+assert_has "refuses to append blind" "refusing to append blind" "$T_LAST_OUT"
+
+R="$(newroot)"; mkdir -p "$R/etc/firewalld"
+run_check hardening.defaultzone red "firewalld is installed but firewalld.conf is missing" -- fw_run "$R"
+
+# A commented-out DefaultZone is not a DefaultZone. The `^\s*DefaultZone=` presence test would match
+# a line beginning with whitespace, but not one beginning with '#'.
+R="$(newroot)"; mkdir -p "$R/etc/firewalld"; printf '#DefaultZone=public\nFirewallBackend=nftables\n' > "$R/etc/firewalld/firewalld.conf"
+run_check hardening.defaultzone red "the DefaultZone line is commented out" -- fw_run "$R"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "dnf countme — a MEASURED number, and the one-repo case is the common one"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# The build console prints "DISABLED dnf countme in N repository file(s)" or "ABSENT". Both are
+# claims about this image. The guard is `[ "$countme_before" -gt 0 ]`, and off-by-one there
+# (`-gt 1`) is invisible to any test that only ever builds two repo files: an image with exactly one
+# countme=1 repo — which is the ordinary Fedora layout — would ship with the census still on while
+# the console said ABSENT.
+CM_BLOCK="$(extract_between "$H" '^countme_before=0' '^fi$' | rootify /etc/yum.repos.d)"
+
+cm_run() { # <root> [nosed]
+  local sdir path="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin"
+  if [ "${2:-}" = nosed ]; then
+    sdir="$1/sedbin"; mkdir -p "$sdir"
+    stub "$sdir" sed <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    path="$sdir:$path"
+  fi
+  ROOT="$1" PATH="$path" bash -c "$PRE
+$CM_BLOCK"
+}
+cm_repo() { printf '[%s]\nname=%s\nbaseurl=https://example.invalid/%s\nenabled=1\ncountme=%s\ngpgcheck=1\n' "$1" "$1" "$1" "$2"; }
+
+# EXACTLY ONE. The common case, and the one an off-by-one guard skips.
+R="$(newroot)"; mkdir -p "$R/etc/yum.repos.d"; cm_repo fedora 1 > "$R/etc/yum.repos.d/fedora.repo"
+run_check hardening.countme green "exactly ONE repository file has countme=1" -- cm_run "$R"
+assert_has "the console says it disabled one"  "DISABLED  dnf countme in 1 repository file(s)" "$T_LAST_OUT"
+assert_has "and the file really says countme=0" "countme=0" "$(cat "$R/etc/yum.repos.d/fedora.repo")"
+assert_not "with no countme=1 left in it"       "countme=1" "$(cat "$R/etc/yum.repos.d/fedora.repo")"
+
+# Two, so the count in the sentence is a measurement rather than a constant.
+R="$(newroot)"; mkdir -p "$R/etc/yum.repos.d"
+cm_repo fedora 1 > "$R/etc/yum.repos.d/fedora.repo"
+cm_repo updates 1 > "$R/etc/yum.repos.d/updates.repo"
+cm_repo extra 0 > "$R/etc/yum.repos.d/extra.repo"
+run_check hardening.countme green "two of three repository files have countme=1" -- cm_run "$R"
+assert_has "the number printed is the number found" "DISABLED  dnf countme in 2 repository file(s)" "$T_LAST_OUT"
+assert_not "and nothing anywhere still says countme=1" "countme=1" "$(cat "$R"/etc/yum.repos.d/*.repo)"
+
+R="$(newroot)"; mkdir -p "$R/etc/yum.repos.d"; cm_repo fedora 0 > "$R/etc/yum.repos.d/fedora.repo"
+run_check hardening.countme green "repository files exist and none has countme=1" -- cm_run "$R"
+assert_has "reports ABSENT as a finding" "ABSENT    dnf countme" "$T_LAST_OUT"
+
+R="$(newroot)"
+run_check hardening.countme green "there is no /etc/yum.repos.d at all" -- cm_run "$R"
+assert_has "says there was nothing to check" "nothing to check for countme" "$T_LAST_OUT"
+
+# The refusal: the rewrite silently did nothing, so countme is still on. Printing DISABLED here
+# would be a privacy claim we make falsely to someone who can read the build console.
+R="$(newroot)"; mkdir -p "$R/etc/yum.repos.d"; cm_repo fedora 1 > "$R/etc/yum.repos.d/fedora.repo"
+run_check hardening.countme red "the rewrite exits 0 and countme is still enabled" -- cm_run "$R" nosed
+assert_has "says how many are still enabled" "countme still enabled in 1" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "dnf-automatic — masked when present, untouched when not"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# On a composed read-only /usr a dnf-automatic timer cannot succeed. Left live it fails every night,
+# and a unit that fails every night is how people learn to ignore failed units — which is what check
+# 40-no-new-failed-units.sh depends on them not doing. The `if have_pkg dnf-automatic` guard is one
+# `!` away from inverting, and nothing exercised either branch.
+DNFA_BLOCK="$(extract_between "$H" '^if have_pkg dnf-automatic; then' '^fi$')"
+DNFA_TIMERS="dnf-automatic.timer dnf-automatic-install.timer dnf-automatic-notifyonly.timer dnf-automatic-download.timer"
+
+dnfa_run() { # <root> <have_pkg: yes|no>
+  ROOT="$1" DNFA="$2" bash -c "$PRE
+have_pkg() { [ \"\$DNFA\" = yes ]; }
+$UNIT_STUBS
+$MASK_FN
+$DNFA_BLOCK"
+}
+
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+for u in $DNFA_TIMERS; do : > "$R/usr/lib/systemd/system/$u"; done
+run_check hardening.dnf-automatic green "dnf-automatic is installed and all four timers are present" -- dnfa_run "$R" yes
+for u in $DNFA_TIMERS; do
+  assert_symlink_to "masked $u" "$R/etc/systemd/system/$u" /dev/null
+done
+
+# The other branch. `have_pkg` false must touch nothing — and must say so, because "we looked and it
+# was not there" is the deliverable for this whole section.
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+for u in $DNFA_TIMERS; do : > "$R/usr/lib/systemd/system/$u"; done
+run_check hardening.dnf-automatic green "dnf-automatic is NOT installed" -- dnfa_run "$R" no
+assert_has "reports it absent, with the bootc reasoning" "ABSENT    dnf-automatic" "$T_LAST_OUT"
+for u in $DNFA_TIMERS; do
+  assert_nofile "masked nothing: $u was left alone" "$R/etc/systemd/system/$u"
+done
+
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+for u in $DNFA_TIMERS; do : > "$R/usr/lib/systemd/system/$u"; done
+chmod 0500 "$R/etc/systemd/system"
+run_check hardening.dnf-automatic red "the package is installed and the timers cannot be masked" -- dnfa_run "$R" yes
+chmod 0700 "$R/etc/systemd/system"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the protected-set spot-check at the end of hardening"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# 90-cleanup.sh runs the full protected-set assertion, but that is forty minutes and five build steps
+# later. This spot-check is here so that a hardening step which removed the update path fails in the
+# build log next to its cause. It names two commands, and bootc is the one that matters: bootc IS the
+# update path, and an image without it can never be patched again. Dropping it from the list leaves a
+# check that can only notice a missing systemctl.
+SPOT_BLOCK="$(extract_between "$H" '^for c in bootc systemctl; do' '^did "protected set spot-check')"
+
+spot_run() { # <present commands...>
+  local d; d="$(stubdir)"
+  local c
+  for c in "$@"; do printf '#!/usr/bin/env bash\nexit 0\n' > "$d/$c"; chmod 0755 "$d/$c"; done
+  # env -i so only the stub directory is searched: the laptop running this test has a real
+  # systemctl-ish PATH and would make every case pass. bash is invoked by ABSOLUTE path, because a
+  # PATH holding only the stubs cannot find bash either — and `exit 127, env: bash: not found` is a
+  # red that would have scored as the refusal this case wants, for entirely the wrong reason.
+  env -i PATH="$d" HOME=/nonexistent "$BASH" -c "$PRE
+have_cmd() { command -v \"\$1\" >/dev/null 2>&1; }
+$SPOT_BLOCK"
+}
+
+run_check hardening.spotcheck green "bootc and systemctl are both present" -- spot_run bootc systemctl
+run_check hardening.spotcheck red   "bootc was removed — the image could never be patched again" -- spot_run systemctl
+assert_has "names bootc specifically" "bootc is missing after hardening" "$T_LAST_OUT"
+run_check hardening.spotcheck red   "systemctl was removed" -- spot_run bootc
+assert_has "names systemctl specifically" "systemctl is missing after hardening" "$T_LAST_OUT"
+run_check hardening.spotcheck red   "both were removed" -- spot_run
 
 t_finish "10-hardening.sh"

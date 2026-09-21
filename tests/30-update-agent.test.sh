@@ -370,4 +370,445 @@ for d in check/required.d check/wanted.d green.d red.d; do
                  || bad "$d is empty — the build asserts it is not"
 done
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "required.d — the COUNT, because every required check is a rollback trigger"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# The file says it in capitals: EVERY REQUIRED CHECK IS A ROLLBACK TRIGGER. A fifth one added
+# quietly gives a school a fifth way to have every laptop roll back overnight, and the build's own
+# assertion is `[ "$req" = "4" ]`. Relaxed to `-ge 4` that assertion can only notice deletions.
+#
+# The suite already counts the scripts in the REPO. This counts what the BUILD would accept, which
+# is a different question and the one the assertion is actually making.
+REQ_BLOCK="$(extract_between "$U" '^req="' '^did "4 required checks' \
+  | rootify /usr/lib/greenboot/check/required.d)"
+
+req_run() { # <root> <n scripts>
+  local root="$1" n="$2" i
+  mkdir -p "$root/usr/lib/greenboot/check/required.d"
+  i=1; while [ "$i" -le "$n" ]; do printf '#!/usr/bin/bash\nexit 0\n' > "$root/usr/lib/greenboot/check/required.d/${i}0-x.sh"; i=$((i+1)); done
+  ROOT="$root" bash -c "$PRE
+$REQ_BLOCK"
+}
+
+R="$(newroot)"; run_check gb.required-count green "exactly 4 required checks" -- req_run "$R" 4
+assert_has "says how many rollback triggers there are" "4 required checks (rollback triggers)" "$T_LAST_OUT"
+R="$(newroot)"; run_check gb.required-count red "a FIFTH rollback trigger was added quietly" -- req_run "$R" 5
+assert_has "names the count it found"      "found 5"            "$T_LAST_OUT"
+assert_has "and says where the decision belongs" "DECISIONS.md"  "$T_LAST_OUT"
+R="$(newroot)"; run_check gb.required-count red "one required check was deleted" -- req_run "$R" 3
+R="$(newroot)"; run_check gb.required-count red "none of them installed" -- req_run "$R" 0
+
+# And the repository and the build must agree about the number, or one of them is wrong.
+assert_eq "the repo ships exactly the 4 the build asserts" "4" \
+  "$(find "$CHK" -name '*.sh' | wc -l | tr -d ' ')"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "health checks — the build REFUSES a check that cannot parse"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# A required check that does not parse exits non-zero on every boot. greenboot reads that as a
+# failed boot, decrements the counter, and after two boots rolls the machine back — to an image
+# which, if the broken check shipped in the base, also has it. That is every machine in a school
+# stuck in a rollback loop, and it is a syntax error.
+#
+# The suite already parses the scripts in the repo directly. That is not the same assertion: it
+# proves the current scripts are fine, not that the BUILD would refuse a bad one. `bash -n` here is
+# the gate, and deleting it leaves both the scripts and this suite green.
+HC_BLOCK="$(extract_between "$U" '^for dir in check/required\.d' '^done$')"
+
+hc_run() { # <root> [extra-file-name] [extra-file-body]
+  local root="$1" d
+  for d in check/required.d check/wanted.d green.d red.d; do
+    mkdir -p "$root/ua/greenboot/$d"
+    printf '#!/usr/bin/bash\nexit 0\n' > "$root/ua/greenboot/$d/10-ok.sh"
+  done
+  [ -n "${2:-}" ] && printf '%s\n' "$3" > "$root/ua/greenboot/check/required.d/$2"
+  ROOT="$root" UA="$root/ua" bash -c "$PRE
+install_file() { mkdir -p \"\$(dirname \"\$ROOT\$2\")\"; install -m \"\${3:-0644}\" \"\$1\" \"\$ROOT\$2\"; did \"wrote \$2\"; }
+$HC_BLOCK"
+}
+
+R="$(newroot)"
+run_check gb.checks-parse green "every shipped check parses" -- hc_run "$R"
+assert_file "the required check was installed into /usr/lib, not /etc" "$R/usr/lib/greenboot/check/required.d/10-ok.sh"
+assert_file "and so were the wanted checks"                            "$R/usr/lib/greenboot/check/wanted.d/10-ok.sh"
+assert_file "and green.d"                                              "$R/usr/lib/greenboot/green.d/10-ok.sh"
+assert_file "and red.d"                                                "$R/usr/lib/greenboot/red.d/10-ok.sh"
+
+# THE REFUSAL. `if then` with no condition is the ordinary shape of a half-finished edit.
+R="$(newroot)"
+run_check gb.checks-parse red "a required check that does not parse" -- hc_run "$R" 99-broken.sh 'if then
+  echo hi
+fi'
+assert_has "says the file is not valid bash"          "is not valid bash"           "$T_LAST_OUT"
+assert_has "and what it would cost"                   "fails on every boot"          "$T_LAST_OUT"
+assert_nofile "and refused to install it"             "$R/usr/lib/greenboot/check/required.d/99-broken.sh"
+
+R="$(newroot)"
+run_check gb.checks-parse red "an unterminated quote in a check" -- hc_run "$R" 98-quote.sh 'echo "unterminated'
+
+# A directory with no scripts in it at all is a silently disarmed stage.
+R="$(newroot)"
+for d in check/required.d check/wanted.d green.d red.d; do mkdir -p "$R/ua/greenboot/$d"; done
+run_check gb.checks-parse red "a greenboot directory with no scripts in it" -- bash -c "$PRE
+install_file() { :; }
+ROOT='$R' UA='$R/ua'
+$HC_BLOCK"
+assert_has "names the empty directory" "no scripts in" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the ExecStart drop-in — systemd APPENDS unless the drop-in clears it first"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# A drop-in that sets ExecStart without an empty `ExecStart=` line first does not REPLACE the vendor
+# command, it adds to it. The machine then runs bootc's `--apply` (which reboots as soon as a
+# deployment is staged) AND ours (which waits until nobody is using the laptop) — so it reboots out
+# from under a logged-in student, in exactly the case our wrapper exists to prevent.
+#
+# `grep -qx 'ExecStart='` is an exact whole-line match for the CLEARING line. Weakened to `grep -q`
+# it matches `ExecStart=/usr/libexec/auros/auros-update` — the very line whose presence is not the
+# question — and can never fail.
+EXEC_BLOCK="$(extract_between "$U" "^grep -qx 'ExecStart='" 'does not clear ExecStart' \
+  | rootify /usr/lib/systemd/system)"
+
+exec_run() { # <root> <drop-in body>
+  local root="$1"
+  mkdir -p "$root/usr/lib/systemd/system/bootc-fetch-apply-updates.service.d"
+  printf '%s\n' "$2" > "$root/usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf"
+  ROOT="$root" bash -c "$PRE
+$EXEC_BLOCK"
+}
+
+R="$(newroot)"
+run_check update.execstart green "the drop-in we actually ship" \
+  -- exec_run "$R" "$(cat "$REPO/update-agent/systemd/bootc-fetch-apply-updates.service.d/10-auros.conf")"
+
+# THE ONE THAT MATTERS: ours is set, the vendor's is never cleared.
+R="$(newroot)"
+run_check update.execstart red "ExecStart is set but never cleared — systemd would run BOTH commands" \
+  -- exec_run "$R" '[Service]
+ExecStart=/usr/libexec/auros/auros-update'
+assert_has "explains that both commands would run" "both bootc" "$T_LAST_OUT"
+
+R="$(newroot)"
+run_check update.execstart red "the drop-in has no ExecStart lines at all" -- exec_run "$R" '[Service]
+Nice=10'
+
+# A commented clearing line is not a clearing line.
+R="$(newroot)"
+run_check update.execstart red "the clearing line is commented out" -- exec_run "$R" '[Service]
+#ExecStart=
+ExecStart=/usr/libexec/auros/auros-update'
+
+# And the shipped file must be the thing that passes, or the check and the payload disagree.
+assert_has "the shipped drop-in clears ExecStart first" "
+ExecStart=
+ExecStart=/usr/libexec/auros/auros-update" \
+  "$(cat "$REPO/update-agent/systemd/bootc-fetch-apply-updates.service.d/10-auros.conf")"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the signing key — which key, and never a private one"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# This block had NO tests, and it is the block that decides what a customer's machine will trust for
+# the rest of its life. Two specific failures are each one operator away:
+#
+#   `[ ! -s prod ] && [ -s dev ]` -> `||`   the DEVELOPMENT key is used even when a production key
+#                                           exists, and the image RECORDS ITSELF as production —
+#                                           so the publish guard that reads the kind back out of
+#                                           the image waves it through.
+#   the PRIVATE-key refusal made never-match  a private signing key is baked into every customer
+#                                           image, and the build log says "key in /usr".
+KEY_BLOCK="$(extract_between "$U" '^KEY_SRC="\$SIGN/keys/auros\.pub"' '^found "key in /usr' \
+  | rootify /usr/lib/auros /usr/lib/pki/containers)"
+
+REAL_DEV_KEY="$REPO/signing/keys/auros-development.pub"
+[ -s "$REAL_DEV_KEY" ] || t_abort "signing/keys/auros-development.pub is missing — this group would be testing invented keys only"
+FAKE_PROD_KEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcHJvZHVjdGlvbktleUZpeHR1cmVG
+b3JBdXJvc1Rlc3RzT25seU5vdEFSZWFsS2V5QUFBQUFBQUFBQT09
+-----END PUBLIC KEY-----'
+
+key_run() { # <root> <prod-key-body|''> <dev-key-body|''>
+  local root="$1"
+  mkdir -p "$root/sign/keys" "$root/usr/lib/auros" "$root/usr/lib/pki/containers"
+  [ -n "$2" ] && printf '%s\n' "$2" > "$root/sign/keys/auros.pub"
+  [ -n "$3" ] && printf '%s\n' "$3" > "$root/sign/keys/auros-development.pub"
+  ROOT="$root" SIGN="$root/sign" bash -c "$PRE
+install_file() { mkdir -p \"\$(dirname \"\$2\")\"; install -m \"\${3:-0644}\" \"\$1\" \"\$2\"; did \"wrote \$2\"; }
+$KEY_BLOCK"
+}
+
+R="$(newroot)"
+run_check signing.key green "only the development key is present" -- key_run "$R" '' "$(cat "$REAL_DEV_KEY")"
+assert_eq  "the image records itself as development" "development" "$(cat "$R/usr/lib/auros/signing-key-kind" 2>/dev/null || true)"
+assert_has "and the build says so out loud"          "DEVELOPMENT signing key" "$T_LAST_OUT"
+assert_has "naming the thing it cannot do"           "CANNOT be published"     "$T_LAST_OUT"
+
+R="$(newroot)"
+run_check signing.key green "only a production key is present" -- key_run "$R" "$FAKE_PROD_KEY" ''
+assert_eq  "the image records itself as production" "production" "$(cat "$R/usr/lib/auros/signing-key-kind" 2>/dev/null || true)"
+
+# THE SELECTION. Both keys on disk is the ordinary state once a human has minted the production key
+# and nobody has deleted the development one. Production must win, and the INSTALLED BYTES must be
+# the production key's — otherwise every machine verifies against a throwaway credential while the
+# image, and therefore the publish guard, says "production".
+R="$(newroot)"
+run_check signing.key green "BOTH keys are present — production must win" -- key_run "$R" "$FAKE_PROD_KEY" "$(cat "$REAL_DEV_KEY")"
+assert_eq  "recorded as production" "production" "$(cat "$R/usr/lib/auros/signing-key-kind" 2>/dev/null || true)"
+assert_eq  "and the key that was installed is the PRODUCTION key, byte for byte" \
+  "$FAKE_PROD_KEY" "$(cat "$R/usr/lib/pki/containers/auros.pub" 2>/dev/null || true)"
+assert_not "the development key was not installed" "$(sed -n '2p' "$REAL_DEV_KEY")" \
+  "$(cat "$R/usr/lib/pki/containers/auros.pub" 2>/dev/null || true)"
+assert_not "and no development warning was printed" "DEVELOPMENT signing key" "$T_LAST_OUT"
+
+# An empty production key file is not a production key. `-s`, not `-e`: a zero-byte auros.pub is
+# what `touch` leaves behind, and treating it as present would select nothing at all.
+R="$(newroot)"
+mkdir -p "$R/sign/keys"; : > "$R/sign/keys/auros.pub"
+run_check signing.key green "a ZERO-BYTE auros.pub falls through to the development key" \
+  -- key_run "$R" '' "$(cat "$REAL_DEV_KEY")"
+
+R="$(newroot)"
+run_check signing.key red "neither key exists" -- key_run "$R" '' ''
+assert_has "refuses the build rather than completing it" "REFUSED rather than completed" "$T_LAST_OUT"
+assert_has "and explains what the image would do"        "refuse every update"            "$T_LAST_OUT"
+
+R="$(newroot)"
+run_check signing.key red "the key file is not a PEM public key" -- key_run "$R" 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 auros@example' ''
+assert_has "says what it is not" "not a PEM public key" "$T_LAST_OUT"
+
+# THE PRIVATE KEY. A PEM carrying both halves passes `BEGIN PUBLIC KEY` and would be installed into
+# /usr/lib/pki/containers on every customer machine. This is the refusal that has to work.
+for priv in 'PRIVATE KEY' 'EC PRIVATE KEY' 'RSA PRIVATE KEY' 'ENCRYPTED PRIVATE KEY'; do
+  R="$(newroot)"
+  run_check signing.key red "the key file also carries a $priv block" -- key_run "$R" "$FAKE_PROD_KEY
+-----BEGIN $priv-----
+bm90YXJlYWxwcml2YXRla2V5YnV0aXRsb29rc2xpa2VvbmU=
+-----END $priv-----" ''
+  assert_has "says it contains a PRIVATE key" "contains a PRIVATE key" "$T_LAST_OUT"
+  assert_nofile "and installed nothing"       "$R/usr/lib/pki/containers/auros.pub"
+done
+
+# The keys we actually ship must be the ones that pass. Checked against the payload, not recited.
+assert_has "the development key is a PEM public key" "BEGIN PUBLIC KEY" "$(cat "$REAL_DEV_KEY")"
+assert_not "and carries no private half"             "PRIVATE KEY"      "$(cat "$REAL_DEV_KEY")"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "policy.json — the embedded validator, which is the whole of D8"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# D8: Aurora's base policy ends in a docker "" catch-all of insecureAcceptAnything, so
+# `bootc switch --enforce-container-sigpolicy` succeeds while verifying nothing. Every piece of the
+# fix looks like success on its own. This validator is what makes the combination checkable at build
+# time, and it had no tests at all — so each of its refusals was a line of Python nobody had ever
+# seen say no.
+#
+# The validator is EXTRACTED from the heredoc in build/30-update-agent.sh and run as a program.
+# Nothing here re-implements it.
+VALIDATOR_SRC="$(extract_raw "$U" '^import json,sys$' '^PY$' | sed '$d')"
+case "$VALIDATOR_SRC" in
+  *"insecureAcceptAnything"*) ;;
+  *) t_abort "the extracted policy.json validator does not mention insecureAcceptAnything — the heredoc moved and this group is testing something else" ;;
+esac
+VALIDATOR="$(newroot)/validate_policy.py"
+printf '%s\n' "$VALIDATOR_SRC" > "$VALIDATOR"
+python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$VALIDATOR" \
+  || t_abort "the extracted validator is not valid python — the extraction range is wrong, and every 'red' case below would pass for the wrong reason"
+
+SCOPE="ghcr.io/aarohkandy"
+pol_run() { # <json>
+  local f; f="$(newroot)/policy.json"
+  printf '%s\n' "$1" > "$f"
+  python3 "$VALIDATOR" "$f" "$SCOPE"
+}
+
+# The real file, with the scope substituted exactly as the build does it.
+REAL_POLICY="$(sed "s|@AUROS_SCOPE@|$SCOPE|g" "$REPO/signing/policy.json")"
+run_check signing.policy green "the policy.json we actually ship" -- pol_run "$REAL_POLICY"
+assert_has "names the scope and the key it resolved" "sigstoreSigned(/usr/lib/pki/containers/auros.pub, matchRepository)" "$T_LAST_OUT"
+assert_has "and PRINTS the consequence of the catch-all rather than filing it as a footnote" \
+  "AND NOTHING ELSE" "$T_LAST_OUT"
+
+# ── the global default ───────────────────────────────────────────────────────────────────────────
+# bootc's enforce-container-sigpolicy guard reads the GLOBAL DEFAULT ONLY. A default of
+# insecureAcceptAnything is the D8 failure itself: everything else in the file can be perfect.
+run_check signing.policy red "the global default is insecureAcceptAnything — the D8 failure" -- pol_run '{
+  "default": [{ "type": "insecureAcceptAnything" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }] } }
+}'
+assert_has "names the guard that would reject the image" "enforce-container-sigpolicy" "$T_LAST_OUT"
+run_check signing.policy red "there is no global default at all" -- pol_run '{
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }] } }
+}'
+
+# ── the scoped rule ──────────────────────────────────────────────────────────────────────────────
+run_check signing.policy red "no transports.docker entry for our scope — the D8 failure, in our own file" -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "ghcr.io/someoneelse": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }] } }
+}'
+run_check signing.policy red "the scope entry exists but is not sigstoreSigned" -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "insecureAcceptAnything" }] } }
+}'
+
+# ── signedIdentity ───────────────────────────────────────────────────────────────────────────────
+# cosign signatures carry only a repository. matchExact is containers/image's DEFAULT, and it would
+# reject every signature we make — which means no machine ever updates again, and, worse, it would
+# make check U4's negative test pass for the wrong reason.
+for si in matchExact matchRepoDigestOrExact remapIdentity; do
+  run_check signing.policy red "signedIdentity is $si" -- pol_run '{
+    "default": [{ "type": "reject" }],
+    "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "'"$si"'" } }] } }
+  }'
+  assert_has "explains that cosign carries only a repository" "cosign signatures carry only a repository" "$T_LAST_OUT"
+done
+run_check signing.policy green "signedIdentity is exactRepository" -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "exactRepository" } }] } }
+}'
+run_check signing.policy red "signedIdentity is missing entirely, so the default matchExact applies" -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub" }] } }
+}'
+
+# ── keyPath ──────────────────────────────────────────────────────────────────────────────────────
+# A policy pointing at a key that is not there means every update is refused for the life of the
+# machine — in a school, months later, with no terminal. The path is where the build puts the key
+# and nowhere else.
+for kp in /etc/pki/other.pub /usr/lib/pki/containers/aurora.pub /usr/share/pki/auros.pub; do
+  run_check signing.policy red "keyPath is $kp" -- pol_run '{
+    "default": [{ "type": "reject" }],
+    "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "'"$kp"'", "signedIdentity": { "type": "matchRepository" } }] } }
+  }'
+  assert_has "names the path it found" "unexpected keyPath" "$T_LAST_OUT"
+done
+
+# ── the docker "" catch-all ──────────────────────────────────────────────────────────────────────
+# Two answers are reviewed and written down: insecureAcceptAnything (the recorded trade) and reject
+# (the strict alternative). ANY THIRD ANSWER is how a policy stops meaning what its documentation
+# says — and `signedBy` with somebody else's key is a third answer that looks perfectly reasonable
+# in a diff.
+run_check signing.policy green 'transports.docker[""] rejects — the strict alternative' -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }], "": [{ "type": "reject" }] } }
+}'
+assert_has "says what that buys" "can be pulled" "$T_LAST_OUT"
+run_check signing.policy green 'there is no transports.docker[""] entry at all' -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }] } }
+}'
+assert_has "says the global default applies instead" "the global default (reject) applies" "$T_LAST_OUT"
+run_check signing.policy red 'transports.docker[""] is signedBy someone else key — an unreviewed third answer' -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }], "": [{ "type": "signedBy", "keyPath": "/usr/lib/pki/containers/someoneelse.pub" }] } }
+}'
+assert_has "says an unreviewed option is the failure mode" "unreviewed third option" "$T_LAST_OUT"
+run_check signing.policy red 'transports.docker[""] mixes reject and insecureAcceptAnything' -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }], "": [{ "type": "reject" }, { "type": "insecureAcceptAnything" }] } }
+}'
+
+# ── strictness that containers/image itself imposes ──────────────────────────────────────────────
+# ParanoidUnmarshalJSONObject ERRORS on an unrecognised key rather than ignoring it. A "$comment"
+# would stop the policy loading, and a policy that does not load is a machine that cannot pull
+# anything at all — including its own updates.
+run_check signing.policy red "an explanatory top-level key that containers/image would reject" -- pol_run '{
+  "$comment": "explaining the policy inside the policy",
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" } }] } }
+}'
+assert_has "says they are rejected, not ignored" "it does not ignore them" "$T_LAST_OUT"
+run_check signing.policy red "an unrecognised key inside a requirement" -- pol_run '{
+  "default": [{ "type": "reject" }],
+  "transports": { "docker": { "'"$SCOPE"'": [{ "type": "sigstoreSigned", "keyPath": "/usr/lib/pki/containers/auros.pub", "signedIdentity": { "type": "matchRepository" }, "comment": "why" }] } }
+}'
+run_check signing.policy red "the file does not parse as JSON at all" -- pol_run '{ "default": [ }'
+assert_has "says so plainly" "does not parse" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "registries.d — a more specific scope in another file turns verification off silently"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# containers-registries.d(5): only the MOST-PRECISELY matching scope is used, and there may be at
+# most one instance of any key under `docker` across all files. Either rule broken means our
+# use-sigstore-attachments is never applied — containers/image then looks for no signature, finds
+# none, and enforcement stops. Nothing on the machine looks wrong.
+REGD_BLOCK="$(extract_between "$U" '^for other in /etc/containers/registries\.d/' '^did "use-sigstore-attachments enabled' \
+  | rootify /etc/containers/registries.d)"
+
+regd_run() { # <root> <extra-name|''> <extra-body>
+  local root="$1"
+  mkdir -p "$root/etc/containers/registries.d"
+  printf 'docker:\n  "%s":\n    use-sigstore-attachments: true\n' "$SCOPE" > "$root/etc/containers/registries.d/auros.yaml"
+  [ -n "$2" ] && printf '%s\n' "$3" > "$root/etc/containers/registries.d/$2"
+  ROOT="$root" AUROS_SCOPE="$SCOPE" bash -c "$PRE
+$REGD_BLOCK"
+}
+
+R="$(newroot)"
+run_check signing.registries green "ours is the only file" -- regd_run "$R" '' ''
+R="$(newroot)"
+run_check signing.registries green "another file covers a different registry entirely" -- regd_run "$R" other.yaml 'docker:
+  "docker.io":
+    use-sigstore-attachments: false'
+R="$(newroot)"
+run_check signing.registries green "another file covers a DIFFERENT namespace on the same registry" -- regd_run "$R" other.yaml 'docker:
+  "ghcr.io/someoneelse":
+    use-sigstore-attachments: false'
+
+# THE SILENT OVERRIDE. A file defining ghcr.io/<ns>/auros-base is MORE SPECIFIC than ours, so ours
+# is ignored entirely for that repository — which is the repository every machine updates from.
+R="$(newroot)"
+run_check signing.registries red "another file defines a MORE SPECIFIC scope under ours" -- regd_run "$R" other.yaml 'docker:
+  "'"$SCOPE"'/auros-base":
+    use-sigstore-attachments: false'
+assert_has "explains that only the most precise scope is used" "MORE SPECIFIC" "$T_LAST_OUT"
+assert_has "and that verification would quietly stop"          "quietly stop working" "$T_LAST_OUT"
+
+# The duplicate. Forbidden even when the two settings agree: the merge itself fails.
+R="$(newroot)"
+run_check signing.registries red "another file defines the SAME scope as ours" -- regd_run "$R" dup.yaml 'docker:
+  "'"$SCOPE"'":
+    use-sigstore-attachments: true'
+assert_has "cites the rule" "forbids the same key in two files" "$T_LAST_OUT"
+
+R="$(newroot)"
+run_check signing.registries red "the duplicate is in a .yml rather than a .yaml" -- regd_run "$R" dup.yml 'docker:
+  "'"$SCOPE"'":
+    use-sigstore-attachments: true'
+R="$(newroot)"
+run_check signing.registries red "the duplicate scope is unquoted" -- regd_run "$R" dup.yaml 'docker:
+  '"$SCOPE"':
+    use-sigstore-attachments: true'
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "install-time enforcement — the row with no external symptom"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# Without enforce-container-sigpolicy = true, bootc records the deployment as signature mode
+# "insecure" and IGNORES policy.json entirely, however correct policy.json looks. There is no
+# symptom on the machine. `= false` is one word away and would pass any check that merely greps for
+# the setting's NAME.
+TOML_BLOCK="$(extract_between "$U" "^grep -qE '\\^enforce-container-sigpolicy" 'does not set enforce-container-sigpolicy' \
+  | rootify /usr/lib/bootc/install)"
+
+toml_run() { # <root> <body>
+  local root="$1"
+  mkdir -p "$root/usr/lib/bootc/install"
+  printf '%s\n' "$2" > "$root/usr/lib/bootc/install/30-auros.toml"
+  ROOT="$root" bash -c "$PRE
+$TOML_BLOCK"
+}
+
+R="$(newroot)"
+run_check signing.sigpolicy green "the 30-auros.toml we actually ship" -- toml_run "$R" "$(cat "$REPO/signing/install/30-auros.toml")"
+R="$(newroot)"
+run_check signing.sigpolicy red "the setting says false" -- toml_run "$R" '[install]
+enforce-container-sigpolicy = false'
+R="$(newroot)"
+run_check signing.sigpolicy red "the setting is absent" -- toml_run "$R" '[install]
+root-fs-type = "btrfs"'
+R="$(newroot)"
+run_check signing.sigpolicy red "the setting is commented out" -- toml_run "$R" '[install]
+#enforce-container-sigpolicy = true'
+R="$(newroot)"
+run_check signing.sigpolicy red "the value is a quoted string rather than the boolean" -- toml_run "$R" '[install]
+enforce-container-sigpolicy = "true"'
+
 t_finish "30-update-agent.sh"

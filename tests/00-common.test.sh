@@ -245,6 +245,25 @@ run_check preflight.image green "FROM matches the mirror naming convention with 
   -- preflight "$R" "UPSTREAM_DIGEST=$REAL_DIGEST" "UPSTREAM_IMAGE=ghcr.io/someoneelse/auros-upstream-mirror"
 assert_has "warns that it verified nothing" "NAMING CONVENTION" "$T_LAST_OUT"
 
+# THE ANCHOR ON THAT CONVENTION. `/auros-upstream-mirror$` is the only thing standing between "we
+# accepted a mirror we could not verify" and "we accepted anything whose name contains our mirror's
+# name". Drop the `$` and ghcr.io/attacker/auros-upstream-mirror-evil becomes a legitimate base:
+# a name anybody can register, in any namespace, in the one branch that deliberately verifies
+# nothing. The warning above is what makes this branch tolerable, and the anchor is what keeps the
+# branch narrow enough for the warning to be honest.
+for nearmiss in \
+  "ghcr.io/attacker/auros-upstream-mirror-evil" \
+  "ghcr.io/attacker/auros-upstream-mirror2" \
+  "ghcr.io/attacker/auros-upstream-mirror/base" \
+  "ghcr.io/attacker/notauros-upstream-mirror-x"
+do
+  R="$(mkctx @real)"
+  run_check preflight.image red "FROM names '$nearmiss' — contains the mirror name but is not it" \
+    -- preflight "$R" "UPSTREAM_DIGEST=$REAL_DIGEST" "UPSTREAM_IMAGE=$nearmiss"
+  assert_has "refused as a base nobody chose" "base image mismatch" "$T_LAST_OUT"
+  assert_nofile "and wrote no provenance record for it" "$R/usr/lib/auros/release"
+done
+
 for wrong in \
   "ghcr.io/ublue-os/bluefin" \
   "ghcr.io/attacker/aurora" \
@@ -310,5 +329,253 @@ R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system"; : > "$R/usr/lib/systemd/sy
 mkdir -p "$R/etc/systemd/system"; chmod 0500 "$R/etc/systemd/system"
 run_check mask_unit red "masking cannot be completed — refuses rather than claiming success" -- mask_case "$R" sshd.service
 chmod 0700 "$R/etc/systemd/system"
+
+
+# ── the presence test, which decides whether anything is masked at all ───────────────────────────
+# `if ! have_unit "$u" && [ ! -e "/usr/lib/systemd/system/$u" ]; then return 1; fi`
+#
+# AND, not OR, and the two halves answer different questions. have_unit asks systemctl (which knows
+# about aliases, generators and units under /etc); the -e test asks the filesystem about /usr/lib
+# specifically. A unit that only ONE of them can see is still a unit, and must still be masked.
+#
+# The old test stubbed have_unit as `[ -e "$ROOT/usr/lib/systemd/system/$1" ]` — the same question
+# twice — so && and || were indistinguishable here. With ||, a unit present in /etc/systemd/system
+# but not /usr/lib is reported ABSENT and never masked, and 10-hardening.sh prints "not present on
+# this base" about a unit that is sitting there enabled.
+mask_case_hu() { # <root> <unit> <have_unit: yes|no>
+  ROOT="$1" HU="$3" bash -c "die() { echo \"die: \$*\" >&2; exit 1; }
+record() { :; }
+_systemctl_offline() { return 0; }
+have_unit() { [ \"\$HU\" = yes ]; }
+$MASK_FN
+mask_unit '$2'"
+}
+
+# systemctl knows the unit; /usr/lib does not have a file for it. This is a unit shipped in
+# /etc/systemd/system, or an alias, or one a generator produces.
+R="$(newroot)"; mkdir -p "$R/etc/systemd/system"
+run_check mask_unit green "systemctl knows the unit and /usr/lib has no file for it" -- mask_case_hu "$R" sshd.socket yes
+assert_symlink_to "it is masked anyway" "$R/etc/systemd/system/sshd.socket" /dev/null
+
+# The reverse: the file is on disk and systemctl (offline, in a container, with no bus) says nothing.
+# That is the ORDINARY case inside an image build, which is what makes getting it wrong expensive.
+R="$(newroot)"; mkdir -p "$R/usr/lib/systemd/system" "$R/etc/systemd/system"
+: > "$R/usr/lib/systemd/system/abrtd.service"
+run_check mask_unit green "/usr/lib has the file and systemctl knows nothing" -- mask_case_hu "$R" abrtd.service no
+assert_symlink_to "it is masked anyway" "$R/etc/systemd/system/abrtd.service" /dev/null
+
+# Only when BOTH say no is the unit genuinely absent.
+R="$(newroot)"; mkdir -p "$R/etc/systemd/system"
+run_check mask_unit red "neither systemctl nor /usr/lib has heard of it" -- mask_case_hu "$R" nosuch.service no
+assert_nofile "and nothing was invented for it" "$R/etc/systemd/system/nosuch.service"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "enable_unit — 'enabled' is a symlink that exists, not an exit code"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# enable_unit() had NO tests. It is what puts firewalld.service, auros-flatpak-update.timer and
+# auros-hardening-assert.service into service — the firewall, the application update path, and the
+# runtime hardening assertion. A unit it failed to enable would be reported "enabled" in the build
+# console and would simply never run, on every machine, silently.
+#
+# Two specific failures are reachable by one-character edits and both are tested here:
+#   `[ "$linked" -eq 1 ]` -> `-ge 0`  a unit with no [Install] section is called enabled
+#   `ln -sfn "../$u"`     -> `"$u"`   the link points at ITSELF; nothing resolves, nothing starts
+ENABLE_FN="$(extract_fn "$REPO/build/00-common.sh" _unit_wantedby | rootify /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system)
+$(extract_fn "$REPO/build/00-common.sh" enable_unit | rootify /etc/systemd/system /usr/lib/systemd/system)"
+
+enable_case() { # <root> <unit>
+  ROOT="$1" bash -c "die()  { echo \"die: \$*\" >&2; exit 1; }
+did()   { echo \"DID \$*\"; }
+found() { echo \"FOUND \$*\"; }
+record(){ :; }
+_systemctl_offline() { return 0; }   # exits 0 and does nothing — what it does inside a container
+$ENABLE_FN
+enable_unit '$2'"
+}
+
+mkunit() { # <root> <unit> <install-section-body>
+  mkdir -p "$1/usr/lib/systemd/system"
+  printf '[Unit]\nDescription=%s\n\n[Service]\nExecStart=/bin/true\n\n%s' "$2" "$3" > "$1/usr/lib/systemd/system/$2"
+}
+
+R="$(newroot)"
+mkunit "$R" firewalld.service '[Install]
+WantedBy=multi-user.target
+'
+run_check enable_unit green "a unit with WantedBy=multi-user.target" -- enable_case "$R" firewalld.service
+assert_file "the .wants symlink exists" "$R/usr/lib/systemd/system/multi-user.target.wants/firewalld.service"
+assert_symlink_to "and it is relative, so it survives being moved with the tree" \
+  "$R/usr/lib/systemd/system/multi-user.target.wants/firewalld.service" "../firewalld.service"
+# THE ANTI-DANGLING ASSERTION. `ln -sfn "$u"` instead of "../$u" produces a link that points at
+# itself, and a self-referential symlink still LOOKS like a symlink. Reading through it is what
+# distinguishes a working enable from a decorative one.
+assert_has "and reading through the link reaches the real unit file" "Description=firewalld.service" \
+  "$(cat "$R/usr/lib/systemd/system/multi-user.target.wants/firewalld.service" 2>/dev/null || echo '<dangling>')"
+
+# Several WantedBy targets on one line is legal and is how timers that want more than one target are
+# written. All of them must be linked, not just the first.
+R="$(newroot)"
+mkunit "$R" auros-flatpak-update.timer '[Install]
+WantedBy=timers.target multi-user.target
+'
+run_check enable_unit green "a unit with two WantedBy targets on one line" -- enable_case "$R" auros-flatpak-update.timer
+assert_file "linked into timers.target.wants"      "$R/usr/lib/systemd/system/timers.target.wants/auros-flatpak-update.timer"
+assert_file "linked into multi-user.target.wants"  "$R/usr/lib/systemd/system/multi-user.target.wants/auros-flatpak-update.timer"
+
+# Already enabled: idempotent. The whole build must be runnable twice over one filesystem (check S7).
+run_check enable_unit green "running it a second time over the same filesystem" -- enable_case "$R" auros-flatpak-update.timer
+assert_file "the link is still there" "$R/usr/lib/systemd/system/timers.target.wants/auros-flatpak-update.timer"
+
+# THE REFUSAL. A unit with no [Install] section cannot be enabled by anything — systemd has nowhere
+# to link it. Reporting "enabled" for it is the false claim this function exists to make impossible.
+R="$(newroot)"
+mkunit "$R" auros-hardening-assert.service ''
+run_check enable_unit red "a unit with no [Install] section at all" -- enable_case "$R" auros-hardening-assert.service
+assert_has "says it cannot be enabled, only started by something else" "no WantedBy target" "$T_LAST_OUT"
+
+R="$(newroot)"
+mkunit "$R" oneshot.service '[Install]
+RequiredBy=ostree-finalize-staged.service
+'
+run_check enable_unit red "a unit that is RequiredBy but not WantedBy" -- enable_case "$R" oneshot.service
+assert_has "names the limitation rather than silently succeeding" "no WantedBy target" "$T_LAST_OUT"
+
+# And the case where the link cannot be created at all.
+R="$(newroot)"
+mkunit "$R" firewalld.service '[Install]
+WantedBy=multi-user.target
+'
+chmod 0500 "$R/usr/lib/systemd/system"
+run_check enable_unit red "the .wants directory cannot be created" -- enable_case "$R" firewalld.service
+chmod 0700 "$R/usr/lib/systemd/system"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "pkg_ensure — 'installed' is rpm's answer afterwards, not the package manager's exit code"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# pkg_ensure() had no tests either, and it installs selinux-policy-targeted, firewalld, sudo, polkit
+# and greenboot — the hardening and the rollback path. Three things it does are each one edit from
+# being a no-op, and all three would leave the build log saying "installed":
+#
+#   the early return      `-eq 0` -> `-ge 0` means it never installs anything, ever
+#   the install line      dropping --setopt=install_weak_deps=False breaks the subtraction promise
+#   the post-verification `have_pkg || die` is what makes "installed" a measurement
+PKG_FN="$(extract_lines "$REPO/build/00-common.sh" '^have_(pkg|cmd)\(\)')
+$(extract_fn "$REPO/build/00-common.sh" auros_pkg_mgr)
+$(extract_fn "$REPO/build/00-common.sh" pkg_ensure)"
+
+pkg_run() { # <root> <installed-after: yes|no> <pkgs...>
+  local root="$1" after="$2"; shift 2
+  local d="$root/bin"; mkdir -p "$d"
+  # rpm -q: answers from $PRESENT, which the dnf5 stub appends to when $AFTER is yes. That is the
+  # whole point — the verification reads the world AFTER the install, not the installer's opinion.
+  cat > "$d/rpm" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "-q" ] && shift
+[ "${1:-}" = "--qf" ] && shift 2
+p="${1:-}"
+grep -qxF "$p" "$PRESENT_FILE" 2>/dev/null && { echo "${p}-1.0-1.fc44"; exit 0; }
+echo "package $p is not installed"; exit 1
+SH
+  # dnf5: records its argv, and installs (or does not) depending on $AFTER. A package manager that
+  # exits 0 without installing is the case 00-common.sh's comment names by hand.
+  cat > "$d/dnf5" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGV_FILE"
+if [ "$AFTER" = yes ]; then
+  for a in "$@"; do case "$a" in -*|install) ;; *) printf '%s\n' "$a" >> "$PRESENT_FILE" ;; esac; done
+fi
+exit 0
+SH
+  chmod 0755 "$d/rpm" "$d/dnf5"
+  : > "$root/present"; : > "$root/argv"
+  local p
+  for p in ${PKG_PRESENT:-}; do printf '%s\n' "$p" >> "$root/present"; done
+  # The stub directory goes FIRST, not alone: the stubs themselves need grep and bash, and a PATH
+  # holding only the stubs makes every case die with "env: bash: not found" — a red that a test
+  # expecting a refusal would happily score as the refusal it wanted. auros_pkg_mgr() probes dnf5
+  # before dnf and rpm-ostree, so the stub is what resolves whatever else is on this machine.
+  env -i PATH="$d:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$root" AFTER="$after" \
+      PRESENT_FILE="$root/present" ARGV_FILE="$root/argv" \
+      "$BASH" -c "did()   { echo \"DID \$*\"; }
+found() { echo \"FOUND \$*\"; }
+die()   { echo \"DIE \$*\" >&2; exit 1; }
+record(){ :; }
+AUROS_PKG_MGR=\"\"
+$PKG_FN
+pkg_ensure $*"
+}
+
+# A package that is missing must actually be handed to the package manager, with the weak-deps flag.
+R="$(newroot)"; PKG_PRESENT=""
+run_check pkg_ensure green "one missing package, and the package manager installs it" -- pkg_run "$R" yes firewalld
+assert_has "the package manager was invoked with the package name" "firewalld" "$(cat "$R/argv")"
+assert_has "it was an install"                                     "install"   "$(cat "$R/argv")"
+# spec §1.2 is subtraction. A hardening layer that quietly drags in twenty recommended packages is
+# the opposite, and nothing else in the repo would notice.
+assert_has "weak dependencies are refused" "--setopt=install_weak_deps=False" "$(cat "$R/argv")"
+assert_has "and it reports the installed version, not an intention" "installed firewalld" "$T_LAST_OUT"
+
+R="$(newroot)"; PKG_PRESENT=""
+run_check pkg_ensure green "several missing packages in one call" -- pkg_run "$R" yes selinux-policy-targeted sudo polkit
+for p in selinux-policy-targeted sudo polkit; do
+  assert_has "handed $p to the package manager" "$p" "$(cat "$R/argv")"
+done
+
+# Idempotence. Running the whole build twice over one filesystem must install nothing the second
+# time (check S7 builds twice and compares). `-eq 0` -> `-ge 0` on the early return inverts this:
+# the function returns before installing ANYTHING, on every call.
+R="$(newroot)"; PKG_PRESENT="firewalld"
+run_check pkg_ensure green "the package is already present" -- pkg_run "$R" yes firewalld
+assert_eq  "the package manager was not invoked at all" "" "$(cat "$R/argv")"
+assert_has "and it says so"  "firewalld already present" "$T_LAST_OUT"
+
+# THE REFUSAL, and the reason the post-verification exists: a package manager that returns 0 without
+# installing. `dnf install` does this for a package that is excluded, or filtered by a modular
+# filter, or whose transaction was a no-op. Without the `have_pkg || die` the build continues, and
+# the image ships without selinux-policy-targeted while the log says "installed selinux-policy-targeted".
+R="$(newroot)"; PKG_PRESENT=""
+run_check pkg_ensure red "the package manager exits 0 and installs nothing" -- pkg_run "$R" no selinux-policy-targeted
+assert_has "says which package did not install" "selinux-policy-targeted did not install" "$T_LAST_OUT"
+assert_has "and that rpm is the authority"      "rpm cannot find it"                      "$T_LAST_OUT"
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "install_file — every path it writes is recorded for the mtime re-stamp"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# 90-cleanup.sh re-stamps every path in $AUROS_WRITTEN_LIST with SOURCE_DATE_EPOCH as the last act of
+# the build, which is what makes check S7 (build twice, compare content digests) possible. If
+# install_file stops appending, the re-stamp covers nothing, and S7 fails forty minutes later in CI
+# with no indication that the cause is here.
+IF_FN="$(extract_fn "$REPO/build/00-common.sh" auros_stamp)
+$(extract_fn "$REPO/build/00-common.sh" install_file)
+$(extract_fn "$REPO/build/00-common.sh" install_text)"
+
+R="$(newroot)"
+printf 'SELINUX=enforcing\n' > "$R/src"
+run_check install_file green "a file is installed from the build context" -- bash -c "
+did() { echo \"DID \$*\"; }
+die() { echo \"DIE \$*\" >&2; exit 1; }
+record(){ :; }
+SOURCE_DATE_EPOCH=1789504430
+AUROS_WRITTEN_LIST='$R/written'
+$IF_FN
+install_file '$R/src' '$R/etc/selinux/config' 0644
+install_text '$R/usr/lib/auros/release' 0644 <<'EOF'
+AUROS_IMAGE_KIND=base
+EOF
+"
+assert_file "the destination exists"                 "$R/etc/selinux/config"
+assert_has  "install_file recorded its destination"  "$R/etc/selinux/config"      "$(cat "$R/written" 2>/dev/null || true)"
+assert_has  "install_text recorded its destination"  "$R/usr/lib/auros/release"   "$(cat "$R/written" 2>/dev/null || true)"
+
+run_check install_file red "the source file is not in the build context" -- bash -c "
+did() { echo \"DID \$*\"; }
+die() { echo \"DIE \$*\" >&2; exit 1; }
+record(){ :; }
+SOURCE_DATE_EPOCH=1789504430
+AUROS_WRITTEN_LIST='$R/written'
+$IF_FN
+install_file '$R/nosuch' '$R/etc/nosuch' 0644"
+assert_has "names the Containerfile as the cause" "did not COPY it" "$T_LAST_OUT"
 
 t_finish "00-common.sh"

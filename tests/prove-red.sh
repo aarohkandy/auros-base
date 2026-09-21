@@ -94,14 +94,42 @@ old = '''  for f in /usr/lib/bootc/kargs.d/*.toml; do
 open(p, 'w').write(s[:loop_start] + old + s[loop_end:])
 MUT
 
-mutate "the permanently-green original: tr -d '[:space:]' eats the newlines too" \
-       tests/kargs-check.test.sh <<'MUT'
-p = 'tests/kargs-check.test.sh'
+# H01 — THE FLAGSHIP. This mutation used to edit tests/kargs-check.test.sh, because the test carried
+# its own copy of the caller. That meant the mutation proved the TEST's copy was checked, not that
+# the shipping line was. Mutating build/10-hardening.sh instead left every case green until the test
+# was rewired to extract the real line (2026-09-20).
+mutate "the permanently-green original: tr -d '[:space:]' eats the newlines too, IN THE SHIPPING CALLER" \
+       tests/kargs-check.test.sh "a genuine selinux=0" <<'MUT'
+p = 'build/10-hardening.sh'
 s = open(p).read()
-# The bug lived in the CALLER, which is why the test reproduces the caller. Mutating the test's copy
-# of the caller is mutating the thing that shipped.
-assert "tr -d ' \\t'" in s
-open(p, 'w').write(s.replace("tr -d ' \\t'", "tr -d '[:space:]'"))
+old = "_auros_bad_kargs=$(_auros_effective_kargs | tr -d ' \\t'"
+assert old in s, "the shipping caller no longer has the tr this mutation edits"
+open(p, 'w').write(s.replace(old, "_auros_bad_kargs=$(_auros_effective_kargs | tr -d '[:space:]'"))
+MUT
+
+# H02 — the alternation. Same cause as H01: the regex being exercised was the test's copy.
+mutate "enforcing=0 is dropped from the shipping forbidden-karg regex" \
+       tests/kargs-check.test.sh "a genuine enforcing=0" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = "grep -E '^(selinux=0|enforcing=0)$'"
+assert old in s
+i = s.index('_auros_bad_kargs=')
+j = s.index('\n', i)
+line = s[i:j]
+assert old in line, "the alternation is no longer on the _auros_bad_kargs line"
+open(p, 'w').write(s[:i] + line.replace(old, "grep -E '^(selinux=0)$'") + s[j:])
+MUT
+
+# H04 — comment stripping. Removing it reopens the path to the ORIGINAL permanently-RED bug, where
+# prose in a comment was read as configuration.
+mutate "comment stripping is removed from _auros_effective_kargs, so prose becomes configuration" \
+       tests/kargs-check.test.sh "comment containing a whole bracketed kargs array" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = """    sed 's/#.*$//' "$f" | tr '\\n' ' ' \\"""
+assert old in s
+open(p, 'w').write(s.replace(old, """    cat "$f" | tr '\\n' ' ' \\"""))
 MUT
 
 printf '\n%s\n' "$(c 1 'build/00-common.sh — the preflight')"
@@ -135,6 +163,83 @@ j = s.index('\n', i)
 open(p, 'w').write(s[:i] + '  :' + s[j:])
 MUT
 
+mutate "C02: mask_unit's presence test becomes OR, so a unit only systemctl can see is 'ABSENT'" \
+       tests/00-common.test.sh "systemctl knows the unit" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '  if ! have_unit "$u" && [ ! -e "/usr/lib/systemd/system/$u" ]; then'
+assert old in s
+open(p, 'w').write(s.replace(old, '  if ! have_unit "$u" || [ ! -e "/usr/lib/systemd/system/$u" ]; then'))
+MUT
+
+mutate "C03: enable_unit accepts a unit with no WantedBy, and reports it enabled" \
+       tests/00-common.test.sh "no WantedBy target" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '  [ "$linked" -eq 1 ] || die "$u has no WantedBy target'
+assert old in s
+open(p, 'w').write(s.replace(old, '  [ "$linked" -ge 0 ] || die "$u has no WantedBy target'))
+MUT
+
+mutate "C04: enable_unit's fallback symlink points at itself instead of at the unit file" \
+       tests/00-common.test.sh "enable_unit" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '    ln -sfn "../$u" "/usr/lib/systemd/system/$t.wants/$u"'
+assert old in s
+open(p, 'w').write(s.replace(old, '    ln -sfn "$u" "/usr/lib/systemd/system/$t.wants/$u"'))
+MUT
+
+mutate "C05: pkg_ensure stops verifying with rpm, so 'installed' becomes dnf's opinion" \
+       tests/00-common.test.sh "did not install" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '    have_pkg "$p" || die "$p did not install'
+assert old in s
+i = s.index(old)
+j = s.index('\n', i)
+open(p, 'w').write(s[:i] + '    :' + s[j:])
+MUT
+
+mutate "C06: pkg_ensure's early return fires on every call, so nothing is ever installed" \
+       tests/00-common.test.sh "pkg_ensure" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '  if [ ${#missing[@]} -eq 0 ]; then return 0; fi'
+assert old in s
+open(p, 'w').write(s.replace(old, '  if [ ${#missing[@]} -ge 0 ]; then return 0; fi'))
+MUT
+
+mutate "C07: --setopt=install_weak_deps=False is dropped, so hardening drags in weak deps" \
+       tests/00-common.test.sh "weak dependencies are refused" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '      "$mgr" install -y --setopt=install_weak_deps=False "${missing[@]}"'
+assert old in s
+open(p, 'w').write(s.replace(old, '      "$mgr" install -y "${missing[@]}"'))
+MUT
+
+mutate "C11: the D21 mirror naming convention loses its anchor, so any name containing it is a base" \
+       tests/00-common.test.sh "contains the mirror name but is not it" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = "grep -qE '/auros-upstream-mirror$'"
+assert old in s
+open(p, 'w').write(s.replace(old, "grep -qE '/auros-upstream-mirror'"))
+MUT
+
+mutate "C12: install_file stops recording what it wrote, so the mtime re-stamp covers nothing" \
+       tests/00-common.test.sh "recorded its destination" <<'MUT'
+p = 'build/00-common.sh'
+s = open(p).read()
+old = '''  install -m "$mode" "$src" "$dest"
+  auros_stamp "$dest"
+  printf '%s\\n' "$dest" >> "$AUROS_WRITTEN_LIST"'''
+assert old in s
+open(p, 'w').write(s.replace(old, '''  install -m "$mode" "$src" "$dest"
+  auros_stamp "$dest"'''))
+MUT
+
 printf '\n%s\n' "$(c 1 'hardening — the runtime assertion')"
 
 mutate "sshd 'disabled' is accepted as good enough, instead of requiring 'masked'" \
@@ -162,6 +267,64 @@ s = open(p).read()
 old = '  if [[ "$(basename "$f")" > "50-auros-baseline" ]]; then'
 assert old in s
 open(p, 'w').write(s.replace(old, '  if [[ "$(basename "$f")" < "50-auros-baseline" ]]; then'))
+MUT
+
+mutate "H13: sshd.socket is dropped from the mask loop — sshd starts on an incoming connection" \
+       tests/10-hardening.test.sh "sshd.socket" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = 'for u in sshd.service sshd.socket; do'
+assert old in s
+open(p, 'w').write(s.replace(old, 'for u in sshd.service; do'))
+MUT
+
+mutate "H06: a unit-keep row is announced as KEPT ON and never actually enabled" \
+       tests/10-hardening.test.sh "actually ENABLED" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = '''    unit-keep)
+      if have_unit "$target"; then
+        enable_unit "$target"'''
+assert old in s
+open(p, 'w').write(s.replace(old, '''    unit-keep)
+      if have_unit "$target"; then
+        :'''))
+MUT
+
+mutate "H07: the countme guard is off by one, so a single countme=1 repo ships enabled" \
+       tests/10-hardening.test.sh "DISABLED  dnf countme in 1" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = '  if [ "$countme_before" -gt 0 ]; then'
+assert old in s
+open(p, 'w').write(s.replace(old, '  if [ "$countme_before" -gt 1 ]; then'))
+MUT
+
+mutate "H10: the dnf-automatic guard is inverted — the timers stay live on a read-only /usr" \
+       tests/10-hardening.test.sh "dnf-automatic" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = 'if have_pkg dnf-automatic; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if ! have_pkg dnf-automatic; then'))
+MUT
+
+mutate "H11: bootc is dropped from the end-of-hardening spot-check" \
+       tests/10-hardening.test.sh "bootc was removed" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = 'for c in bootc systemctl; do\n  have_cmd "$c" || die "$c is missing after hardening'
+assert old in s
+open(p, 'w').write(s.replace(old, 'for c in systemctl; do\n  have_cmd "$c" || die "$c is missing after hardening'))
+MUT
+
+mutate "H12: the DefaultZone post-check matches the line it was supposed to change" \
+       tests/10-hardening.test.sh "DefaultZone did not take" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = "grep -qx 'DefaultZone=auros' /etc/firewalld/firewalld.conf"
+assert old in s
+open(p, 'w').write(s.replace(old, "grep -q 'DefaultZone' /etc/firewalld/firewalld.conf"))
 MUT
 
 printf '\n%s\n' "$(c 1 'build/30-update-agent.sh — the safety-critical layer')"
@@ -227,6 +390,116 @@ s = open(p).read()
 old = 'TIMER=bootc-fetch-apply-updates.timer'
 assert old in s
 open(p, 'w').write(s.replace(old, 'TIMER=uupd.timer'))
+MUT
+
+mutate "U01: the required-check count becomes -ge 4, so a fifth rollback trigger ships quietly" \
+       tests/30-update-agent.test.sh "a FIFTH rollback trigger" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = '[ "$req" = "4" ] || die'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ "$req" -ge 4 ] || die'))
+MUT
+
+mutate "U02: the private-key refusal is made never-match — a signing key is baked into every image" \
+       tests/30-update-agent.test.sh "contains a PRIVATE key" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = "if grep -q 'BEGIN .*PRIVATE KEY' \"$KEY_SRC\"; then"
+assert old in s
+open(p, 'w').write(s.replace(old, "if grep -q '^$BEGIN .*PRIVATE KEY' \"$KEY_SRC\"; then"))
+MUT
+
+mutate "U03: key selection becomes OR, so the DEVELOPMENT key is used even when a production key exists" \
+       tests/30-update-agent.test.sh "BOTH keys are present" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if [ ! -s "$KEY_SRC" ] && [ -s "$SIGN/keys/auros-development.pub" ]; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if [ ! -s "$KEY_SRC" ] || [ -s "$SIGN/keys/auros-development.pub" ]; then'))
+MUT
+
+mutate "U04: the validator stops rejecting an insecureAcceptAnything global default — the D8 failure" \
+       tests/30-update-agent.test.sh "the global default is insecureAcceptAnything" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if any(r.get("type")=="insecureAcceptAnything" for r in p["default"]):'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if False:'))
+MUT
+
+mutate "U05: the validator accepts signedIdentity matchExact — no cosign signature would ever verify" \
+       tests/30-update-agent.test.sh "signedIdentity is matchExact" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if si not in ("matchRepository","exactRepository"):'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if si not in ("matchRepository","exactRepository","matchExact","matchRepoDigestOrExact","remapIdentity"):'))
+MUT
+
+mutate "U06: the unreviewed third catch-all option is no longer refused" \
+       tests/30-update-agent.test.sh "unreviewed third answer" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = "elif catchall:\n    bad('transports.docker[\"\"] is %r"
+assert old in s
+open(p, 'w').write(s.replace(old, "elif catchall:\n    print('transports.docker[\"\"] is %r"))
+MUT
+
+mutate "U11: the validator stops checking keyPath, so a policy can point at a key that is not there" \
+       tests/30-update-agent.test.sh "unexpected keyPath" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if kp!="/usr/lib/pki/containers/auros.pub": bad("unexpected keyPath %r" % kp)'
+assert old in s
+open(p, 'w').write(s.replace(old, 'pass'))
+MUT
+
+mutate "U07: the registries.d more-specific-scope check is made never-match" \
+       tests/30-update-agent.test.sh "MORE SPECIFIC scope under ours" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if grep -qE "^[[:space:]]*[\'\\"]?${AUROS_SCOPE}[\'\\"]?/" "$other"; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if grep -qE "^@never@${AUROS_SCOPE}/" "$other"; then'))
+MUT
+
+mutate "U07b: the registries.d duplicate-scope check is made never-match" \
+       tests/30-update-agent.test.sh "the SAME scope as ours" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'if grep -qE "^[[:space:]]*[\'\\"]?${AUROS_SCOPE}[\'\\"]?:" "$other"; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if grep -qE "^@never@${AUROS_SCOPE}:" "$other"; then'))
+MUT
+
+mutate "U08: enforce-container-sigpolicy is checked by name only, so '= false' ships" \
+       tests/30-update-agent.test.sh "the setting says false" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = "grep -qE '^enforce-container-sigpolicy[[:space:]]*=[[:space:]]*true' /usr/lib/bootc/install/30-auros.toml"
+assert old in s
+open(p, 'w').write(s.replace(old, "grep -qE '^enforce-container-sigpolicy' /usr/lib/bootc/install/30-auros.toml"))
+MUT
+
+mutate "U09: the bash -n gate on greenboot health checks is removed" \
+       tests/30-update-agent.test.sh "does not parse" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = '    bash -n "$f" || die "$f is not valid bash'
+assert old in s
+i = s.index(old)
+j = s.index('\n', i)
+open(p, 'w').write(s[:i] + '    :' + s[j:])
+MUT
+
+mutate "U10: the ExecStart clearing check stops being a whole-line match" \
+       tests/30-update-agent.test.sh "never cleared" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = "grep -qx 'ExecStart=' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf"
+assert old in s
+open(p, 'w').write(s.replace(old, "grep -q 'ExecStart=' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf"))
 MUT
 
 printf '\n%s\n' "$(c 1 'build/40-windows-feel.sh — the Windows-familiarity layer')"

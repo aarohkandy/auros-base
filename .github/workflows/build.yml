@@ -61,8 +61,11 @@ name: build
 on:
   push:
     branches: [main]
+    # A README change must not re-run a fifty-minute image build. It did, once.
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore']
   pull_request:
     branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', '.gitignore']
   # Called by nightly.yml. No `inputs:` and no `secrets:` block — a caller gets exactly this pipeline
   # or none of it. Outputs are read-only facts about what happened; nothing here steers the run.
   workflow_call:
@@ -386,6 +389,42 @@ jobs:
             diff <(tr ',' '\n' < /tmp/raw-a.diffids) <(tr ',' '\n' < /tmp/raw-b.diffids) || true
             echo "--- post-flatten diff ---"
             diff <(tr ',' '\n' < /tmp/chunked-a.diffids) <(tr ',' '\n' < /tmp/chunked-b.diffids) || true
+
+            # NAME THE CAUSE, in this run. A digest mismatch with no explanation costs a
+            # fifty-minute cycle per hypothesis, and there are at least two live ones:
+            #   (a) dnf resolved DIFFERENT PACKAGES. pkg_ensure installs from live Fedora repos with
+            #       no pinning, so two builds minutes apart can pick up a refreshed mirror.
+            #   (b) the packages are identical and the FILES still differ — most likely the RPM
+            #       database, which is a sqlite file with per-package install times and is not
+            #       byte-reproducible by nature. 90-cleanup.sh already says so in a comment.
+            # These need opposite fixes, so the run has to say which it is rather than leave it to
+            # be guessed. Today four build cycles were lost to guessing.
+            echo "--- (a) did dnf resolve the same packages? ---"
+            for v in a b; do
+              sudo podman run --rm --entrypoint= "localhost/auros-base:raw-$v" \
+                rpm -qa --qf '%{NAME}-%{EPOCH}:%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null \
+                | LC_ALL=C sort > "/tmp/pkgs-$v.txt" || echo "(could not read packages from raw-$v)"
+            done
+            if diff -q /tmp/pkgs-a.txt /tmp/pkgs-b.txt >/dev/null 2>&1; then
+              echo "PACKAGE SETS ARE IDENTICAL ($(wc -l < /tmp/pkgs-a.txt | tr -d ' ') packages)."
+              echo "So the cause is (b): identical packages, different bytes. Look below for which files."
+            else
+              echo "::error::PACKAGE SETS DIFFER — dnf resolved differently between two builds in one run."
+              echo "That is cause (a): the install list is not pinned and the repos moved underneath us."
+              diff /tmp/pkgs-a.txt /tmp/pkgs-b.txt | head -40 || true
+            fi
+
+            echo "--- (b) which files differ? (path, size, mtime — first 60) ---"
+            for v in a b; do
+              sudo podman run --rm --entrypoint= "localhost/auros-base:raw-$v" \
+                sh -c 'find / -xdev -type f -printf "%p\t%s\t%T@\n" 2>/dev/null | LC_ALL=C sort' \
+                > "/tmp/files-$v.txt" 2>/dev/null || echo "(could not enumerate raw-$v)"
+            done
+            diff /tmp/files-a.txt /tmp/files-b.txt | head -60 || true
+            echo "--- differing paths, deduplicated, by directory ---"
+            diff /tmp/files-a.txt /tmp/files-b.txt 2>/dev/null \
+              | grep -E '^[<>]' | awk '{print $2}' | sed 's#/[^/]*$##' | LC_ALL=C sort | uniq -c \
+              | sort -rn | head -20 || true
           fi
 
           # Keep only build a. b has served its purpose and is 15 GB.

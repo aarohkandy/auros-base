@@ -21,9 +21,20 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0; FAIL=0
 SAW_FLAGGED=0; SAW_CLEAN=0
 
-# Extract the function under test from the real script, so this cannot drift from what ships.
-# An empty extraction would produce an empty program that "passes" every input, so it aborts.
-extract() {
+# ── EXTRACTION: BOTH HALVES COME OUT OF THE SHIPPING FILE ────────────────────────────────────────
+#
+# This test used to extract _auros_effective_kargs() and then run its OWN hand-written copy of the
+# caller — the `tr -d ' \t' | grep -E '^(selinux=0|enforcing=0)$'` line. That made the test blind to
+# the exact bug it was written for: a mutation run on 2026-09-20 changed the SHIPPING caller back to
+# `tr -d '[:space:]'` (the newline-eating, permanently-green original) and every case here still
+# passed, because the copy in this file was still correct. The test was green about code nobody runs.
+#
+# Same for the forbidden-argument regex: deleting `enforcing=0` from the shipping `^(selinux=0|
+# enforcing=0)$` left this file's copy intact and all three enforcing=0 cases green.
+#
+# So the caller is now extracted too. If the line in build/10-hardening.sh changes shape, this
+# aborts rather than silently testing a line that is no longer there.
+extract_fn_body() {
   local body
   body="$(sed -n '/^_auros_effective_kargs() {/,/^}/p' "$HERE/build/10-hardening.sh" \
     | sed "s#/usr/lib/bootc/kargs.d#\$ROOT/usr/lib/bootc/kargs.d#; s#/usr/lib/ostree-boot#\$ROOT/usr/lib/ostree-boot#")"
@@ -33,7 +44,30 @@ extract() {
   fi
   printf '%s\n' "$body"
 }
-FN="$(extract)"
+
+# The caller: the line that decides. `tr`, the anchors and the alternation all live here, and all
+# three have been wrong in production at least once.
+extract_caller() {
+  local line n
+  line="$(grep -E '^_auros_bad_kargs=' "$HERE/build/10-hardening.sh")"
+  n="$(printf '%s\n' "$line" | grep -c . || true)"
+  if [ -z "$line" ]; then
+    echo "ABORT: no '_auros_bad_kargs=' line in build/10-hardening.sh — the caller was renamed and this test now proves nothing" >&2
+    exit 90
+  fi
+  if [ "$n" != 1 ]; then
+    echo "ABORT: expected exactly one '_auros_bad_kargs=' line in build/10-hardening.sh, found $n — which one decides?" >&2
+    exit 90
+  fi
+  case "$line" in
+    *_auros_effective_kargs*) ;;
+    *) echo "ABORT: the '_auros_bad_kargs=' line no longer calls _auros_effective_kargs — this test is wired to the wrong thing" >&2
+       exit 90 ;;
+  esac
+  printf '%s\n' "$line"
+}
+FN="$(extract_fn_body)"
+CALLER="$(extract_caller)"
 
 # run_case <name> <flagged|clean> <kargs.d/10.toml contents> [kargs.d/20.toml contents] [ostree-boot entry]
 run_case () {
@@ -47,9 +81,10 @@ run_case () {
     printf '%s\n' "$bootentry" > "$root/usr/lib/ostree-boot/loader/entries/ostree-1.conf"
   fi
   local got
+  # $CALLER is the shipping assertion line, verbatim. Nothing in this file re-implements it.
   got=$(ROOT="$root" bash -c "$FN
-    bad=\$(_auros_effective_kargs | tr -d ' \t' | grep -E '^(selinux=0|enforcing=0)\$' || true)
-    [ -n \"\$bad\" ] && echo flagged || echo clean")
+$CALLER
+    [ -n \"\$_auros_bad_kargs\" ] && echo flagged || echo clean")
   rm -rf "$root"
   case "$got" in flagged) SAW_FLAGGED=1 ;; clean) SAW_CLEAN=1 ;; esac
   if [ "$got" = "$want" ]; then printf '  ok   %-62s %s\n' "$name" "$got"; PASS=$((PASS+1))
@@ -66,6 +101,23 @@ run_case "selinux=0 last among many"                          flagged 'kargs = [
 run_case "selinux=1 only"                                     clean   'kargs = ["selinux=1"]'
 run_case "a comment that merely names selinux=0"              clean   '# never ship selinux=0
 kargs = ["selinux=1"]'
+# THE COMMENT CASE THAT ACTUALLY EXERCISES THE COMMENT STRIPPING.
+#
+# The case above is prose: it contains the text `selinux=0` but no bracketed array, so the
+# join-and-grep never picks it up whether comments are stripped or not. Deleting `sed 's/#.*$//'`
+# from _auros_effective_kargs leaves it green — which is how this test stayed green through a
+# mutation that removed comment stripping entirely, reopening the path to the ORIGINAL
+# permanently-RED bug (prose read as configuration).
+#
+# A comment has to contain a whole `kargs = [...]` array for the difference to be visible. Writing
+# the dangerous value inside a "do not do this" comment is not a contrived shape: it is exactly how
+# hardening/kargs-selinux.toml documents the recovery path it deliberately leaves open.
+run_case "a comment containing a whole bracketed kargs array"  clean   '# kargs = ["selinux=0"] is what NOT to do
+kargs = ["selinux=1"]'
+run_case "a trailing comment containing a bracketed array"     clean   'kargs = ["selinux=1"]  # not kargs = ["selinux=0"]'
+run_case "a commented array and NO real kargs line at all"     clean   '# kargs = ["enforcing=0"] would disable SELinux'
+run_case "a commented array above a genuinely bad one"         flagged '# kargs = ["selinux=1"] is what we want
+kargs = ["selinux=0"]'
 run_case "no kargs at all"                                    clean   '# nothing here'
 run_case "extra spaces around the arguments"                  flagged 'kargs = [ "quiet" ,  "selinux=0" ]'
 
