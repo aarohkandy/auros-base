@@ -240,6 +240,12 @@ jobs:
         run: |
           mkdir -p fragments matrix-run/logs
           export AUROS_RUN_DIR="$PWD/matrix-run"
+          # Fail fast while debugging the HARNESS. run-boot.sh's default agent deadline is 2400s per
+          # boot, so a stalled agent costs ninety minutes to observe twice. Seven minutes is plenty
+          # for a KVM boot that reaches a greeter in about thirty seconds, and every check that goes
+          # unreported under a shortened deadline says so in its own detail — a probe result can
+          # never be mistaken for a CI one. build.yml must NOT set this.
+          export AUROS_AGENT_DEADLINE="${AUROS_AGENT_DEADLINE:-420}"
           # A HEARTBEAT, because this phase runs for over an hour and GitHub serves no job log until
           # the job ends. Without it, debugging is: push, wait ninety minutes, read a post-mortem.
           # run-boot.sh polls for markers with deadlines of 600s (greeter) and 2400s (the guest
@@ -373,6 +379,12 @@ jobs:
           chmod 600 /tmp/probe-signing.key
           mkdir -p fragments matrix-run/logs
           export AUROS_RUN_DIR="$PWD/matrix-run"
+          # Fail fast while debugging the HARNESS. run-boot.sh's default agent deadline is 2400s per
+          # boot, so a stalled agent costs ninety minutes to observe twice. Seven minutes is plenty
+          # for a KVM boot that reaches a greeter in about thirty seconds, and every check that goes
+          # unreported under a shortened deadline says so in its own detail — a probe result can
+          # never be mistaken for a CI one. build.yml must NOT set this.
+          export AUROS_AGENT_DEADLINE="${AUROS_AGENT_DEADLINE:-420}"
           # A HEARTBEAT, because this phase runs for over an hour and GitHub serves no job log until
           # the job ends. Without it, debugging is: push, wait ninety minutes, read a post-mortem.
           # run-boot.sh polls for markers with deadlines of 600s (greeter) and 2400s (the guest

@@ -142,7 +142,13 @@ boot_once() {
 
   # Wait for the agent to finish this boot's work — or for QEMU to die, which we notice immediately
   # rather than at the end of a timeout.
-  local agent_deadline; agent_deadline=$(scale 2400)
+  #
+  # AUROS_AGENT_DEADLINE exists so a PROBE can fail fast. It changes how long we WAIT, never what we
+  # CONCLUDE — the same distinction vm.sh's scale() already makes for TCG. A shortened deadline makes
+  # a slow-but-correct agent look like a stalled one, so every check that goes unreported under a
+  # non-default deadline SAYS SO in its detail (see agent_evidence below). A run that waited seven
+  # minutes must never be mistakable for one that waited forty.
+  local agent_deadline; agent_deadline=$(scale "${AUROS_AGENT_DEADLINE:-2400}")
   poll_until "$agent_deadline" "agent done (boot ${n})" -- bash -c '
      grep -qa "#AUROS-DONE#" "$1" && exit 0
      kill -0 "$2" 2>/dev/null || exit 0
@@ -223,6 +229,9 @@ agent_evidence() {
     printf 'The agent STARTED and never finished: it emitted its boot line but no #AUROS-DONE#, so it stalled inside a check rather than failing to launch. The first thing it does after the status line is `systemctl is-system-running --wait`. '
   fi
   printf 'Last of the log: %s' "${tail_:-<empty>}"
+  if [ -n "${AUROS_AGENT_DEADLINE:-}" ] && [ "${AUROS_AGENT_DEADLINE}" != 2400 ]; then
+    printf ' — AND NOTE: this run waited only %ss for the agent (AUROS_AGENT_DEADLINE), not the default 2400s. A slow agent and a stalled one are indistinguishable under a shortened deadline, so this result is a PROBE result and is not evidence that the check would fail in CI.' "$AUROS_AGENT_DEADLINE"
+  fi
 }
 AGENT_EVIDENCE="$(agent_evidence)"
 for id in B2 B4 B5 B6 B7 B8 B9 B10 B11 B12; do
