@@ -617,6 +617,7 @@ s = open(p).read()
 old = 'for t in $TARGETS; do enable_user_unit "$UNIT" "$t"; done'
 assert old in s
 open(p, 'w').write(s.replace(old, 'enable_user_unit "$UNIT" graphical-session.target'))
+MUT
 
 mutate "W07: the widget check goes back to a bare grep, so a comment naming a widget passes for it" \
        tests/40-windows-feel.test.sh "only a comment still mentions" <<'MUT'
