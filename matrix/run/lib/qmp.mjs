@@ -4,13 +4,15 @@
 //   wakeup         send system_wakeup
 //   suspend-cycle  wait-suspend, then wakeup — what run-boot.sh calls
 //   quit           ask the VM to exit cleanly
+//   screendump     qmp.mjs <socket> screendump <timeout_s> <file.png> [device] — a PNG of the display
+//                  (console 0, or the QOM device id given). Evidence only; nothing gates on it.
 // It waits on the EVENT, never on a clock: a guest that takes four minutes to suspend under TCG is
 // slow, not broken, and scoring it as broken is the single easiest way to make this harness lie.
 import net from 'node:net';
 
-const [sock, cmd, timeoutArg] = process.argv.slice(2);
+const [sock, cmd, timeoutArg, shotFile, shotDevice] = process.argv.slice(2);
 const TIMEOUT = Number(timeoutArg || process.env.AUROS_QMP_TIMEOUT || 900) * 1000;
-if (!sock || !cmd) { console.error('usage: qmp.mjs <socket> <wait-suspend|wakeup|suspend-cycle|quit> [timeout_s]'); process.exit(2); }
+if (!sock || !cmd) { console.error('usage: qmp.mjs <socket> <wait-suspend|wakeup|suspend-cycle|quit|screendump> [timeout_s] [file.png] [device]'); process.exit(2); }
 
 const c = net.createConnection(sock);
 let buf = '';
@@ -40,10 +42,14 @@ c.on('data', (d) => {
       if (m.event === 'WAKEUP' && cmd === 'suspend-cycle' && sawSuspend) { clearTimeout(deadline); c.end(); process.exit(0); }
       continue;
     }
+    // A refused command answers {"error":…} and nothing else; waiting on a "return" that never comes
+    // would turn "no such device" into a 30-second timeout that says nothing.
+    if (m.error && cmd === 'screendump') { console.error(`qmp: ${cmd}: ${m.error.class}: ${m.error.desc}`); process.exit(1); }
     if (m.return !== undefined) {
       if (!negotiatedDone()) continue;
       if (cmd === 'wakeup') { clearTimeout(deadline); c.end(); process.exit(0); }
       if (cmd === 'quit') { clearTimeout(deadline); c.end(); process.exit(0); }
+      if (cmd === 'screendump') { clearTimeout(deadline); c.end(); process.exit(0); }
     }
   }
 });
@@ -54,6 +60,12 @@ function negotiatedDone() {
     capsAcked = true;
     if (cmd === 'wakeup') send({ execute: 'system_wakeup' });
     else if (cmd === 'quit') send({ execute: 'quit' });
+    else if (cmd === 'screendump') {
+      // format:"png" needs QEMU >= 7.1 (ubuntu-24.04 ships 8.2); older QEMU refuses it by name, and says so.
+      const a = { filename: shotFile, format: 'png' };
+      if (shotDevice) a.device = shotDevice;
+      send({ execute: 'screendump', arguments: a });
+    }
     return false;
   }
   return true;

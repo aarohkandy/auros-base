@@ -156,7 +156,9 @@ start_vm() {
   fi
 
   A+=( -machine "$MACHINE" )
-  A+=( -device "virtio-gpu-pci" )
+  # id: so the screenshot phase can name this head to QMP screendump (run-boot.sh). No default -vga is
+  # suppressed, so console 0 is still the std VGA and the guest sees two cards, as it always has.
+  A+=( -device "virtio-gpu-pci,id=auros-gpu" )
   # B7 needs a sound device to enumerate. No host audio backend: we are checking the stack, not sound.
   A+=( -audiodev "none,id=snd0" -device ich9-intel-hda -device hda-duplex,audiodev=snd0 )
   A+=( -netdev "user,id=n0${VM_NETDEV_EXTRA:+,${VM_NETDEV_EXTRA}}" -device virtio-net-pci,netdev=n0 )

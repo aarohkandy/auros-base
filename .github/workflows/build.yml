@@ -666,6 +666,9 @@ jobs:
           qemu-system-x86_64 --version | head -1
           df -h /
       - name: Boot checks B1-B12 on ${{ matrix.profile }}
+        env:
+          # Only run-boot.sh's screenshot profile (uefi-modern) writes here. Evidence only; gates nothing.
+          AUROS_SCREENSHOT_DIR: ${{ github.workspace }}/screenshots
         run: |
           echo "${{ github.token }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
           mkdir -p fragments
@@ -685,6 +688,21 @@ jobs:
           name: fragments-boot-${{ matrix.profile }}
           path: fragments/
           if-no-files-found: error
+      # Layout screenshots: NOT a fragment (the gate's fragments-* download never sees them) and never
+      # a failure — a missing PNG is explained in screenshots.tsv and the summary line, not raised.
+      - name: Layout screenshots (evidence only)
+        if: always() && matrix.profile == 'uefi-modern'
+        continue-on-error: true
+        run: |
+          cat screenshots/summary.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
+            || echo "Layout screenshots (evidence only, gates nothing): NONE — run-boot.sh wrote no summary" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.profile == 'uefi-modern'
+        continue-on-error: true
+        with:
+          name: screenshots-${{ matrix.profile }}
+          path: screenshots/
+          if-no-files-found: warn
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   sign:

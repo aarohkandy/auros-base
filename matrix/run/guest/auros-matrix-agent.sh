@@ -10,6 +10,8 @@
 #   #AUROS#{json}               one check record
 #   #AUROS-STATUS#{json}        booted digest / deployment count, emitted every boot
 #   #AUROS-READY-SUSPEND#       the host should arm the QMP wakeup now
+#   #AUROS-SCREEN# <name>       a layout is on screen now; the host takes a QMP screendump (evidence only)
+#   #AUROS-SCREEN-SKIP# <name> <why>  that layout could not be put on screen, and why
 #   #AUROS-DONE# <phase>        end of this boot's work
 #
 # NOTHING here sleeps waiting for a result. Where we must wait, we wait on the event (`--wait`,
@@ -26,6 +28,7 @@ CFG=/usr/local/lib/auros-matrix/config.env
 : "${FLATPAK_REFS:=}"
 : "${SUSPEND_TEST:=1}"
 : "${FULL_BOOTS:=2}"
+: "${SCREENSHOTS:=0}"
 
 STATE=/var/lib/auros-matrix
 mkdir -p "$STATE"
@@ -465,6 +468,53 @@ if [ "${AVC:-0}" -eq 0 ] && [ "${OOPS:-0}" -eq 0 ] && [ "${TAINT:-0}" -eq 0 ] &&
 else
   emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]; $(journalctl -b --no-pager 2>/dev/null | auros_selinux_state); distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
 fi
+
+# ── Layout screenshots — EVIDENCE, NEVER A VERDICT ───────────────────────────────────────────────
+# Nobody has seen the four layouts on screen (docs/DESKTOP-LAYOUTS.md, "Not verified visually"). This
+# puts each one up in the live session and tells the host, which takes a QMP screendump. It runs AFTER
+# B11 (so nothing it does reaches any check's journal), only on the LAST full boot (so no later boot
+# starts in a switched layout), only when the host asked (SCREENSHOTS=1, one profile), and emits no
+# #AUROS# record. The sleeps are pacing for a camera, not waits for a result: nothing is concluded here.
+#
+# The switch is the image's own live mechanism, the one auros-first-run uses: plasma-apply-lookandfeel
+# -a <package> (KDE: "plasma-apply-lookandfeel --help", plasma-workspace kcms/lookandfeel), then the
+# package's layout script to plasmashell's org.kde.PlasmaShell.evaluateScript (KDE Plasma desktop
+# scripting, develop.kde.org/docs/plasma/scripting). The script removes the existing panels first, so
+# no plasmashell restart or re-login is needed. set-desktop-layout is NOT used: it is build-time only
+# and affects users who have not logged in yet.
+SHOT_LAYOUTS='windows:org.auros.windows.desktop browser-first:org.auros.shelf.desktop simple:org.auros.simple.desktop mac:org.auros.mac.desktop'
+: "${SCREEN_SETTLE:=15}" "${SCREEN_HOLD:=20}"
+apply_layout() { # <package id> — prints why on failure
+  local js=/usr/share/plasma/look-and-feel/$1/contents/layouts/org.kde.plasma.desktop-layout.js
+  [ -r "$js" ] || { echo "no layout script at $js"; return 1; }
+  asuser plasma-apply-lookandfeel -a "$1" >/dev/null 2>&1 || { echo "plasma-apply-lookandfeel -a $1 failed"; return 1; }
+  asuser gdbus call --session --dest org.kde.plasmashell --object-path /PlasmaShell \
+    --method org.kde.PlasmaShell.evaluateScript "$(cat "$js")" >/dev/null 2>&1 \
+    || { echo "plasmashell refused evaluateScript (not on the session bus?)"; return 1; }
+}
+layout_screens() {
+  local i=0 pair word why
+  if [ -z "$WL" ]; then
+    for pair in $SHOT_LAYOUTS; do i=$((i+1)); say "#AUROS-SCREEN-SKIP# 0${i}-${pair%%:*} no graphical session"; done
+    return 0
+  fi
+  # B10 resumed from S3 and Plasma locks on resume; a wizard or a blanked output would hide the shell.
+  pkill -u "$TEST_USER" -f auros-welcome >/dev/null 2>&1 || true
+  for pair in $SHOT_LAYOUTS; do
+    i=$((i+1)); word=${pair%%:*}
+    if why=$(apply_layout "${pair#*:}"); then
+      [ -n "${SESS:-}" ] && loginctl unlock-session "$SESS" >/dev/null 2>&1
+      asuser kscreen-doctor --dpms on >/dev/null 2>&1
+      sleep "$SCREEN_SETTLE"
+      say "#AUROS-SCREEN# 0${i}-${word} locked=$( [ -n "${SESS:-}" ] && loginctl show-session "$SESS" -p LockedHint --value 2>/dev/null)"
+      sleep "$SCREEN_HOLD"
+    else
+      say "#AUROS-SCREEN-SKIP# 0${i}-${word} ${why}"
+    fi
+  done
+  apply_layout org.auros.windows.desktop >/dev/null || true
+}
+[ "$SCREENSHOTS" = 1 ] && [ "$N" -eq "$FULL_BOOTS" ] && layout_screens
 
 status_line
 say "#AUROS-DONE# full"
