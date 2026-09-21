@@ -27,6 +27,13 @@ on:
 
 # D19: pipefail everywhere. Our own boot probe once piped a build step through `tail -40`, so the
 # pipeline's exit status was tail's and a FAILING bootc-image-builder was scored as a PASSING step.
+# A burst of commits should be ONE run, not one per commit. Without this, ten pushes in five
+# minutes produced ten runs and ten failure emails, nine of them already superseded.
+# (The image build deliberately does NOT do this: a run on main may be mid-publish.)
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash -euo pipefail {0}
