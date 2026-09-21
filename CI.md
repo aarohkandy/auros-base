@@ -424,6 +424,12 @@ Before the first run, the harness could not have produced a single verdict for a
 2. The `update` job must invoke the harness as `sudo -E env "PATH=$PATH" …` or cosign stays invisible to
    root, and must install `libguestfs-tools` or `virt-make-fs` is missing and R1 fails closed before
    looking at anything.
+   None of this is a guess about what the checks want. `matrix/run/ci/check-matrix.yml` — the harness
+   author's own reference workflow — passes `--second-digest`, `--budget-bytes` and a
+   `--registry-ref` pointing at an `auros-base-staging` repository, installs `libguestfs-tools`
+   alongside qemu and swtpm, and invokes the scripts **without `sudo`**. `build.yml` adopted the
+   phase interface and dropped every argument the checks are evaluated from. Diff the two files.
+
 3. `run-static.sh` records its own S1/S7/S8 verdicts while the `build` and `sign` jobs write separate
    fragments for the same three ids. The merge in `publish` concatenates without deduplicating and the
    verdict is `all(.status == "pass")`, so **the duplicate fails poison the result regardless of the

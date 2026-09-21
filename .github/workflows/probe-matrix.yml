@@ -65,6 +65,14 @@ on:
 permissions:
   contents: read
 
+# Supersede, do not pile up. Each push while iterating used to leave its ninety-minute boot job
+# running alongside the new one; four accumulated in half an hour and they all tested the same image.
+# build.yml deliberately does NOT do this on main, because a run there may be mid-publish. This is a
+# probe: the newest answer is the only one worth waiting for.
+concurrency:
+  group: probe-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash -euo pipefail {0}
@@ -203,6 +211,18 @@ jobs:
           echo "--- OVMF files the harness looks for ---"
           ls -l /usr/share/OVMF/ || true
           df -h /
+
+
+      - name: What bootc-image-builder's CLI actually accepts
+        run: |
+          # NEVER GUESS A FLAG. vm.sh calls bib with `--type qcow2 --rootfs <fs> --local <image>`,
+          # and a base build has already been lost to a CLI that did not have the option it was
+          # given. The pull is needed by the next step anyway, so asking costs nothing.
+          sudo podman pull -q quay.io/centos-bootc/bootc-image-builder:latest
+          sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder \
+            quay.io/centos-bootc/bootc-image-builder:latest --help 2>&1 | head -60 \
+            || sudo podman run --rm quay.io/centos-bootc/bootc-image-builder:latest --help 2>&1 | head -60 \
+            || echo "::warning::could not get --help out of bootc-image-builder; the build step will be the first thing that finds out"
 
       - name: Build the trivial derivative
         run: |

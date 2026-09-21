@@ -75,18 +75,32 @@ EXPECTED=$(
 
 echo "checks.yaml declares for [${SECTIONS}]: ${EXPECTED}"
 
-MISSING=''
+# THE SENTINEL. matrix/run.sh's completeness pass fills in any declared id the phase never reached,
+# as a `fail` whose detail begins "the <phase> phase recorded NO verdict for <id>". That is the right
+# thing for the GATE — an absent answer is a failure — but it would quietly disarm THIS probe, whose
+# whole question is whether the harness reached every check. Without this, the loop below would see
+# a synthesised fail, call it a verdict, and go green on a phase that died after its second check.
+# results.schema.json sets additionalProperties:false, so there is no field to flag it with; the
+# sentence is the flag, and it is written in exactly one place in matrix/run.sh.
+UNREACHED_SENTINEL='recorded NO verdict for'
+
+MISSING=''; UNREACHED=''
 sum "| check | status | detail |"
 sum "|---|---|---|"
 for id in $EXPECTED; do
   ST=$(jq -r --arg id "$id" '(.checks[] | select(.id == $id) | .status) // "MISSING"' "$FRAG" | head -1)
   [ -n "$ST" ] || ST=MISSING
-  DET=$(jq -r --arg id "$id" '(.checks[] | select(.id == $id) | .detail) // ""' "$FRAG" | head -1 | cut -c1-300 | tr '|' '/')
+  FULL=$(jq -r --arg id "$id" '(.checks[] | select(.id == $id) | .detail) // ""' "$FRAG" | head -1)
+  DET=$(printf '%s' "$FULL" | cut -c1-300 | tr '|' '/')
   printf '%-4s %-8s %s\n' "$id" "$ST" "$DET"
   case "$ST" in
     pass) ICON='✅ pass' ;;
-    fail) ICON='❌ fail' ;;
     skip) ICON='⚠️ skip' ;;
+    fail)
+      case "$FULL" in
+        *"$UNREACHED_SENTINEL"*) ICON='🚨 **NEVER REACHED**'; UNREACHED="$UNREACHED $id" ;;
+        *) ICON='❌ fail' ;;
+      esac ;;
     *)    ICON='🚨 **NO VERDICT**'; MISSING="$MISSING $id" ;;
   esac
   sum "| \`$id\` | $ICON | ${DET:-—} |"
@@ -114,10 +128,13 @@ N_PASS=$(jq '[.checks[] | select(.status=="pass")] | length' "$FRAG")
 N_FAIL=$(jq '[.checks[] | select(.status=="fail")] | length' "$FRAG")
 N_SKIP=$(jq '[.checks[] | select(.status=="skip")] | length' "$FRAG")
 sum ""
-sum "**${N_PASS} pass · ${N_FAIL} fail · ${N_SKIP} skip** out of $(printf '%s' "$EXPECTED" | wc -w | tr -d ' ') declared."
+sum "**${N_PASS} pass · ${N_FAIL} fail · ${N_SKIP} skip** out of $(printf '%s' "$EXPECTED" | wc -w | tr -d ' ') declared${UNREACHED:+, of which$UNREACHED were NEVER REACHED}."
 
 if [ -n "${MISSING// /}" ]; then
-  fail "these declared checks produced NO VERDICT at all:${MISSING}. The harness errored past them instead of recording a fail. That is the bug — find where it exited, not why the check would have failed."
+  fail "these declared checks are absent from the fragment entirely:${MISSING}. Even matrix/run.sh's completeness pass did not fill them in, so it did not run — find where the collector exited."
+fi
+if [ -n "${UNREACHED// /}" ]; then
+  fail "the harness NEVER REACHED these checks:${UNREACHED}. They are in the fragment only because matrix/run.sh's completeness pass filled them in, which is correct for the gate and is exactly what this probe exists to catch: the phase stopped early. Find where it exited — do not go looking for why the check would have failed."
 fi
 
 echo "OK: every declared check for [${SECTIONS}] reached a verdict."

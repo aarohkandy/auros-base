@@ -193,10 +193,42 @@ else
 fi
 
 # ── anything the agent never reported is a FAIL, never a silence ─────────────────────────────────
+#
+# And the failure has to say what IS there. "the agent produced no record" is true of four completely
+# different situations — QEMU never opened the second serial port, the unit never started, the agent
+# started and stalled, or it ran and its output never reached the host — and they have four different
+# fixes. So the detail carries the agent log's size, which framing markers it did emit, and its last
+# lines. Reading ten of these strings must not require downloading ten artifacts.
+agent_evidence() {
+  local f
+  for f in "$L/${PROFILE}-boot2-agent.log" "$L/${PROFILE}-boot1-agent.log"; do
+    [ -s "$f" ] && break
+  done
+  if [ ! -e "$f" ]; then
+    printf 'no agent log exists at %s — QEMU never opened the second serial port, so nothing the guest wrote could have reached the host' "$f"
+    return
+  fi
+  local bytes boot status ready done_ tail_
+  bytes=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+  boot=$(grep -ac '#AUROS-BOOT#' "$f" 2>/dev/null || true)
+  status=$(grep -ac '#AUROS-STATUS#' "$f" 2>/dev/null || true)
+  ready=$(grep -ac '#AUROS-READY-SUSPEND#' "$f" 2>/dev/null || true)
+  done_=$(grep -ac '#AUROS-DONE#' "$f" 2>/dev/null || true)
+  tail_=$(tail -c 400 "$f" 2>/dev/null | tr '\n\r\t' '   ' | tr -cd '[:print:] ')
+  printf '%s is %s bytes; markers seen: #AUROS-BOOT#=%s #AUROS-STATUS#=%s #AUROS-READY-SUSPEND#=%s #AUROS-DONE#=%s. ' \
+    "${f##*/}" "${bytes:-0}" "${boot:-0}" "${status:-0}" "${ready:-0}" "${done_:-0}"
+  if [ "${boot:-0}" = 0 ]; then
+    printf 'The agent never announced a boot at all, so auros-matrix-agent.service did not run — check logs/testwrap-build.log for whether `systemctl enable` took, and the serial console for the unit failing. '
+  elif [ "${done_:-0}" = 0 ]; then
+    printf 'The agent STARTED and never finished: it emitted its boot line but no #AUROS-DONE#, so it stalled inside a check rather than failing to launch. The first thing it does after the status line is `systemctl is-system-running --wait`. '
+  fi
+  printf 'Last of the log: %s' "${tail_:-<empty>}"
+}
+AGENT_EVIDENCE="$(agent_evidence)"
 for id in B2 B4 B5 B6 B7 B8 B9 B10 B11 B12; do
   if ! grep -qa "\"id\":\"$id\"" "$CHECKS_FILE"; then
     check_begin
-    record "$id" fail "the in-guest agent produced no record for ${id} on profile ${PROFILE}. A check that did not report did not pass."
+    record "$id" fail "the in-guest agent produced no record for ${id} on profile ${PROFILE}. A check that did not report did not pass. ${AGENT_EVIDENCE}"
   fi
 done
 
