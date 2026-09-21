@@ -128,8 +128,9 @@ const results = {
 if (a['removal-report'] && existsSync(a['removal-report'])) {
   try {
     const rr = JSON.parse(readFileSync(a['removal-report'], 'utf8'));
-    const arr = rr.packages ?? rr.removed ?? [];
-    const bytes = arr.reduce((s, e) => s + (Number(e?.bytes ?? e?.size ?? 0) || 0), 0);
+    // Same shape analyze.mjs reads: auros-recipes' prune runner writes the set as "planned".
+    const arr = (Array.isArray(rr.planned) ? rr.planned : []).filter((e) => e?.outcome !== 'already-absent');
+    const bytes = arr.reduce((s, e) => s + (Number(e?.bytes_reclaimed ?? 0) || 0), 0);
     const o = { packages_removed: arr.length, bytes_reclaimed: bytes };
     if (a['pull-delta'] !== undefined && a['pull-delta'] !== 'true') o.pull_size_delta_bytes = Number(a['pull-delta']);
     results.removal_report = o;
