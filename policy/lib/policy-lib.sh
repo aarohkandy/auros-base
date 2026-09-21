@@ -159,7 +159,7 @@ auros_verify_weak_deps() {
         warn "neither '$dnf --dump-main-config' nor '$dnf config-manager --dump' produced output; install_weak_deps is NOT VERIFIED on this image. If Recommends are still on, a later dnf install in the recipe layer can reinstate a package we removed, and check S3 is what will catch it."
         return 0
     fi
-    if printf '%s' "$out" | grep -qiE '^[[:space:]]*install_weak_deps[[:space:]]*=[[:space:]]*(0|false|no)[[:space:]]*$'; then
+    if grep -qiE '^[[:space:]]*install_weak_deps[[:space:]]*=[[:space:]]*(0|false|no)[[:space:]]*$' <<<"$out"; then
         log "verified: $dnf resolves install_weak_deps to False"
     else
         warn "MISMATCH: we wrote install_weak_deps=False into $conf but $dnf resolves it to '$(printf '%s' "$out" | grep -iE '^[[:space:]]*install_weak_deps' | head -1 | tr -d '[:space:]')'. Recommends are still on for this build, so a removed package can come back on the next transaction. Check S3 asserts the removal set from outside and will go red if it does."
@@ -328,7 +328,7 @@ auros_unmark_groups() {
     if still="$("$dnf" group list --installed 2>/dev/null || true)"; then
         while IFS= read -r g; do
             [ -n "$g" ] || continue
-            if printf '%s' "$still" | grep -qi -- "$g"; then
+            if grep -qi -- "$g" <<<"$still"; then
                 warn "comps group '$g' is STILL marked installed. A later 'dnf group upgrade' could reinstate its packages. Check S3 will catch that on the next build; recorded in $AUROS_REPORT."
                 AUROS_GROUPS_STILL_MARKED="${AUROS_GROUPS_STILL_MARKED:+$AUROS_GROUPS_STILL_MARKED }$g"
             fi

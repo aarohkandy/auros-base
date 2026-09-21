@@ -310,7 +310,7 @@ log "guest reports booted digest: ${BOOTED_A:-<none>}"
 # wait_for_digest <want> <timeout> — poll the agent's status lines for a booted digest change.
 wait_for_digest() {
   local want=$1 t=$2
-  poll_until "$t" "booted digest == ${want:0:20}…" -- bash -c '[ "$(grep -a "^#AUROS-STATUS#" "$1" | tail -1)" != "" ] && grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$AGENT" "$want"
+  poll_until "$t" "booted digest == ${want:0:20}…" -- bash -c '[ "$(grep -a "^#AUROS-STATUS#" "$1" | tail -1)" != "" ] && grep -q "$2" <<<"$(grep -a "^#AUROS-STATUS#" "$1" | tail -1)"' _ "$AGENT" "$want"
 }
 
 # ── U1 — the update applies with NO human action ─────────────────────────────────────────────────
@@ -350,7 +350,7 @@ SAW_C=0
 if wait_for_digest "$DIG_C" "$(scale "$(short 1200)")"; then SAW_C=1; log "the VM booted into C, as intended"; fi
 # Now the machine must rescue itself. greenboot marks the boot bad, the counter runs out, GRUB falls
 # back, and we must land on the OLD digest — not merely "some digest that is not C".
-if poll_until "$U3_DEADLINE" "rollback to ${PRE_U3:0:20}…" -- bash -c 'grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$AGENT" "$PRE_U3"; then
+if poll_until "$U3_DEADLINE" "rollback to ${PRE_U3:0:20}…" -- bash -c 'grep -q "$2" <<<"$(grep -a "^#AUROS-STATUS#" "$1" | tail -1)"' _ "$AGENT" "$PRE_U3"; then
   # D25: a bootc rollback emits MESSAGE_ID=26f3b1eb24464d12aa5e7b544a6b5468. Finding it distinguishes
   # "the machine rolled itself back" from "something else happened to put us on the old digest".
   RB_EVID=$(grep -ac '26f3b1eb24464d12aa5e7b544a6b5468\|greenboot.*[Rr]ollback\|Health check failed' "$SERIAL" 2>/dev/null || true)
@@ -374,7 +374,7 @@ log "D (deliberately UNSIGNED) = $DIG_D — pushed with no cosign signature at a
 U4_DEADLINE=$(scale "$(short 600)")
 poll_until "$U4_DEADLINE" "an update attempt against the unsigned image" -- bash -c '
   grep -qaE "Source image rejected|signature|Signature|SignatureValidationFailed|policy|invalid" "$1" \
-  || grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$SERIAL" "$DIG_D" || true
+  || grep -q "$2" <<<"$(grep -a "^#AUROS-STATUS#" "$1" | tail -1)"' _ "$SERIAL" "$DIG_D" || true
 NOW_U4=$(last_status_field "$AGENT" digest)
 # The message containers/image emits is "Source image rejected: <reason>", where <reason> is one of
 # "A signature was required, but no signature exists", "Signature for identity … is not accepted", or

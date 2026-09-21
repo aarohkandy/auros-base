@@ -336,7 +336,7 @@ auros_preflight() {
     did "base image matches base.lock: $upstream_image"
   elif [ -n "$mirror_image" ] && [ "$upstream_image" = "$mirror_image" ]; then
     did "base image is our D21 mirror of the pinned digest: $upstream_image"
-  elif [ -z "$mirror_image" ] && printf '%s' "$upstream_image" | grep -qE '/auros-upstream-mirror$'; then
+  elif [ -z "$mirror_image" ] && grep -qE '/auros-upstream-mirror$' <<<"$upstream_image"; then
     warn "base image '$upstream_image' accepted on the D21 NAMING CONVENTION alone — no MIRROR_IMAGE in base.lock and no AUROS_MIRROR_IMAGE, so nothing here verified which mirror this is"
   else
     die "base image mismatch: this build declares UPSTREAM_IMAGE=$upstream_image, base.lock pins ${lock_image:-<none>}, and the D21 mirror is ${mirror_image:-<unset>} — spec §3: there is exactly one base and it derives from exactly one upstream"

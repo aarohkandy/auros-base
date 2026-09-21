@@ -289,7 +289,7 @@ for cap in "${!CAPS[@]}"; do
       B12_BAD="$B12_BAD ${cap}(no ${thing})"
     fi
   else
-    if printf '%s' "$KCMLIST" | grep -q "$thing"; then
+    if grep -q -- "$thing" <<<"$KCMLIST"; then
       ( asuser "$KCMBIN" "$thing" ) >"/tmp/b12-${cap}.log" 2>&1 &
       for _ in $(seq 1 15); do
         if pgrep -u "$TEST_USER" -f "$thing" >/dev/null 2>&1; then launched=1; break; fi
@@ -320,7 +320,8 @@ if [ "$SUSPEND_TEST" = 1 ]; then
   # Wait for the resume to have happened: the kernel logs PM: suspend exit on the way back up.
   RESUMED=0
   for _ in $(seq 1 60); do
-    if journalctl -b -k --no-pager 2>/dev/null | grep -qE 'PM: suspend exit|PM: resume from suspend'; then RESUMED=1; break; fi
+    # Here-string: `journalctl | grep -q` under pipefail SIGPIPEs journalctl on the match and reads it as a miss.
+    if grep -qE 'PM: suspend exit|PM: resume from suspend' <<<"$(journalctl -b -k --no-pager 2>/dev/null)"; then RESUMED=1; break; fi
     sleep 5
   done
   SYS2=$(systemctl is-system-running 2>/dev/null || true)

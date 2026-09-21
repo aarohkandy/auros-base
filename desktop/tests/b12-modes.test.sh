@@ -111,7 +111,7 @@ run_sut() {   # run_sut <mode-env-body>  -> stdout+stderr in $OUT, exit code in 
 }
 
 expect_line() { # expect_line <PASS|FAIL> <substring> <description>
-    if printf '%s' "$OUT" | grep -q "^$1 .*$2"; then ok "$3"; else
+    if grep -q "^$1 .*$2" <<<"$OUT"; then ok "$3"; else
         no "$3"
         printf '%s\n' "$OUT" | sed -n '/install-app\|wifi\|language\|printer\|kiosk/p' | sed 's/^/        /'
     fi
@@ -170,7 +170,7 @@ echo "── locked: RED when the KDE restriction is not in force ────�
 sed -i.bak '/kcm-denied:kcm_networkmanagement/d' "$WORK/facts"
 run_sut "$LOCKED"
 expect_line FAIL 'wifi/settings-page.*OPENED AND STAYED UP' "locked goes RED when the network page opens anyway"
-if printf '%s' "$OUT" | grep -q '40-windows-feel'; then ok "the failure message names the cause"; else no "the failure message names the cause"; fi
+if grep -q '40-windows-feel' <<<"$OUT"; then ok "the failure message names the cause"; else no "the failure message names the cause"; fi
 
 echo "── locked: RED when polkit answers 'managed' instead of 'locked' ───────────────────────────"
 sed -i.bak 's|pk:org.freedesktop.NetworkManager.settings.modify.system=1|pk:org.freedesktop.NetworkManager.settings.modify.system=3|' "$WORK/facts"
@@ -209,7 +209,7 @@ mkdir -p "$WORK/etc/auros"
 run_sut "$KIOSK"
 expect_line PASS 'kiosk/service'   "kiosk: the application service is running"
 expect_line FAIL 'kiosk/configured' "kiosk goes RED with no /etc/auros/kiosk.conf on this host (expected off-image)"
-if printf '%s' "$OUT" | grep -q 'kiosk/no-desktop.*konsole is absent'; then ok "kiosk: konsole absent is a pass"; else no "kiosk: konsole absent is a pass"; fi
+if grep -q 'kiosk/no-desktop.*konsole is absent' <<<"$OUT"; then ok "kiosk: konsole absent is a pass"; else no "kiosk: konsole absent is a pass"; fi
 
 mkstubs >/dev/null
 unstub gnome-terminal xterm dolphin plasmashell gnome-shell sddm gdm plasma-discover
@@ -223,7 +223,7 @@ OUT="$( AUROS_CLAIMS_FILE="$WORK/does-not-exist" PATH="$WORK/bin:/usr/bin:/bin" 
 RC=$?
 set -e
 expect_rc 2 "no claims file => INCONCLUSIVE (exit 2)"
-if printf '%s' "$OUT" | grep -q "defaulting to"; then ok "and it says why defaulting would be wrong"; else no "and it says why defaulting would be wrong"; fi
+if grep -q "defaulting to" <<<"$OUT"; then ok "and it says why defaulting would be wrong"; else no "and it says why defaulting would be wrong"; fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -51,7 +51,7 @@ SCRIPT="$PAYLOAD/$MODE/assert.sh"
 PROBE=${AUROS_ASSERT_USER:-aurosprobe}
 if [ "$(id -u)" = 0 ]; then
     id "$PROBE" >/dev/null 2>&1 || die "the probe account '$PROBE' does not exist on this image. systemd-sysusers should have created it from /usr/lib/sysusers.d/auros-policy.conf. Without an unprivileged account there is no subject to prove the policy against, and a root-run assertion would be evidence of nothing."
-    if id -nG "$PROBE" 2>/dev/null | tr ' ' '\n' | grep -qx aurosadmin; then
+    if grep -qx aurosadmin <<<"$(id -nG "$PROBE" 2>/dev/null | tr ' ' '\n')"; then
         die "the probe account '$PROBE' is in the aurosadmin group. It is supposed to be the unprivileged case; as an administrator it would be authorised for the things this run is meant to see refused."
     fi
     cd /tmp || true

@@ -202,7 +202,7 @@ a_pk_allow() {
 a_controls() {
     [ "$(id -u)" != 0 ] || a_abort "running as root. A root process is authorised for everything on any machine in any mode; nothing it fails to do proves anything about this one."
 
-    if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx aurosadmin; then
+    if grep -qx aurosadmin <<<"$(id -nG 2>/dev/null | tr ' ' '\n')"; then
         a_abort "the probe account is in the aurosadmin group. It is supposed to be the unprivileged case."
     fi
 
