@@ -116,11 +116,19 @@ mkmachine() { # -> prints the root dir. Options as KEY=VALUE arguments; see the 
   printf '%s' "$d"
 }
 
-_efi() { # <root> <secure boot byte>
+_efi() { # <root> <secure boot byte: 0 or 1>
   mkdir -p "$1/sys/firmware/efi/efivars"
-  # 4 attribute bytes then the data byte, which is how the kernel presents every efivar.
-  printf '\006\000\000\000\%03o' "$2" \
-    > "$1/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  # 4 attribute bytes then the data byte, which is how the kernel presents every efivar. Written as
+  # two literal cases rather than an octal escape built from "$2": `printf '\%03o'` is not an escape
+  # sequence, it emits those characters, so the fixture wrote "Secure Boot OFF" while claiming to
+  # write ON — a FIXTURE bug that is indistinguishable, from the failure line, from a bug in the
+  # code under test. Worth the six lines.
+  local f="$1/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+  case "$2" in
+    1) printf '\006\000\000\000\001' > "$f" ;;
+    0) printf '\006\000\000\000\000' > "$f" ;;
+    *) t_abort "_efi: secure boot byte must be 0 or 1, got [$2]" ;;
+  esac
 }
 
 _pci() { # <root> <bdf> <vendor> <device> <class>
@@ -308,9 +316,13 @@ PROMPTS="$(bash "$TOOL" --print-prompts)"
 for c in $HUMAN_COLUMNS; do assert_has "the prompt for $c is printed" "$c" "$PROMPTS"; done
 assert_has "the prompt asks for a specific observation, not an impression" "60 seconds" "$PROMPTS"
 assert_has "and says what partial requires" "is a feeling" "$PROMPTS"
-order="$(printf '%s' "$PROMPTS" | grep -nE "^\[?1?m?($(printf '%s' "$HUMAN_COLUMNS" | tr ' ' '|'))" | head -20)"
-first_prompt="$(printf '%s' "$PROMPTS" | sed -n 's/.*\[1m\([a-z]*\)\[0m.*/\1/p' | head -1)"
-assert_eq "wifi is asked FIRST, because that is what it costs the school" "wifi" "$first_prompt"
+# The headings are printed bold, so the ESC byte has to go before sed can match them. `tr -d '\033'`
+# deletes exactly one character — NOT `tr -d '[:space:]'`, which also deletes newlines and is the
+# idiom that made a hardening check permanently green (D19/D34).
+plain_prompts="$(printf '%s' "$PROMPTS" | tr -d '\033')"
+heading_order="$(printf '%s' "$plain_prompts" | sed -n 's/^\[1m\([a-z]*\)\[0m$/\1/p' | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "the seven are asked in COST order — wifi first, webcam last" \
+  "$HUMAN_COLUMNS" "$heading_order"
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 group "6 — refusals: each one watched going red, and green on the input it should accept"
