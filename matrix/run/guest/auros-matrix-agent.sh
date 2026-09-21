@@ -435,9 +435,9 @@ TAINT=$(cat /proc/sys/kernel/tainted 2>/dev/null || echo 0)
 FAILED_U=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
 NFAIL=$(printf '%s' "$FAILED_U" | wc -w)
 if [ "${AVC:-0}" -eq 0 ] && [ "${OOPS:-0}" -eq 0 ] && [ "${TAINT:-0}" -eq 0 ] && [ "${NFAIL:-0}" -eq 0 ]; then
-  emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units; D43 masked modules: $(masked_modules_state)"
+  emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units; D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]"
 else
-  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); D43 masked modules: $(masked_modules_state); distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
+  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]; distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
 fi
 
 status_line

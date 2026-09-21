@@ -385,6 +385,93 @@ R="$(newroot)"; mkdir -p "$R/etc/modules-load.d/v4l2loopback.conf"
 run_check hardening.mld-mask red "a directory already occupies the override path" -- mld_run "$R"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the initramfs forces zfs/v4l2loopback — modprobe.blacklist= must block each (D43, run 35616444839)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# The masks above held and both modules loaded anyway: upstream's initramfs carries its own
+# modules-load.d. A fake initramfs here is an empty file plus <img>.d/ holding its tree; the lsinitrd
+# stub lists that tree the way lsinitrd does and prints a file with -f, header lines included.
+# The kargs.d file is the SHIPPING hardening/kargs-modules.toml, so dropping a module from it is red.
+INITRD_BLOCK="$(extract_between "$H" '^have_cmd lsinitrd' 'initramfs read)"$' \
+  | rootify /usr/lib/modules /usr/lib/bootc/kargs.d)"
+KARGS_FN="$(extract_fn "$H" _auros_effective_kargs | rootify /usr/lib/bootc/kargs.d /usr/lib/ostree-boot)"
+LSINITRD_STUB='have_cmd() { command -v "$1" >/dev/null 2>&1; }
+lsinitrd() {
+  if [ "$1" = -f ]; then printf "initramfs:/%s\n====\n" "$2"; cat "$3.d/$2"; printf "====\n"; return; fi
+  [ -d "$1.d" ] || return 1
+  (cd "$1.d" && find . -type f | sed "s#^\./#-rw-r--r--   1 root root  4 Sep 15 20:33 #")
+}'
+initrd_run() { # <root> [extra shell]
+  ROOT="$1" bash -c "$PRE
+$KARGS_FN
+${2-$LSINITRD_STUB}
+$INITRD_BLOCK"
+}
+# mkinitrd <root> <module>... — a fake initramfs forcing each module through its own .conf
+mkinitrd() {
+  local r="$1" d; shift
+  d="$r/usr/lib/modules/7.1.8-200.fc44.x86_64"
+  mkdir -p "$d/initramfs.img.d/usr/lib/modules-load.d" "$d/initramfs.img.d/usr/lib/modules/x"
+  : > "$d/initramfs.img"; : > "$d/initramfs.img.d/usr/lib/modules/x/ext4.ko"
+  printf '# vendor\nfuse\n' > "$d/initramfs.img.d/usr/lib/modules-load.d/fuse-overlayfs.conf"
+  for m in "$@"; do printf '%s\n' "$m" > "$d/initramfs.img.d/usr/lib/modules-load.d/$m.conf"; done
+}
+shipkargs() { mkdir -p "$1/usr/lib/bootc/kargs.d"; cp "$REPO/hardening/kargs-modules.toml" "$1/usr/lib/bootc/kargs.d/20-auros-modules.toml"; }
+
+R="$(newroot)"; mkinitrd "$R" zfs v4l2loopback; shipkargs "$R"
+run_check hardening.initrd-block green "upstream's initramfs, shipped kargs" -- initrd_run "$R"
+assert_has "names what the initrd forces" "zfs" "$T_LAST_OUT"
+R="$(newroot)"; mkinitrd "$R"
+run_check hardening.initrd-block green "an initramfs that forces neither needs no karg" -- initrd_run "$R"
+R="$(newroot)"; mkinitrd "$R" zfs v4l2loopback
+run_check hardening.initrd-block red "upstream's initramfs, no karg (run 35616444839)" -- initrd_run "$R"
+assert_has "names the module" "loads zfs in the initrd" "$T_LAST_OUT"
+R="$(newroot)"; mkinitrd "$R" zfs v4l2loopback; mkdir -p "$R/usr/lib/bootc/kargs.d"
+printf 'kargs = ["modprobe.blacklist=v4l2loopback"]\n' > "$R/usr/lib/bootc/kargs.d/20-x.toml"
+run_check hardening.initrd-block red "only v4l2loopback blocked" -- initrd_run "$R"
+assert_has "names zfs as unblocked" "no modprobe.blacklist=zfs" "$T_LAST_OUT"
+R="$(newroot)"; mkinitrd "$R" zfs; mkdir -p "$R/usr/lib/bootc/kargs.d"
+printf 'kargs = ["module_blacklist=zfs"]\n' > "$R/usr/lib/bootc/kargs.d/20-x.toml"
+run_check hardening.initrd-block red "module_blacklist= (EPERM, fails the unit) is not accepted" -- initrd_run "$R"
+assert_has "for the right reason" "no modprobe.blacklist=zfs" "$T_LAST_OUT"
+R="$(newroot)"; mkinitrd "$R" zfs; shipkargs "$R"
+run_check hardening.initrd-block red "lsinitrd missing" -- initrd_run "$R" 'have_cmd() { command -v "$1" >/dev/null 2>&1; }'
+assert_has "says lsinitrd is missing" "lsinitrd is missing" "$T_LAST_OUT"
+R="$(newroot)"; mkinitrd "$R" zfs; shipkargs "$R"
+run_check hardening.initrd-block red "lsinitrd lists nothing (must not read as 'forces nothing')" -- initrd_run "$R" \
+  "$LSINITRD_STUB"'
+lsinitrd() { :; }'
+assert_has "says the listing was empty" "listed nothing recognisable" "$T_LAST_OUT"
+R="$(newroot)"; shipkargs "$R"
+run_check hardening.initrd-block red "no initramfs in the image" -- initrd_run "$R"
+assert_has "says there is no initramfs" "initramfs.img in this image" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "mcelog — skipped on CPUs it refuses (run 35616444839: AMD family 25, degraded)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+MCE_BLOCK="$(extract_between "$H" '^if \[ -e /usr/lib/systemd/system/mcelog.service \]' '^fi$' \
+  | rootify /usr/lib/systemd/system /usr/sbin)"
+mce_run() { # <root>
+  ROOT="$1" H="$REPO/hardening" bash -c "$PRE
+install_file() { mkdir -p \"\$(dirname \"\$2\")\"; cp \"\$1\" \"\$2\"; }
+$MCE_BLOCK"
+}
+mkmce() { # <root> <mcelog binary text>
+  mkdir -p "$1/usr/lib/systemd/system" "$1/usr/sbin"
+  printf '[Service]\nExecStart=/usr/sbin/mcelog --daemon --foreground\n' > "$1/usr/lib/systemd/system/mcelog.service"
+  printf '%s\n' "$2" > "$1/usr/sbin/mcelog"
+}
+DROPIN=usr/lib/systemd/system/mcelog.service.d/10-auros-cpu-supported.conf
+R="$(newroot)"; mkmce "$R" $'\x7fELF --is-cpu-supported  Exit with return code'
+run_check hardening.mcelog green "mcelog with --is-cpu-supported gets the drop-in" -- mce_run "$R"
+assert_has "the drop-in gates on mcelog's own test" "ExecCondition=/usr/sbin/mcelog --is-cpu-supported" "$(cat "$R/$DROPIN" 2>/dev/null)"
+R="$(newroot)"
+run_check hardening.mcelog green "no mcelog on the base" -- mce_run "$R"
+assert_nofile "and no drop-in" "$R/$DROPIN"
+R="$(newroot)"; mkmce "$R" $'\x7fELF an older mcelog'
+run_check hardening.mcelog red "an mcelog without --is-cpu-supported would skip on Intel too" -- mce_run "$R"
+assert_has "for the right reason" "has no --is-cpu-supported" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "sshd — BOTH units, because sshd.socket starts sshd on an incoming connection"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # The file's own header says "masked, not disabled ... sshd.socket would start on connection even

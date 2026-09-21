@@ -323,6 +323,65 @@ for f in zfs.conf v4l2loopback.conf; do
 done
 did "forced loads of zfs and v4l2loopback masked via /etc/modules-load.d -> /dev/null"
 
+# WHY THE MASKS ALONE DID NOT HOLD. Run 35616444839 booted with both masks in place and B11 still read
+# zfs=LOADED v4l2loopback=LOADED. The base's /usr/lib/modules/<kver>/initramfs.img (base 911281f2…,
+# read layer by layer) carries usr/lib/modules-load.d/{zfs,v4l2loopback}.conf, extra/zfs/{spl,zfs}.ko,
+# extra/v4l2loopback/v4l2loopback.ko.xz and systemd-modules-load.service in sysinit.target.wants. So
+# the modules are inserted in the initrd, where /etc/modules-load.d does not exist yet, and stay loaded
+# across switch-root. modules-load.d(5) warns that an initrd-included file needs an initrd rebuild to
+# be masked. Removing the kmod packages would not help either: the initramfs keeps its own copies.
+#
+# The fix is kernel arguments (hardening/kargs-modules.toml says why modprobe.blacklist= and not
+# module_blacklist=). Rebuilding the initramfs was the alternative: minutes of build and a 250 MB file
+# check S7 would have to prove deterministic, to achieve what two kernel arguments do.
+# NOT covered, knowingly: udev's 90-zfs.rules runs `modprobe zfs` (no -b) when a disk with a ZFS label
+# appears. That is a machine with a ZFS disk attached, which is not a school laptop.
+install_file "$H/kargs-modules.toml" /usr/lib/bootc/kargs.d/20-auros-modules.toml 0644
+record kernel-arg "modprobe.blacklist=zfs modprobe.blacklist=v4l2loopback"
+
+# The assertion reads the mechanism itself: every modules-load.d file INSIDE every shipped initramfs.
+# Each D43 module that one of them forces must be blocked by an effective kernel argument.
+have_cmd lsinitrd || die "lsinitrd is missing, so the initramfs cannot be read and D43 cannot be proven; the base ships it with dracut"
+_auros_d43_blocked=" $(_auros_effective_kargs | tr -d ' \t' | sed -n 's/^modprobe\.blacklist=//p' | tr '\n' ' ')"
+_auros_n_img=0
+for img in /usr/lib/modules/*/initramfs.img; do
+  [ -e "$img" ] || continue
+  _auros_n_img=$((_auros_n_img+1))
+  _auros_list="$(lsinitrd "$img" 2>/dev/null || true)"
+  grep -q 'usr/lib/modules/' <<<"$_auros_list" \
+    || die "lsinitrd listed nothing recognisable for $img, so what it forces cannot be read; see D43"
+  # Headers lsinitrd may print around a file's content are dropped by the module-name filter.
+  _auros_forced="$(printf '%s\n' "$_auros_list" | grep -oE 'usr/lib/modules-load\.d/[^ ]+\.conf' | sort -u \
+    | while read -r p; do lsinitrd -f "$p" "$img" 2>/dev/null || true; done \
+    | sed 's/#.*$//' | tr -d ' \t' | grep -E '^[A-Za-z0-9_-]+$' | sort -u || true)"
+  found "$img forces at initrd time: $(printf '%s' "$_auros_forced" | tr '\n' ' ')"
+  for m in zfs v4l2loopback; do
+    grep -qx "$m" <<<"$_auros_forced" || continue
+    case "$_auros_d43_blocked" in
+      *" $m "*) ;;
+      *) die "$img loads $m in the initrd, before /etc/modules-load.d exists, and no modprobe.blacklist=$m kernel argument stops it; see D43" ;;
+    esac
+  done
+done
+[ "$_auros_n_img" -gt 0 ] || die "no /usr/lib/modules/*/initramfs.img in this image, so what the initrd forces cannot be checked; see D43"
+did "every D43 module an initramfs forces is blocked by modprobe.blacklist= ($_auros_n_img initramfs read)"
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+step "mcelog — only on CPUs it supports"
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+# Run 35616444839: mcelog.service failed on the runner's AMD CPU and every profile booted degraded
+# (B2/B3/B10). hardening/mcelog-cpu-supported.conf has the why. The drop-in relies on mcelog's own
+# --is-cpu-supported; a build of mcelog without it would reject the option and skip itself on every
+# CPU, Intel included, so its presence is asserted rather than assumed.
+if [ -e /usr/lib/systemd/system/mcelog.service ]; then
+  grep -aq -- '--is-cpu-supported' /usr/sbin/mcelog \
+    || die "/usr/sbin/mcelog has no --is-cpu-supported, so the drop-in would switch mcelog off on Intel too; find another gate"
+  install_file "$H/mcelog-cpu-supported.conf" /usr/lib/systemd/system/mcelog.service.d/10-auros-cpu-supported.conf 0644
+  did "mcelog.service runs only where mcelog --is-cpu-supported says yes (Intel); AMD is left to edac_mce_amd"
+else
+  found "mcelog.service not present on this base; no drop-in needed"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 step "runtime assertions"
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
