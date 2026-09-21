@@ -4,6 +4,7 @@
 #
 #   b11taint    taint_flags decodes the bitmask per Documentation/admin-guide/tainted-kernels.rst
 #   b11module   tainted_modules names a module whose /sys/module/<m>/taint is non-empty, and no other
+#   b11masked   masked_modules_state says whether zfs and v4l2loopback (masked by D43) are loaded
 #   b11avc      avc_summary names each distinct denial (comm, scontext, tcontext, tclass, perms) once
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +15,7 @@ AGENT_SH="$REPO/matrix/run/guest/auros-matrix-agent.sh"
 TAINT_FN="$(extract_fn "$AGENT_SH" taint_flags)"
 MOD_FN="$(extract_fn "$AGENT_SH" tainted_modules)"
 AVC_FN="$(extract_fn "$AGENT_SH" avc_summary)"
+MASKED_FN="$(extract_fn "$AGENT_SH" masked_modules_state)"
 
 group "taint_flags decodes the kernel's bitmask"
 # 12289 = 0x3001 = bits 0, 12, 13 — the value uefi-modern and bios-legacy both reported.
@@ -35,6 +37,14 @@ run_snippet b11module green "an OE module is named with its letters" "$MOD_FN"'
 C="$(newroot)"; mkdir -p "$C/ext4"; : > "$C/ext4/taint"
 run_snippet b11module red "a clean module set names nothing" "$MOD_FN"'
 [ -n "$(tainted_modules "'"$C"'")" ]'
+
+group "masked_modules_state proves D43's masks held"
+N="$(newroot)"; mkdir -p "$N/ext4"
+run_snippet b11masked green "neither module loaded" "$MASKED_FN"'
+[ "$(masked_modules_state "'"$N"'")" = "zfs=not-loaded v4l2loopback=not-loaded" ]'
+Y="$(newroot)"; mkdir -p "$Y/ext4" "$Y/zfs"
+run_snippet b11masked red "zfs loaded is not reported as clean" "$MASKED_FN"'
+[ "$(masked_modules_state "'"$Y"'")" = "zfs=not-loaded v4l2loopback=not-loaded" ]'
 
 group "avc_summary names each distinct denial once"
 J="$(newroot)/journal.txt"

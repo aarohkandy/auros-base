@@ -297,6 +297,33 @@ did "system Flatpaks update daily, with a 3-hour random delay so a 180-machine s
 found "the operating system's own updates are task A4's bootc timer — this script does not touch the update path, which is protected (check S10)"
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
+step "upstream kernel modules — forced loads masked"
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
+# D43 (proposed). Upstream Aurora ships /usr/lib/modules-load.d/zfs.conf and v4l2loopback.conf, so
+# every boot loads zfs (CDDL) and v4l2loopback: out-of-tree modules signed only by the ublue kernel
+# key. Run 35566336512 booted tainted=12289 (P O E) on every profile, and under Secure Boot
+# systemd-modules-load.service FAILED because those modules were refused. Neither module does
+# anything for a school laptop.
+#
+# The mechanism is modules-load.d(5), "CONFIGURATION DIRECTORIES AND PRECEDENCE": files in /etc/
+# override same-named files in /usr/lib/, and "to disable a configuration file supplied by the
+# vendor, the recommended way is to place a symlink to /dev/null in the configuration directory in
+# /etc/, with the same filename". The masks are made unconditionally, so a base that stops shipping
+# the file still carries the mask and the assertion below still holds. The module files and their
+# packages stay; removing them is a subtraction decision (spec §6B), not this step's.
+for f in zfs.conf v4l2loopback.conf; do
+  [ -e "/usr/lib/modules-load.d/$f" ] || found "/usr/lib/modules-load.d/$f not present on this base; masking anyway"
+  mkdir -p /etc/modules-load.d
+  ln -sfn /dev/null "/etc/modules-load.d/$f"
+  record masked-modules-load "$f"
+done
+for f in zfs.conf v4l2loopback.conf; do
+  [ "$(readlink "/etc/modules-load.d/$f")" = /dev/null ] \
+    || die "/etc/modules-load.d/$f is not a symlink to /dev/null, so upstream's forced module load is still live; see D43"
+done
+did "forced loads of zfs and v4l2loopback masked via /etc/modules-load.d -> /dev/null"
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════
 step "runtime assertions"
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 install_file "$H/hardening-assert.sh" "${AUROS_LIBEXEC}/hardening-assert" 0755

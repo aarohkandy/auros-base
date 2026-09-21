@@ -74,6 +74,16 @@ tainted_modules() {
   printf '%s' "${out# }"
 }
 
+# masked_modules_state [sysmod-dir] — D43 masks upstream's forced loads of zfs and v4l2loopback;
+# this says, per module, whether the boot proves it (a module is loaded iff /sys/module/<m> exists).
+masked_modules_state() {
+  local m out=''
+  for m in zfs v4l2loopback; do
+    if [ -d "${1:-/sys/module}/$m" ]; then out="$out $m=LOADED"; else out="$out $m=not-loaded"; fi
+  done
+  printf '%s' "${out# }"
+}
+
 # avc_summary — journal text on stdin; each distinct denial once, with its count:
 #   <n>x comm scontext->tcontext:tclass {perms}
 avc_summary() {
@@ -386,9 +396,9 @@ TAINT=$(cat /proc/sys/kernel/tainted 2>/dev/null || echo 0)
 FAILED_U=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
 NFAIL=$(printf '%s' "$FAILED_U" | wc -w)
 if [ "${AVC:-0}" -eq 0 ] && [ "${OOPS:-0}" -eq 0 ] && [ "${TAINT:-0}" -eq 0 ] && [ "${NFAIL:-0}" -eq 0 ]; then
-  emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units"
+  emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units; D43 masked modules: $(masked_modules_state)"
 else
-  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
+  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); D43 masked modules: $(masked_modules_state); distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
 fi
 
 status_line
