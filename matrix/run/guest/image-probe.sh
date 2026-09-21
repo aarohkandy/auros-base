@@ -93,10 +93,10 @@ DM_EXEC=$(sed -n 's/^ExecStart=//p' "$DM_UNIT" 2>/dev/null | head -1 | awk '{pri
 emit DISPLAY_MANAGER_EXEC_PRESENT "$( [ -n "$DM_EXEC" ] && [ -e "$DM_EXEC" ] && echo 1 || echo 0 )"
 emit DISPLAY_MANAGER_EXEC_PATH "$DM_EXEC"
 # WHERE THE LOGIN MANAGER READS ITS CONFIG. The test wrapper writes autologin so that B7, B8 and B12
-# have a live desktop session, and it writes it to /etc/sddm.conf.d/. On this base the display
-# manager is /usr/bin/plasmalogin (measured, run 35550693484) — not sddm — so that path may be read
-# by nothing at all, in which case there is no session and three checks fail for a reason that has
-# nothing to do with the image. Emit what EXISTS instead of assuming.
+# have a live desktop session. On this base the display manager is /usr/bin/plasmalogin (measured,
+# run 35550693484), which never reads /etc/sddm.conf.d/ — where the wrapper wrote it until run
+# 35566336512 showed B7/B8/B12 failing with no session. It now writes /etc/plasmalogin.conf.d/ too;
+# /etc/plasmalogin.conf, if the image ships one, is read LAST and would override it. Emit what EXISTS.
 DMCONF=''
 for d in /etc/sddm.conf.d /usr/lib/sddm/sddm.conf.d /usr/share/sddm/sddm.conf.d \
          /etc/plasmalogin.conf.d /usr/lib/plasmalogin/plasmalogin.conf.d \

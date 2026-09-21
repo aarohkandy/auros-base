@@ -45,7 +45,14 @@ emit() { # emit <id> <status> <detail>
   d=${d//\\/\\\\}; d=${d//\"/\\\"}; d=$(printf '%s' "$d" | tr '\n\r\t' '   ')
   say "#AUROS#{\"id\":\"$id\",\"status\":\"$st\",\"detail\":\"$d\",\"duration_ms\":$dur}"
 }
-asuser() { runuser -u "$TEST_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$TEST_USER" 2>/dev/null || echo 1000)" "$@"; }
+# The test user's SESSION environment, not just a runtime dir: B7 and B12 run programs "as the user",
+# and a Qt or GTK program started with no WAYLAND_DISPLAY aborts before it does anything. WL is set by
+# the session wait below; before it, these are empty and harmless.
+asuser() {
+  local u; u=$(id -u "$TEST_USER" 2>/dev/null || echo 1000)
+  runuser -u "$TEST_USER" -- env XDG_RUNTIME_DIR="/run/user/$u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" \
+    WAYLAND_DISPLAY="${WL##*/}" XDG_SESSION_TYPE=wayland QT_QPA_PLATFORM=wayland "$@"
+}
 
 say "#AUROS-BOOT# $N"
 
@@ -178,7 +185,7 @@ ASSERT=/usr/libexec/auros/assert-policy
 P_PROBLEMS=''
 if [ -x "$ASSERT" ]; then
   if ! runuser -u "$TEST_USER" -- "$ASSERT" "$POLICY_MODE" > /tmp/policy-assert.log 2>&1; then
-    P_PROBLEMS="${ASSERT} ${POLICY_MODE} exited non-zero: $(tail -3 /tmp/policy-assert.log | tr '\n' ' ')"
+    P_PROBLEMS="${ASSERT} ${POLICY_MODE} exited non-zero: $(grep -m3 '^FAIL' /tmp/policy-assert.log | tr '\n' ' ')… $(tail -3 /tmp/policy-assert.log | tr '\n' ' ')"
   fi
   STAMPED=$(cat /usr/lib/auros/policy-mode 2>/dev/null || echo '')
   if [ -n "$STAMPED" ] && [ "$STAMPED" != "$POLICY_MODE" ]; then
@@ -212,21 +219,50 @@ else
   emit B6 fail "NetworkManager=${NM}; virtio-net connected=${LEASE:-none}; default route=${ROUTE:-none}; DNS=${DNSOK}"
 fi
 
+# ── the test user's graphical session — B7, B8 and B12 all run inside it ──────────────────────────
+# Autologin (Containerfile.testwrap) starts it; the greeter B1 saw is NOT it. Waited for as an event,
+# bounded. Run 35566336512 is why this block exists: the wrapper wrote autologin only where sddm reads
+# it, the display manager is plasmalogin, and B7/B8/B12 each failed without saying "there was no
+# session" — so when there is none, every one of them now says so and says what it saw instead.
+UID_T=$(id -u "$TEST_USER" 2>/dev/null || echo 1000)
+: "${SESSION_WAIT:=180}"
+WL=''; SESSION_DIAG=''
+S_END=$(( $(date +%s) + SESSION_WAIT ))
+while :; do
+  for s in /run/user/"$UID_T"/wayland-*; do [ -S "$s" ] && { WL=$s; break; }; done
+  [ -n "$WL" ] && break
+  [ "$(date +%s)" -ge "$S_END" ] && break
+  sleep 2
+done
+if [ -z "$WL" ]; then
+  DM=$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null); DM=${DM##*/}
+  SESSION_DIAG="NO GRAPHICAL SESSION for ${TEST_USER} after ${SESSION_WAIT}s (no wayland socket in /run/user/${UID_T}): \
+loginctl sessions [$(loginctl list-sessions --no-legend 2>/dev/null | tr '\n' ';')]; \
+display manager [${DM:-unknown}]; \
+[Autologin] files [$(grep -ls '^\[Autologin\]' /etc/plasmalogin.conf /etc/plasmalogin.conf.d/* /usr/lib/plasmalogin/plasmalogin.conf.d/* /etc/sddm.conf /etc/sddm.conf.d/* 2>/dev/null | tr '\n' ' ')]; \
+its journal [$(journalctl -b -u "${DM:-display-manager.service}" --no-pager 2>/dev/null | grep -iE 'autolog|session|pam' | tail -3 | tr '\n' ';')]"
+  say "#AUROS-NOTE# $SESSION_DIAG"
+fi
+
 # ── B7 — Audio ───────────────────────────────────────────────────────────────────────────────────
+# PipeWire is socket-activated by the session's first audio client, so "active" is polled, bounded.
 tick
-PW=$(asuser systemctl --user is-active pipewire 2>/dev/null || echo inactive)
-WP=$(asuser systemctl --user is-active wireplumber 2>/dev/null || echo inactive)
-SINKS=$(asuser wpctl status 2>/dev/null | awk '/Sinks:/{f=1;next}/^ *$/{f=0}f' | grep -cE '[0-9]+\.' || true)
+for _ in $(seq 1 30); do
+  PW=$(asuser systemctl --user is-active pipewire 2>/dev/null || echo inactive)
+  WP=$(asuser systemctl --user is-active wireplumber 2>/dev/null || echo inactive)
+  SINKS=$(asuser wpctl status 2>/dev/null | awk '/Sinks:/{f=1;next}/^ *$/{f=0}f' | grep -cE '[0-9]+\.' || true)
+  [ "$PW" = active ] && [ "$WP" = active ] && [ "${SINKS:-0}" -ge 1 ] && break
+  [ -z "$WL" ] && break
+  sleep 2
+done
 if [ "$PW" = active ] && [ "$WP" = active ] && [ "${SINKS:-0}" -ge 1 ]; then
   emit B7 pass "pipewire+wireplumber active for ${TEST_USER}; wpctl enumerates ${SINKS} sink(s)"
 else
-  emit B7 fail "pipewire=${PW} wireplumber=${WP} sinks=${SINKS:-0} (the VM presents an ich9-intel-hda device; zero sinks means the stack, not the hardware)"
+  emit B7 fail "pipewire=${PW} wireplumber=${WP} sinks=${SINKS:-0} (the VM presents an ich9-intel-hda device; zero sinks means the stack, not the hardware)${SESSION_DIAG:+. $SESSION_DIAG}"
 fi
 
 # ── B8 — Graphics ────────────────────────────────────────────────────────────────────────────────
 tick
-UID_T=$(id -u "$TEST_USER" 2>/dev/null || echo 1000)
-WL=$(ls /run/user/"$UID_T"/wayland-* 2>/dev/null | head -1)
 SESS=$(loginctl list-sessions --no-legend 2>/dev/null | awk -v u="$TEST_USER" '$3==u{print $1; exit}')
 STYPE=$( [ -n "$SESS" ] && loginctl show-session "$SESS" -p Type --value 2>/dev/null || echo '')
 CRASH=$(journalctl -b --no-pager 2>/dev/null | grep -icE 'kwin_wayland.*(crash|segfault|core-dump)|plasmashell.*(segfault|core-dump)' || true)
@@ -237,7 +273,7 @@ if [ "$POLICY_MODE" = kiosk ]; then
 elif [ -n "$WL" ] && [ "$STYPE" = wayland ] && [ "${CRASH:-0}" -eq 0 ]; then
   emit B8 pass "wayland socket ${WL##*/}, session type wayland, ${DRM} drm card node(s), no compositor crash"
 else
-  emit B8 fail "wayland socket=${WL:-none} session type=${STYPE:-none} drm cards=${DRM} compositor crashes=${CRASH}"
+  emit B8 fail "wayland socket=${WL:-none} session type=${STYPE:-none} drm cards=${DRM} compositor crashes=${CRASH}${SESSION_DIAG:+. $SESSION_DIAG}"
 fi
 
 # ── B9 — Flatpaks ────────────────────────────────────────────────────────────────────────────────
@@ -271,7 +307,10 @@ case "$POLICY_MODE" in
 esac
 B12_BAD=''; B12_OK=''
 KCMBIN=$(command -v kcmshell6 || command -v kcmshell5 || echo kcmshell6)
-KCMLIST=$( "$KCMBIN" --list 2>/dev/null || true )
+# offscreen: kcmshell6 constructs its QApplication BEFORE it parses --list (kcmutils
+# src/kcmshell/main.cpp), so as root with no display it aborts and lists nothing — which is how run
+# 35566336512 reported three KCMs that build/40-windows-feel.sh had installed as "no KCM".
+KCMLIST=$( QT_QPA_PLATFORM=offscreen "$KCMBIN" --list 2>/dev/null || true )
 for cap in "${!CAPS[@]}"; do
   thing=${CAPS[$cap]}
   launched=0
@@ -284,7 +323,7 @@ for cap in "${!CAPS[@]}"; do
         sleep 2
       done
       pkill -u "$TEST_USER" -f "$appid" >/dev/null 2>&1 || true
-      if [ "$launched" = 1 ]; then B12_OK="$B12_OK ${cap}(launched)"; else B12_BAD="$B12_BAD ${cap}(${thing} exists but never started)"; fi
+      if [ "$launched" = 1 ]; then B12_OK="$B12_OK ${cap}(launched)"; else B12_BAD="$B12_BAD ${cap}(${thing} exists but never started: $(head -c 200 "/tmp/b12-${cap}.log" | tr '\n' ' '))"; fi
     else
       B12_BAD="$B12_BAD ${cap}(no ${thing})"
     fi
@@ -296,7 +335,7 @@ for cap in "${!CAPS[@]}"; do
         sleep 2
       done
       pkill -u "$TEST_USER" -f "$thing" >/dev/null 2>&1 || true
-      if [ "$launched" = 1 ]; then B12_OK="$B12_OK ${cap}(launched)"; else B12_BAD="$B12_BAD ${cap}(KCM ${thing} listed but never started)"; fi
+      if [ "$launched" = 1 ]; then B12_OK="$B12_OK ${cap}(launched)"; else B12_BAD="$B12_BAD ${cap}(KCM ${thing} listed but never started: $(head -c 200 "/tmp/b12-${cap}.log" | tr '\n' ' '))"; fi
     else
       B12_BAD="$B12_BAD ${cap}(no KCM ${thing})"
     fi
@@ -305,7 +344,7 @@ done
 if [ "${#CAPS[@]}" -eq 0 ]; then
   emit B12 pass "policy=kiosk: the image makes no in-session install / Wi-Fi / printer / language promise, so there is nothing that could require a terminal"
 elif [ -n "$B12_BAD" ]; then
-  emit B12 fail "no GUI path for:${B12_BAD}. D4 is binding: if a promise needs a command line it stops being a promise."
+  emit B12 fail "no GUI path for:${B12_BAD}. D4 is binding: if a promise needs a command line it stops being a promise.${SESSION_DIAG:+ $SESSION_DIAG}"
 else
   emit B12 pass "GUI path present for:${B12_OK} (existence + launch asserted; window mapping NOT asserted)"
 fi

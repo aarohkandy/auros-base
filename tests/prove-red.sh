@@ -883,6 +883,44 @@ assert s2 != s
 open(p, 'w').write(s2)
 MUT
 
+printf '\n%s\n' "$(c 1 'matrix/run — the boot session (run 35566336512: B7/B8/B12 with no user session)')"
+
+mutate "the test wrapper writes autologin only where sddm reads it, on a plasmalogin base" \
+       tests/boot-session.test.sh "[autologin] the shipping wrapper" <<'MUT'
+p = 'matrix/run/guest/Containerfile.testwrap'
+s = open(p).read()
+old = 'for d in /etc/plasmalogin.conf.d /etc/sddm.conf.d; do'
+assert old in s
+open(p, 'w').write(s.replace(old, 'for d in /etc/sddm.conf.d; do'))
+MUT
+
+mutate "the agent lists KCMs with a bare kcmshell6 --list, which aborts with no display" \
+       tests/boot-session.test.sh "[kcmlist] root, no display" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = 'KCMLIST=$( QT_QPA_PLATFORM=offscreen "$KCMBIN" --list'
+assert old in s
+open(p, 'w').write(s.replace(old, 'KCMLIST=$( "$KCMBIN" --list'))
+MUT
+
+mutate "the session wait accepts wayland-0.lock as a session" \
+       tests/boot-session.test.sh "[session] no socket" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = '[ -S "$s" ] && { WL=$s; break; }'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ -e "$s" ] && { WL=$s; break; }'))
+MUT
+
+mutate "run-boot.sh counts fail RECORDS, so two boots double the count" \
+       tests/boot-session.test.sh "[failcount] 5 checks" <<'MUT'
+p = 'matrix/run/run-boot.sh'
+s = open(p).read()
+old = """FAILS=$(printf '%s' "$FAILED_IDS" | tr ',' '\\n' | grep -c . || true)"""
+assert old in s
+open(p, 'w').write(s.replace(old, """FAILS=$(grep -c '"status":"fail"' "$CHECKS_FILE" || true)"""))
+MUT
+
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
   printf '%s\n' "$(c 32 "$PASS/$((PASS+FAIL)) reintroduced bugs were caught by the suite that owns them.")"

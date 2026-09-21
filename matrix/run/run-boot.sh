@@ -259,9 +259,9 @@ done
 # "we did not test this", and that is the truth. Filling them from a VM is how you end up quoting a
 # school on Wi-Fi you never observed.
 FAILED_IDS=$(node -e '
-  const fs=require("fs"); const last=new Map();
-  for (const l of fs.readFileSync(process.argv[1],"utf8").split("\n")) { if(!l.trim())continue; try{const o=JSON.parse(l); last.set(o.id,o);}catch{} }
-  process.stdout.write([...last.values()].filter(o=>o.status!=="pass").map(o=>o.id).join(","));' "$CHECKS_FILE")
+  const fs=require("fs"); const recs=[];
+  for (const l of fs.readFileSync(process.argv[1],"utf8").split("\n")) { if(!l.trim())continue; try{recs.push(JSON.parse(l));}catch{} }
+  process.stdout.write([...new Set(recs.filter(o=>o.status!=="pass").map(o=>o.id))].join(","));' "$CHECKS_FILE")
 GPU_V=$(node -e 'const fs=require("fs");const last=new Map();for(const l of fs.readFileSync(process.argv[1],"utf8").split("\n")){if(!l.trim())continue;try{const o=JSON.parse(l);last.set(o.id,o)}catch{}}process.stdout.write(last.get("B8")?.status==="pass"?"ok":last.get("B8")?"fail":"")' "$CHECKS_FILE")
 AUD_V=$(node -e 'const fs=require("fs");const last=new Map();for(const l of fs.readFileSync(process.argv[1],"utf8").split("\n")){if(!l.trim())continue;try{const o=JSON.parse(l);last.set(o.id,o)}catch{}}process.stdout.write(last.get("B7")?.status==="pass"?"ok":last.get("B7")?"fail":"")' "$CHECKS_FILE")
 NOTE="matrix $( [ -z "$FAILED_IDS" ] && echo pass || echo "fail(${FAILED_IDS})"); ${P_SUMMARY}; ${DISK_NOTE}; accel=${ACCEL}; virtio-gpu/ich9-hda software stack only"
@@ -272,6 +272,9 @@ NOTE="matrix $( [ -z "$FAILED_IDS" ] && echo pass || echo "fail(${FAILED_IDS})")
     "$GPU_V" "$AUD_V" "$NOTE" "$(date -u +%Y-%m-%d)" "auros-matrix/run-boot.sh"
 } >> "$AUROS_RUN_DIR/compat-rows.tsv"
 
-FAILS=$(grep -c '"status":"fail"' "$CHECKS_FILE" || true)
+# One count per CHECK, not per record: the agent reports B2-B12 on each of FULL_BOOTS boots, so
+# counting "status":"fail" lines printed "10 failing check(s) — B5,B7,B8,B12,B11" (run 35566336512).
+# A check that failed on either boot failed — the same pessimistic rule matrix/run.sh's collector applies.
+FAILS=$(printf '%s' "$FAILED_IDS" | tr ',' '\n' | grep -c . || true)
 log "profile ${PROFILE}: ${FAILS} failing check(s)${FAILED_IDS:+ — ${FAILED_IDS}}"
 [ "${FAILS:-0}" -eq 0 ]

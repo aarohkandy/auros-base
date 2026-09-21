@@ -23,15 +23,25 @@ COPY config.env /usr/local/lib/auros-matrix/config.env
 COPY auros-matrix-agent.service /usr/lib/systemd/system/auros-matrix-agent.service
 COPY overlay/ /
 
+# AUTOLOGIN. This base's display manager is plasmalogin (KDE plasma-login-manager, measured in run
+# 35550693484), and plasmalogin does not read sddm's config. From its source (v6.7.0,
+# src/common/MainConfigLoader.cpp + CMakeLists.txt) it reads /etc/plasmalogin.conf, then every file in
+# /usr/lib/plasmalogin/plasmalogin.conf.d/ and /etc/plasmalogin.conf.d/; the keys are the [Autologin]
+# group of src/common/mainconfig.kcfg (User, Session, Relogin), and Session "plasma" resolves to
+# wayland-sessions/plasma.desktop (src/common/Session.cpp). Writing only /etc/sddm.conf.d/ — what this
+# did until run 35566336512 — left the VM at the greeter with no user session, and B7/B8/B12 failed on
+# that. The sddm copy stays for a base that ships sddm; each manager ignores the other's directory.
 ARG TEST_USER=auros
 ARG AUTOLOGIN=1
 RUN set -euo pipefail; \
     chmod 0755 /usr/local/lib/auros-matrix/auros-matrix-agent.sh; \
     systemctl enable auros-matrix-agent.service; \
     if ! id "${TEST_USER}" >/dev/null 2>&1; then useradd -m -G wheel "${TEST_USER}" || useradd -m "${TEST_USER}"; fi; \
-    if [ "${AUTOLOGIN}" = "1" ] && [ -d /etc/sddm.conf.d ] || [ "${AUTOLOGIN}" = "1" ]; then \
-      mkdir -p /etc/sddm.conf.d; \
-      printf '[Autologin]\nUser=%s\nSession=plasma\nRelogin=false\n' "${TEST_USER}" > /etc/sddm.conf.d/00-auros-matrix-autologin.conf; \
+    if [ "${AUTOLOGIN}" = "1" ]; then \
+      for d in /etc/plasmalogin.conf.d /etc/sddm.conf.d; do \
+        mkdir -p "$d"; \
+        printf '[Autologin]\nUser=%s\nSession=plasma\nRelogin=false\n' "${TEST_USER}" > "$d/00-auros-matrix-autologin.conf"; \
+      done; \
     fi; \
     mkdir -p /var/lib/auros-matrix; \
     echo "auros-matrix test wrapper — NOT A SHIPPING IMAGE" > /etc/auros-matrix-wrapper
