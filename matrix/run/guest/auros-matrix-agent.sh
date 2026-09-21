@@ -92,10 +92,22 @@ masked_modules_state() {
 }
 
 # avc_summary — journal text on stdin; each distinct denial once, with its count:
-#   <n>x comm scontext->tcontext:tclass {perms}
+#   <n>x comm scontext->tcontext:tclass {perms}[ path=|name=<object>]
+# The object is kept because run 35616444839 reported "bootupctl ... unlabeled_t:file {read}" with no
+# way to tell WHICH file was unlabeled, and so no way to say whose it was.
 avc_summary() {
   grep -E 'avc: +denied' \
-    | sed -nE 's/.*denied +\{ ([^}]*[^ }]) +\}.* comm="?([^" ]*)"?.* scontext=([^ ]*) tcontext=([^ ]*) tclass=([^ ]*).*/\2 \3->\4:\5 {\1}/p' \
+    | awk '{
+        p = $0; sub(/.*denied +\{ */, "", p); sub(/ *\}.*/, "", p)
+        comm = ""; s = ""; t = ""; c = ""; obj = ""
+        for (i = 1; i <= NF; i++) {
+          k = $i; sub(/=.*/, "", k); v = substr($i, length(k) + 2); gsub(/"/, "", v)
+          if (k == "comm") comm = v; else if (k == "scontext") s = v
+          else if (k == "tcontext") t = v; else if (k == "tclass") c = v
+          else if ((k == "path" || k == "name") && obj == "") obj = " " k "=" v
+        }
+        if (s != "") print comm " " s "->" t ":" c " {" p "}" obj
+      }' \
     | sort | uniq -c | sort -rn | head -15 \
     | awk '{c=$1; sub(/^ *[0-9]+ /, ""); printf "%s%dx %s", (NR>1?"; ":""), c, $0}'
 }
@@ -237,7 +249,9 @@ tick
 ASSERT=/usr/libexec/auros/assert-policy
 P_PROBLEMS=''
 if [ -x "$ASSERT" ]; then
-  if ! runuser -u "$TEST_USER" -- "$ASSERT" "$POLICY_MODE" > /tmp/policy-assert.log 2>&1; then
+  # As ROOT, not $TEST_USER: assert-policy drops to aurosprobe itself. $TEST_USER is in wheel
+  # (Containerfile.testwrap), an administrator -- run 35616444839 B5 measured that subject, not the unprivileged one.
+  if ! "$ASSERT" "$POLICY_MODE" > /tmp/policy-assert.log 2>&1; then
     P_PROBLEMS="${ASSERT} ${POLICY_MODE} exited non-zero: $(grep -m3 '^FAIL' /tmp/policy-assert.log | tr '\n' ' ')… $(tail -3 /tmp/policy-assert.log | tr '\n' ' ')"
   fi
   STAMPED=$(cat /usr/lib/auros/policy-mode 2>/dev/null || echo '')

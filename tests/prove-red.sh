@@ -845,6 +845,44 @@ assert old in s
 open(p, 'w').write(s.replace(old, '1|3) a_ok "$id" "$action -- not authorised for this user (pkcheck $rc)" ;;'))
 MUT
 
+# Run 35616444839 — B5 on the open control: pkcheck 127 for an action this base never registers, and
+# manage-units "refused outright" because the harness's wheel user tripped an upstream wheel-only rule.
+mutate "B5 run 35616444839: a failed pkaction enumeration is read as 'the action is not registered'" \
+       policy/tests/assert-lib.test.sh "dead pkaction + 127 => FAIL" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = 'local list; list="$(pkaction 2>/dev/null)" || return 1'
+assert old in s
+open(p, 'w').write(s.replace(old, 'local list; list="$(pkaction 2>/dev/null)" || return 0'))
+MUT
+
+mutate "B5 run 35616444839: a probe subject in wheel is accepted as the unprivileged case" \
+       policy/tests/assert-lib.test.sh "a subject in wheel => ABORT" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = 'if grep -qx wheel <<<'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if grep -qx wheel-never-matches <<<'))
+MUT
+
+mutate "B5 run 35616444839: the harness runs assert-policy as its wheel test user again" \
+       policy/tests/assert-lib.test.sh "B5 runs assert-policy via runuser" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = '  if ! "$ASSERT" "$POLICY_MODE" >'
+assert old in s
+open(p, 'w').write(s.replace(old, '  if ! runuser -u "$TEST_USER" -- "$ASSERT" "$POLICY_MODE" >'))
+MUT
+
+mutate "B11 run 35616444839: avc_summary drops the denied object, so 'unlabeled_t:file' names no file" \
+       tests/b11-diag.test.sh "fold to 2x" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = 'print comm " " s "->" t ":" c " {" p "}" obj'
+assert old in s
+open(p, 'w').write(s.replace(old, 'print comm " " s "->" t ":" c " {" p "}"'))
+MUT
+
 printf '\n%s\n' "$(c 1 'workflow run: blocks — pipe into grep -q under pipefail')"
 
 mutate "build.yml's cosign flag probe goes back to piping its --help into grep -q (SIGPIPE drops the flag)" \

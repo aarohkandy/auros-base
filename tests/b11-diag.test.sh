@@ -5,7 +5,7 @@
 #   b11taint    taint_flags decodes the bitmask per Documentation/admin-guide/tainted-kernels.rst
 #   b11module   tainted_modules names a module whose /sys/module/<m>/taint is non-empty, and no other
 #   b11masked   masked_modules_state says whether zfs and v4l2loopback (masked by D43) are loaded
-#   b11avc      avc_summary names each distinct denial (comm, scontext, tcontext, tclass, perms) once
+#   b11avc      avc_summary names each distinct denial (comm, scontext, tcontext, tclass, perms, object) once
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -56,7 +56,7 @@ Sep 21 06:40:04 auros systemd[1]: Started something unrelated.
 EOF
 run_snippet b11avc green "two identical denials fold to 2x, the other stays 1x" "$AVC_FN"'
 out=$(avc_summary < "'"$J"'")
-[ "$out" = "2x foo system_u:system_r:foo_t:s0->system_u:object_r:bar_t:s0:file {read}; 1x baz system_u:system_r:baz_t:s0->system_u:object_r:var_t:s0:file {write open}" ] || { echo "$out"; exit 1; }'
+[ "$out" = "2x foo system_u:system_r:foo_t:s0->system_u:object_r:bar_t:s0:file {read} name=bar; 1x baz system_u:system_r:baz_t:s0->system_u:object_r:var_t:s0:file {write open} path=/var/x" ] || { echo "$out"; exit 1; }'
 run_snippet b11avc red "a journal with no denials summarises to nothing" "$AVC_FN"'
 [ -n "$(printf "Sep 21 systemd[1]: Started x.\n" | avc_summary)" ]'
 

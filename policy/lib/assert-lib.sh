@@ -164,6 +164,18 @@ a_absent() {  # a_absent <id> <binary> -- the forbidden thing cannot be attempte
 # a_suite_no_software and a_suite_no_network_change that discriminates at all.
 a_pk() { pkcheck --action-id "$1" --process "$$" >/dev/null 2>&1; echo $?; }
 
+# a_pk_unregistered <action> -- true only when polkit ITSELF says the action does not exist.
+# pkcheck answers 127 for "Action X is not registered" (polkitbackendinteractiveauthority.c) and for
+# every other error alike, so 127 alone is never read as absence. The proof is a SUCCESSFUL, non-empty
+# enumeration by the live authority (pkaction) that does not contain the id. Run 35616444839 B5:
+# org.freedesktop.packagekit.package-install -> 127, because upstream Aurora ships no PackageKit and
+# build/40-windows-feel.sh removes what is left.
+a_pk_unregistered() {
+    local list; list="$(pkaction 2>/dev/null)" || return 1
+    [ -n "$list" ] || return 1
+    ! grep -qxF "$1" <<<"$list"
+}
+
 a_pk_hard_deny() {  # locked/kiosk: the answer is no, and no password changes it
     local id="$1" action="$2" rc; rc="$(a_pk "$action")"
     case "$rc" in
@@ -213,6 +225,13 @@ a_controls() {
 
     if grep -qx aurosadmin <<<"$(id -nG 2>/dev/null | tr ' ' '\n')"; then
         a_abort "the probe account is in the aurosadmin group. It is supposed to be the unprivileged case."
+    fi
+    # wheel is the base's admin group (50-default.rules addAdminRule) and upstream rules key on it:
+    # 22-ublue-rebase-systemd.rules calls action.lookup("unit").startsWith() for wheel members, which
+    # throws when pkcheck passes no unit detail, and polkit turns a throwing rule into NOT_AUTHORIZED.
+    # Run 35616444839 B5 ran as the harness's wheel user and read that as manage-units refused outright.
+    if grep -qx wheel <<<"$(id -nG 2>/dev/null | tr ' ' '\n')"; then
+        a_abort "the probe subject $(id -un) is in wheel, the base's administrator group. Its polkit answers are an administrator's (and hit upstream wheel-only rules), not the unprivileged case. Run assert-policy as root so it drops to aurosprobe."
     fi
 
     command -v pkcheck >/dev/null 2>&1 || a_abort "pkcheck is not installed. Without it the difference between 'refused outright' and 'an administrator could authorise this' cannot be observed, and that difference is the difference between locked and managed."
@@ -287,6 +306,18 @@ a_deny() {
     local level="$1" id="$2" action="$3" evidence="${4:-primary}"
     if [ "$evidence" = session-dependent ] && [ "$level" != control ]; then
         A_CORROBORATING+=("$id")
+    fi
+    # No mechanism on the image offers this action, so there is nothing to authorise in ANY mode.
+    # True of the promise, but it discriminates nothing: corroborating under every mode, a note on
+    # the control, never primary.
+    if a_pk_unregistered "$action"; then
+        case "$level" in
+            hard|admin) A_CORROBORATING+=("$id")
+                        a_ok "$id" "$action -- not registered with polkit on this image (pkaction enumerates it nowhere): no installed mechanism offers it [corroborating]" ;;
+            control)    a_note "control.$id" "$action -- not registered with polkit on this image, so it cannot discriminate between modes here" ;;
+            *)          a_bad "$id" "a_deny was called with unknown level '$level' -- refusing to guess which promise to assert" ;;
+        esac
+        return
     fi
     case "$level" in
         hard)    a_pk_hard_deny       "$id" "$action" ;;
