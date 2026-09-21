@@ -47,6 +47,48 @@ emit() { # emit <id> <status> <detail>
 }
 asuser() { runuser -u "$TEST_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$TEST_USER" 2>/dev/null || echo 1000)" "$@"; }
 
+# ── B2/B11 diagnostics: a failing check must NAME the unit, module or denial, not just count it. ─
+# Run 35566336512 reported tainted=12289 and denials=19 and nothing else, and the host keeps only the
+# fragment, so nobody could say which module or which domain. These put the names in the detail.
+
+# taint_flags <n> — each set bit as LETTER(bit), letters from the kernel's
+# Documentation/admin-guide/tainted-kernels.rst table (bit 0 prints P; G is its unset state).
+taint_flags() {
+  local n=$1 L=PFSRMBUDAWCIOELKXTNJ i=0 out=''
+  while [ "$n" -gt 0 ]; do
+    if [ $((n & 1)) = 1 ]; then
+      if [ "$i" -lt ${#L} ]; then out="$out ${L:$i:1}($i)"; else out="$out ?($i)"; fi
+    fi
+    n=$((n >> 1)); i=$((i + 1))
+  done
+  printf '%s' "${out# }"
+}
+
+# tainted_modules [sysmod-dir] — every loaded module whose own taint file is non-empty, as name(OE).
+tainted_modules() {
+  local f t out=''
+  for f in "${1:-/sys/module}"/*/taint; do
+    t=$(cat "$f" 2>/dev/null) || continue
+    [ -n "$t" ] && { f=${f%/taint}; out="$out ${f##*/}($t)"; }
+  done
+  printf '%s' "${out# }"
+}
+
+# avc_summary — journal text on stdin; each distinct denial once, with its count:
+#   <n>x comm scontext->tcontext:tclass {perms}
+avc_summary() {
+  grep -E 'avc: +denied' \
+    | sed -nE 's/.*denied +\{ ([^}]*[^ }]) +\}.* comm="?([^" ]*)"?.* scontext=([^ ]*) tcontext=([^ ]*) tclass=([^ ]*).*/\2 \3->\4:\5 {\1}/p' \
+    | sort | uniq -c | sort -rn | head -15 \
+    | awk '{c=$1; sub(/^ *[0-9]+ /, ""); printf "%s%dx %s", (NR>1?"; ":""), c, $0}'
+}
+
+# unit_why <unit...> — the last lines each failed unit logged this boot, so B2 says WHY, not just WHO.
+unit_why() {
+  local u
+  for u in "$@"; do printf '[%s: %s] ' "$u" "$(journalctl -b -u "$u" -n 4 -o cat --no-pager 2>/dev/null | tr '\n' '|')"; done
+}
+
 say "#AUROS-BOOT# $N"
 
 # ── status: the booted digest. Everything in the update group is decided by this line. ────────────
@@ -154,7 +196,8 @@ if [ "$SYS" = running ]; then emit B2 pass "systemctl is-system-running = runnin
 else
   FAILED=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
   JOBS=$(systemctl list-jobs --no-legend 2>/dev/null | head -5 | tr '\n' ';')
-  emit B2 fail "systemctl is-system-running = ${SYS:-<no answer within 900s>}; failed units: ${FAILED:-none}; jobs still queued: ${JOBS:-none}"
+  # shellcheck disable=SC2086 # FAILED is a space-separated unit list; each word is one unit
+  emit B2 fail "systemctl is-system-running = ${SYS:-<no answer within 900s>}; failed units: ${FAILED:-none}; jobs still queued: ${JOBS:-none}; why: $(unit_why $FAILED)"
 fi
 
 # ── B4 — Locale and keyboard, exactly as declared ────────────────────────────────────────────────
@@ -345,7 +388,7 @@ NFAIL=$(printf '%s' "$FAILED_U" | wc -w)
 if [ "${AVC:-0}" -eq 0 ] && [ "${OOPS:-0}" -eq 0 ] && [ "${TAINT:-0}" -eq 0 ] && [ "${NFAIL:-0}" -eq 0 ]; then
   emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units"
 else
-  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script."
+  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
 fi
 
 status_line
