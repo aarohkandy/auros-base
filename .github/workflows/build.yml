@@ -37,19 +37,21 @@
 # WHAT REACHES THE REGISTRY, AND WHEN
 #
 #   stage-<run_id>   pushed early, UNSIGNED, so the parallel check jobs have something to pull.
-#                    A customer machine cannot install it: D8's in-image policy is sigstoreSigned for
-#                    the whole `ghcr.io/aarohkandy` scope, and an unsigned image fails that policy.
-#                    SAID PLAINLY, because it is easy to read the paragraph above as a guarantee it is
-#                    not: this push has no `if:` guard, so a same-repo pull request also pushes an
-#                    unsigned, as-yet-unchecked image into the customer-facing package, before the
-#                    static and boot jobs have run. Nothing can install it and nothing follows the
-#                    tag, but it is there and it accumulates until the cleanup job can delete it. The
-#                    fix that removes the accumulation rather than apologising for it is to stage into
-#                    a separate package; that is a change to how the check jobs are fed and is tracked
+#                    UNSIGNED ONLY UNTIL THE `sign` JOB RUNS. D8's in-image policy is sigstoreSigned
+#                    for the whole `ghcr.io/aarohkandy` scope, so while it is unsigned no machine will
+#                    install it. But `sign` signs the DIGEST this tag points at, and policy.json uses
+#                    `signedIdentity: matchRepository`, which accepts ANY tag in the repository. So from
+#                    the moment `sign` succeeds — before `update`, `record` and `publish` — the staging
+#                    tag IS INSTALLABLE by any machine pointed at it, whether or not the rest of the
+#                    run passes. If `update` (the rollback proof) then fails, that signed, ungated image
+#                    stays under this tag until the cleanup job deletes it, and it MUST be deleted.
+#                    A same-repo pull request also pushes here (no `if:` guard) but is never signed.
+#                    The fix that removes the exposure rather than describing it is to stage into a
+#                    separate package; that is a change to how the check jobs are fed and is tracked
 #                    rather than half-done here.
 #   <digest>         signed once static + boot are green, because U1-U5 need a real signature to
-#                    exercise the real enforcement path. A signed digest with no tag pointing at it is
-#                    not reachable by any machine that has not been hand-fed the digest.
+#                    exercise the real enforcement path. The staging tag above points at it, so it is
+#                    reachable by tag until cleanup deletes that tag — not only by hand-fed digest.
 #   :hardened        moved ONLY after tools/gate.mjs exits 0. This is the tag machines follow, so this
 #                    is the tag the gate protects.
 #
@@ -528,7 +530,7 @@ jobs:
             echo "| upstream base | \`${{ needs.plan.outputs.base_ref }}\` |"
             echo "| content digest (S7) | \`${{ steps.s7.outputs.content_digest }}\` |"
             echo "| staging digest | \`${DIGEST}\` |"
-            echo "| staging tag | \`${IMAGE}:${STAGE_TAG}\` — unsigned, not installable |"
+            echo "| staging tag | \`${IMAGE}:${STAGE_TAG}\` — unsigned now; once the sign job signs this digest the tag IS installable, until cleanup deletes it |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -1181,6 +1183,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN || github.token }}
           IMAGE: ${{ needs.plan.outputs.image }}
+          SIGN_RESULT: ${{ needs.sign.result }}
         run: |
           # THIS USED TO BE `echo "would remove tag ${T}"`, which is not a cleanup job, it is a
           # picture of one. D19: a step that cannot fail is not a check, and a step that cannot act
@@ -1190,13 +1193,27 @@ jobs:
           PKG="${IMAGE##*/}"                 # ghcr.io/<org>/<name> -> <name>
           ORG="${IMAGE%/*}"; ORG="${ORG##*/}"
 
+          # What it means that the tag stays (SYSTEM-REVIEW §2.16). `sign` signs the digest this tag
+          # points at, and policy.json's matchRepository accepts any tag in the repository — so once
+          # sign has run, a staging tag left behind is an INSTALLABLE image that may never have passed
+          # update/record/publish. This used to say "unsigned and cannot be installed" in every case,
+          # which is the one message read during an incident, reassuring about the one case that is not.
+          stays () { # <how the operator deletes it>
+            if [ "${SIGN_RESULT}" = skipped ]; then
+              echo "::warning::the staging tag ${IMAGE}:${STAGE_TAG} stays. The sign job did not run, so it is unsigned and no machine will install it; it still accumulates — $1"
+            else
+              echo "::error::the staging tag ${IMAGE}:${STAGE_TAG} stays, and the sign job ran (result: ${SIGN_RESULT}), so this digest may be SIGNED. A signed staging tag IS INSTALLABLE by any machine pointed at it (policy.json matches the repository, not the tag), whether or not update/record/publish passed. It must be deleted — $1"
+            fi
+          }
+
           # Find the package version whose tags include our staging tag. A version id is required;
           # GHCR has no delete-by-tag endpoint.
           if ! gh api --paginate \
                 "/orgs/${ORG}/packages/container/${PKG}/versions" > /tmp/versions.json 2>/tmp/versions.err \
              && ! gh api --paginate \
                 "/users/${ORG}/packages/container/${PKG}/versions" > /tmp/versions.json 2>>/tmp/versions.err; then
-            echo "::warning::could not list versions of ${IMAGE}; the staging tag ${STAGE_TAG} stays. It is unsigned and cannot be installed."
+            echo "could not list versions of ${IMAGE}"
+            stays "find the version tagged ${STAGE_TAG} under the ${PKG} package's versions on GitHub and delete it."
             sed -n '1,20p' /tmp/versions.err
             exit 0
           fi
@@ -1213,7 +1230,8 @@ jobs:
               exit 0
             fi
           done
-          echo "::warning::could not delete ${IMAGE}:${STAGE_TAG} (version ${ID}) — the token lacks delete:packages. The tag stays; it is unsigned and cannot be installed, but it does accumulate."
+          echo "could not delete ${IMAGE}:${STAGE_TAG} (version ${ID}) — the token lacks delete:packages."
+          stays "gh api -X DELETE /orgs/${ORG}/packages/container/${PKG}/versions/${ID} (or /users/${ORG}/...) with a token that has delete:packages."
           sed -n '1,20p' /tmp/del.err
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
