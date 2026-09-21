@@ -982,6 +982,42 @@ assert old in s
 open(p, 'w').write(s.replace(old, 'if false; then'))
 MUT
 
+mutate "auros_selinux_state matches any module whose name contains auros_bootc" \
+       tests/b11-diag.test.sh "b11sel" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = 'grep -x auros_bootc >/dev/null && mod=loaded'
+assert old in s
+open(p, 'w').write(s.replace(old, 'grep auros_bootc >/dev/null && mod=loaded'))
+MUT
+
+printf '\n%s\n' "$(c 1 'build/30-update-agent.sh — the SELinux module (A6)')"
+
+mutate "30-update-agent trusts semodule -i's exit code and never checks semodule -l" \
+       tests/30-update-agent.test.sh "semodule -l does not list the module" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'semodule -l | grep -x "$mod" >/dev/null || die'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || die'))
+MUT
+
+mutate "30-update-agent defines the module installer but never calls it" \
+       tests/30-update-agent.test.sh "matches [^install_selinux_module ]" <<'MUT'
+p = 'build/30-update-agent.sh'
+s = open(p).read()
+old = 'install_selinux_module "$UA/selinux/auros_bootc.cil"\n'
+assert s.count(old) == 1
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "the module widens unconfined_service_t with mac_admin instead of transitioning" \
+       tests/30-update-agent.test.sh "exactly the install_t transition" <<'MUT'
+p = 'update-agent/selinux/auros_bootc.cil'
+s = open(p).read()
+open(p, 'w').write(s + '(allow unconfined_service_t self (capability2 (mac_admin)))\n')
+MUT
+
 mutate "10-hardening stops masking upstream's zfs modules-load.d file" \
        tests/10-hardening.test.sh "mld-mask" <<'MUT'
 p = 'build/10-hardening.sh'

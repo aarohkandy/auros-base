@@ -112,6 +112,17 @@ avc_summary() {
     | awk '{c=$1; sub(/^ *[0-9]+ /, ""); printf "%s%dx %s", (NR>1?"; ":""), c, $0}'
 }
 
+# auros_selinux_state — journal text on stdin; whether build/30's auros_bootc module is in the booted
+# policy, and how many denials of the kind it exists to stop (unconfined_service_t {mac_admin}, bootc's
+# chcon self-test run from our units) this boot still logged. loaded + 0 is the fix working.
+auros_selinux_state() {
+  local mod=MISSING n
+  # grep without -q: under pipefail, -q exiting early can SIGPIPE semodule and fail a found match.
+  semodule -l 2>/dev/null | grep -x auros_bootc >/dev/null && mod=loaded
+  n=$(grep -cE 'avc: +denied +\{ mac_admin \}.*scontext=[^ ]*:unconfined_service_t:' || true)
+  printf 'auros_bootc=%s unconfined_service_t-mac_admin-denials=%s' "$mod" "$n"
+}
+
 # unit_why <unit...> — the last lines each failed unit logged this boot, so B2 says WHY, not just WHO.
 unit_why() {
   local u
@@ -450,9 +461,9 @@ TAINT=$(cat /proc/sys/kernel/tainted 2>/dev/null || echo 0)
 FAILED_U=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
 NFAIL=$(printf '%s' "$FAILED_U" | wc -w)
 if [ "${AVC:-0}" -eq 0 ] && [ "${OOPS:-0}" -eq 0 ] && [ "${TAINT:-0}" -eq 0 ] && [ "${NFAIL:-0}" -eq 0 ]; then
-  emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units; D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]"
+  emit B11 pass "0 SELinux denials, 0 kernel oops, tainted=0, 0 failed units; D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]; $(journalctl -b --no-pager 2>/dev/null | auros_selinux_state)"
 else
-  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]; distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
+  emit B11 fail "SELinux denials=${AVC} kernel oops/BUG=${OOPS} tainted=${TAINT} failed units=${NFAIL} (${FAILED_U:-none}). A non-zero taint flag needs a DECISIONS.md entry, not an exception in this script. taint flags: $(taint_flags "${TAINT:-0}"); tainting modules: $(tainted_modules); D43 masked modules: $(masked_modules_state) [cmdline: $(grep -o 'modprobe\.blacklist=[^ ]*' /proc/cmdline 2>/dev/null | tr '\n' ' ')]; $(journalctl -b --no-pager 2>/dev/null | auros_selinux_state); distinct denials: $(journalctl -b --no-pager 2>/dev/null | avc_summary)"
 fi
 
 status_line

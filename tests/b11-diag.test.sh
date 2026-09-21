@@ -6,6 +6,7 @@
 #   b11module   tainted_modules names a module whose /sys/module/<m>/taint is non-empty, and no other
 #   b11masked   masked_modules_state says whether zfs and v4l2loopback (masked by D43) are loaded
 #   b11avc      avc_summary names each distinct denial (comm, scontext, tcontext, tclass, perms, object) once
+#   b11sel      auros_selinux_state says whether auros_bootc is loaded and counts the denials it targets
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -16,6 +17,7 @@ TAINT_FN="$(extract_fn "$AGENT_SH" taint_flags)"
 MOD_FN="$(extract_fn "$AGENT_SH" tainted_modules)"
 AVC_FN="$(extract_fn "$AGENT_SH" avc_summary)"
 MASKED_FN="$(extract_fn "$AGENT_SH" masked_modules_state)"
+SEL_FN="$(extract_fn "$AGENT_SH" auros_selinux_state)"
 
 group "taint_flags decodes the kernel's bitmask"
 # 12289 = 0x3001 = bits 0, 12, 13 — the value uefi-modern and bios-legacy both reported.
@@ -59,5 +61,22 @@ out=$(avc_summary < "'"$J"'")
 [ "$out" = "2x foo system_u:system_r:foo_t:s0->system_u:object_r:bar_t:s0:file {read} name=bar; 1x baz system_u:system_r:baz_t:s0->system_u:object_r:var_t:s0:file {write open} path=/var/x" ] || { echo "$out"; exit 1; }'
 run_snippet b11avc red "a journal with no denials summarises to nothing" "$AVC_FN"'
 [ -n "$(printf "Sep 21 systemd[1]: Started x.\n" | avc_summary)" ]'
+
+group "auros_selinux_state shows whether build/30's module fixed our denials"
+SB="$(stubdir)"
+printf '#!/bin/sh\nprintf "base\\nauros_bootc\\n"\n' > "$SB/semodule"; chmod 0755 "$SB/semodule"
+SN="$(stubdir)"
+printf '#!/bin/sh\nprintf "base\\nauros_bootc_old\\n"\n' > "$SN/semodule"; chmod 0755 "$SN/semodule"
+JM="$(newroot)/mac.txt"
+cat > "$JM" <<'EOF'
+Sep 21 06:40:05 auros audit[950]: AVC avc:  denied  { mac_admin } for  pid=950 comm="chcon" capability=33  scontext=system_u:system_r:unconfined_service_t:s0 tcontext=system_u:system_r:unconfined_service_t:s0 tclass=capability2 permissive=0
+Sep 21 06:40:06 auros audit[951]: AVC avc:  denied  { mac_admin } for  pid=951 comm="chcon" capability=33  scontext=system_u:system_r:tuned_t:s0 tcontext=system_u:system_r:tuned_t:s0 tclass=capability2 permissive=0
+EOF
+run_snippet b11sel green "loaded, and a clean journal counts 0" "PATH='$SB':\$PATH; $SEL_FN"'
+[ "$(printf "x\n" | auros_selinux_state)" = "auros_bootc=loaded unconfined_service_t-mac_admin-denials=0" ]'
+run_snippet b11sel green "counts the unconfined_service_t one, not tuned's" "PATH='$SB':\$PATH; $SEL_FN"'
+[ "$(auros_selinux_state < "'"$JM"'")" = "auros_bootc=loaded unconfined_service_t-mac_admin-denials=1" ]'
+run_snippet b11sel red "a different module name is not reported as loaded" "PATH='$SN':\$PATH; $SEL_FN"'
+case "$(printf "x\n" | auros_selinux_state)" in auros_bootc=loaded*) exit 0;; *) exit 1;; esac'
 
 t_finish b11-diag.test.sh
