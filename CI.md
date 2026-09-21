@@ -397,6 +397,27 @@ opposite of proving anything.
 It also refuses to run without a writable `/dev/kvm` unless `AUROS_ALLOW_TCG=1`. **CI does not set that.**
 The update group is four boots; under emulation it would exceed the 6-hour job limit and prove nothing.
 
+#### How to run the probe
+
+```
+workflow_dispatch          static / boot / update as booleans, plus a profile
+push to probe/**           static + boot
+push to probe-update/**    the update group alone (it is long; do not make it share a run)
+```
+
+It builds `FROM` the digest in `base.lock` plus one marker file — the same trivial derivative
+`probe-boot.yml` uses, and no `ostree container commit` (D20) — and drives `matrix/run.sh` with
+build.yml's exact command lines. Two knobs exist, **for the probe only, and `build.yml` must not set
+either**: `AUROS_AGENT_DEADLINE` (default 2400s per boot, probe uses 420) and
+`AUROS_DEADLINE_DIVISOR` (probe uses 6). Both shorten the *waiting* and never the *conclusion* — any
+check that fails on a shortened deadline carries a sentence in its own `detail` saying so, so a probe
+result cannot be read as a CI one. `AUROS_RUN_DIR` makes `matrix/run.sh` keep its run directory
+instead of deleting it, which is what makes the logs uploadable at all.
+
+The boot and update phases print a per-minute heartbeat naming the size and last lines of every
+serial and agent log, because GitHub serves no job log until the job ends and these phases run for
+over an hour.
+
 #### What the first execution found — 2026-09-21
 
 `.github/workflows/probe-matrix.yml` runs all three phases against a trivial derivative of the pinned
