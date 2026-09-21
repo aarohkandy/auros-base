@@ -39,7 +39,7 @@ ARG UPSTREAM_DIGEST=sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a4
 
 # Fixed build clock. Every file the build writes is stamped with this, so that two builds from
 # identical inputs differ in as few bytes as possible (check S7). The default is the upstream base
-# image's own creation time (2026-09-15T20:33:50Z, recorded in base.lock as UPSTREAM_CREATED) rather
+# image's own creation time (base.lock's UPSTREAM_CREATED; `resolve-upstream.sh update` rewrites both) rather
 # than 0, because a 1970 mtime on a system file confuses enough tooling to be its own problem.
 ARG SOURCE_DATE_EPOCH=1789504430
 

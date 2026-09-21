@@ -228,9 +228,14 @@ jobs:
         id: v1
         env:
           IMAGE: ${{ steps.cfg.outputs.fixture_image }}
+          AUROS_MIRROR: ${{ steps.cfg.outputs.mirror }}
+          AUROS_REGISTRY_USER: ${{ github.actor }}
+          AUROS_REGISTRY_TOKEN: ${{ github.token }}
         run: |
           ./tools/resolve-upstream.sh assert --mirror '${{ steps.cfg.outputs.mirror }}'
-          ./tools/resolve-upstream.sh mirror --mirror '${{ steps.cfg.outputs.mirror }}'
+          # D21: populating the mirror is tools/mirror-upstream.sh's job. This line used to call a
+          # `mirror` subcommand resolve-upstream.sh never had (tests/dispatch.test.sh now catches that).
+          ./tools/mirror-upstream.sh
           BASE_REF=$(./tools/resolve-upstream.sh assert --quiet --mirror '${{ steps.cfg.outputs.mirror }}' \
                      | grep '^base_ref=' | cut -d= -f2-)
 

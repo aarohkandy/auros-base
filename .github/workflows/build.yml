@@ -430,23 +430,44 @@ jobs:
               diff /tmp/pkgs-a.txt /tmp/pkgs-b.txt | head -40 || true
             fi
 
-            echo "--- (b) which files differ? (path, size, mtime — first 60) ---"
-            for v in a b; do
-              sudo podman run --rm --entrypoint= "localhost/auros-base:raw-$v" \
-                sh -c 'find / -xdev -type f -printf "%p\t%s\t%T@\n" 2>/dev/null | LC_ALL=C sort' \
-                > "/tmp/files-$v.txt" 2>/dev/null || echo "(could not enumerate raw-$v)"
-            done
-            FA=$(wc -l < /tmp/files-a.txt 2>/dev/null | tr -d ' ' || echo 0)
-            if [ "${FA:-0}" -lt 1000 ]; then
-              echo "::error::file enumeration produced ${FA} lines — the images were not readable. NO CONCLUSION."
+            echo "--- (b) which files differ? CONTENT hashes, not path/size/mtime ---"
+            # The previous version listed path/size/mtime from inside a running container. --timestamp
+            # pins every mtime and a same-size rewrite (a sqlite page, a cache) keeps its size, so it
+            # could not see the most likely cause at all; and a running container adds /etc/hostname
+            # and friends, which differ per container. So: mount each image from the host and hash
+            # every regular file. Run 35548421189 showed only ONE layer differs pre-flatten — the
+            # step-14 RUN that executes build/*.sh — so every path listed here comes from that step.
+            manifest () {  # manifest <image> <prefix> — writes <prefix>.sha and <prefix>.meta
+              local mnt
+              mnt="$(sudo podman image mount "$1")" || { echo "(could not mount $1)"; return 1; }
+              sudo bash -c 'cd "$1" && find . -xdev -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum' _ "$mnt" > "$2.sha" || true
+              sudo bash -c 'cd "$1" && find . -xdev -printf "%y %m %U:%G %T@ %p -> %l\n" | LC_ALL=C sort -k5' _ "$mnt" > "$2.meta" || true
+              sudo podman image unmount "$1" >/dev/null 2>&1 || true
+            }
+            manifest localhost/auros-base:raw-a /tmp/tree-a
+            manifest localhost/auros-base:raw-b /tmp/tree-b
+            FA=$(wc -l < /tmp/tree-a.sha 2>/dev/null | tr -d ' ' || echo 0)
+            FB=$(wc -l < /tmp/tree-b.sha 2>/dev/null | tr -d ' ' || echo 0)
+            if [ "${FA:-0}" -lt 1000 ] || [ "${FB:-0}" -lt 1000 ]; then
+              echo "::error::hashed only a=${FA}, b=${FB} files — the images were not readable. NO CONCLUSION."
             else
-              echo "(enumerated ${FA} files per image)"
-              diff /tmp/files-a.txt /tmp/files-b.txt | head -60 || true
+              { diff /tmp/tree-a.sha /tmp/tree-b.sha || true; } | sed -nE 's/^[<>] [0-9a-f]{64}  //p' \
+                | LC_ALL=C sort -u > /tmp/tree-diff.txt
+              ND=$(wc -l < /tmp/tree-diff.txt | tr -d ' ')
+              echo "(hashed ${FA} / ${FB} files) ${ND} paths differ in CONTENT or exist in only one build:"
+              head -80 /tmp/tree-diff.txt || true
+              echo "--- by directory ---"
+              { sed 's#/[^/]*$##' /tmp/tree-diff.txt | LC_ALL=C sort | uniq -c | sort -rn || true; } | head -25 || true
+              { diff /tmp/tree-a.meta /tmp/tree-b.meta || true; } | sed -nE 's/^[<>] [^ ]+ [^ ]+ [^ ]+ [^ ]+ (.*) -> .*$/\1/p' \
+                | LC_ALL=C sort -u > /tmp/meta-diff.txt
+              echo "--- $(wc -l < /tmp/meta-diff.txt | tr -d ' ') paths differ in METADATA (type, mode, owner, mtime, link target), by directory ---"
+              { sed 's#/[^/]*$##' /tmp/meta-diff.txt | LC_ALL=C sort | uniq -c | sort -rn || true; } | head -15 || true
+              echo "--- first 20 metadata lines ---"
+              { diff /tmp/tree-a.meta /tmp/tree-b.meta || true; } | grep -E '^[<>]' | head -20 || true
+              if [ "$ND" = 0 ]; then
+                echo "::warning::no file content differs, yet the layer digests do. Look at the metadata diff above (mtimes/modes/xattrs) — the difference is in the tar headers, not the files."
+              fi
             fi
-            echo "--- differing paths, deduplicated, by directory ---"
-            diff /tmp/files-a.txt /tmp/files-b.txt 2>/dev/null \
-              | grep -E '^[<>]' | awk '{print $2}' | sed 's#/[^/]*$##' | LC_ALL=C sort | uniq -c \
-              | sort -rn | head -20 || true
           fi
 
           # Now the raw images have served their purpose — the diagnostic above has read them.

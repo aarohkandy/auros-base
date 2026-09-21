@@ -263,6 +263,68 @@ cmd_assert() {
   say "S1 PASS — base is pinned by digest and the Containerfile and base.lock agree (via ${via})."
 }
 
+# Shared by drift and update: resolve the tag now and compare with the lock. Sets MOVED and OLD_DIGEST.
+check_drift() {
+  OLD_DIGEST="$(lock_get UPSTREAM_DIGEST)"
+  [[ "$OLD_DIGEST" =~ ^${DIGEST_RE}$ ]] || die "base.lock UPSTREAM_DIGEST '${OLD_DIGEST}' is not a sha256 digest"
+  cmd_resolve
+  if [ "$RESOLVED_DIGEST" = "$OLD_DIGEST" ]; then MOVED=false; else MOVED=true; fi
+  emit old_digest "$OLD_DIGEST"
+  emit moved "$MOVED"
+}
+
+cmd_drift() {
+  check_drift
+  if [ "$MOVED" = true ]; then
+    say "drift: upstream MOVED ${OLD_DIGEST} -> ${RESOLVED_DIGEST}"
+    exit 10
+  fi
+  say "drift: upstream still at ${OLD_DIGEST}"
+}
+
+lock_set() {  # lock_set KEY VALUE — replace the line, or append it if the lock has none
+  local tmp; tmp="$(mktemp)"
+  awk -v k="$1" -v v="$2" 'BEGIN{d=0} index($0, k"=")==1 {print k"="v; d=1; next} {print} END{if(!d) print k"="v}' \
+    "$LOCK" > "$tmp" && cat "$tmp" > "$LOCK"
+  rm -f "$tmp"
+}
+
+cmd_update() {
+  check_drift
+  if [ "$MOVED" = false ]; then
+    say "update: nothing to rewrite — ${LOCK##*/} already pins ${OLD_DIGEST}"
+    return 0
+  fi
+
+  lock_set UPSTREAM_DIGEST          "$RESOLVED_DIGEST"
+  lock_set UPSTREAM_RESOLVED_AT     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  lock_set UPSTREAM_CREATED         "$RESOLVED_CREATED"
+  lock_set UPSTREAM_ARCH            "$RESOLVED_ARCH"
+  lock_set UPSTREAM_PULL_SIZE_BYTES "$RESOLVED_PULL_BYTES"
+
+  # The Containerfile carries the digest as literals (FROM and ARG UPSTREAM_DIGEST). Rewrite every one,
+  # then prove none of the old ones survived: a half-rewritten file builds one digest and labels another.
+  if [ -f "$CONTAINERFILE" ] && grep -qF "$OLD_DIGEST" "$CONTAINERFILE"; then
+    local tmp; tmp="$(mktemp)"
+    sed "s/${OLD_DIGEST}/${RESOLVED_DIGEST}/g" "$CONTAINERFILE" > "$tmp" && cat "$tmp" > "$CONTAINERFILE"
+    # The ARG SOURCE_DATE_EPOCH default is documented as the upstream creation time. Keep it true.
+    if [ -n "$RESOLVED_CREATED" ]; then
+      local epoch
+      epoch="$(python3 -c 'import sys,datetime,re; s=re.sub(r"\.\d+","",sys.argv[1]).replace("Z","+00:00"); print(int(datetime.datetime.fromisoformat(s).timestamp()))' "$RESOLVED_CREATED")" \
+        || die "cannot convert UPSTREAM_CREATED '${RESOLVED_CREATED}' to an epoch"
+      sed -E "s/^(ARG SOURCE_DATE_EPOCH=)[0-9]+$/\1${epoch}/" "$CONTAINERFILE" > "$tmp" && cat "$tmp" > "$CONTAINERFILE"
+    fi
+    rm -f "$tmp"
+    if grep -qF "$OLD_DIGEST" "$CONTAINERFILE"; then
+      die "update: ${OLD_DIGEST} still appears in ${CONTAINERFILE} after the rewrite"
+    fi
+  fi
+
+  # Leave the tree in the state S1 accepts, or fail here rather than at tomorrow's build.
+  cmd_assert
+  say "update: base.lock now pins ${RESOLVED_DIGEST}"
+}
+
 case "$CMD" in
   resolve) cmd_resolve ;;
   assert)  cmd_assert ;;
