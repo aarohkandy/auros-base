@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // analyze.mjs — evaluates the static checks whose logic is set arithmetic or JSON, from the output of
-// guest/image-probe.sh. S3, S4, S5, S9 and S10 live here; S1/S2/S6/S7/S8 stay in run-static.sh because
+// guest/image-probe.sh. S3, S4, S5, S9, S10 and S11 live here; S1/S2/S6/S7/S8 stay in run-static.sh because
 // they are about the registry and the build, not about the image's contents.
 //
 // Appends JSON Lines to --out, in the same shape common.sh's record() writes.
@@ -51,7 +51,7 @@ const rpms = new Map();           // name -> size (bytes, as rpm reports install
   }
 }
 if (kv.PROBE_OK !== '1') {
-  for (const id of ['S3', 'S4', 'S5', 'S9', 'S10']) rec(id, 'fail', 'in-image probe did not complete; nothing about this image could be established');
+  for (const id of ['S3', 'S4', 'S5', 'S9', 'S10', 'S11']) rec(id, 'fail', 'in-image probe did not complete; nothing about this image could be established');
   process.exit(0);
 }
 
@@ -244,4 +244,23 @@ const declaredRemove = lines(args['declared-remove']);
 
   if (problems.length) rec('S10', 'fail', problems.join('; '));
   else rec('S10', 'pass', `bootc, update timer, greenboot (healthcheck+rollback), NetworkManager and systemd all present and enabled; policy.json carries a sigstoreSigned rule for ${scope} with its key in the image; registries.d requests sigstore attachments`);
+}
+
+// ── S11 — the removal floor, against what actually left the image ───────────────────────────────
+// The count is the image this one was built FROM minus this image, both read from rpm. It is never
+// the plan: the plan is the packages a recipe named (57 for example-kiosk) and the dependency
+// closure is most of the removal, so a floor checked against the plan could never be met and a
+// floor checked against nothing could never fail.
+{
+  const floor = args.floor && args.floor !== 'true' ? args.floor.trim() : '';
+  const from = [...new Set(lines(args['from-rpms']).map((l) => l.split('\t')[0]).filter(Boolean))];
+  if (isBase && !floor) rec('S11', 'pass', 'base build: the removal floor is a property of a recipe, and a base build declares none');
+  else if (!/^[1-9]\d*$/.test(floor)) rec('S11', 'fail', `recipe "${args.recipe}" carries no usable removal floor (auros.prune.floor label = "${floor}"). The floor is the alarm for upstream quietly putting back what we took out; an image without one cannot be checked against it.`);
+  else if (!from.length) rec('S11', 'fail', `the image this recipe was built FROM was not measured, so the number of packages the build removed is unknown. run-static.sh reads it from the org.opencontainers.image.base.name label, or --from-image; it must be in local storage (in CI it is, because the build just pulled it). An unmeasured count is a FAIL.`);
+  else {
+    const gone = from.filter((n) => !rpms.has(n));
+    const msg = `measured ${gone.length} package(s) removed (built-from image ${from.length} rpms − this image ${rpms.size} rpms, by name) against a floor of ${floor}`;
+    if (gone.length < Number(floor)) rec('S11', 'fail', `${msg}. Fewer than the floor: either upstream put something back, or the floor was never a measured number — a human decides which, not a retry. First removed: ${gone.slice(0, 15).join(' ') || '(none)'}`);
+    else rec('S11', 'pass', msg);
+  }
 }

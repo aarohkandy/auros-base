@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-static.sh — S1..S10 against the OCI image. No VM. Seconds, not minutes.
+# run-static.sh — S1..S11 against the OCI image. No VM. Seconds, not minutes.
 #
 # CONTRACT WITH THE CALLER: exit 0 only if every static check passed. A non-zero exit means DO NOT
 # PROCEED TO BOOT CHECKS — there is no point spending twenty minutes booting an image that failed lint,
@@ -11,7 +11,7 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 IMAGE=''; DIGEST=''; REGISTRY_REF=''; SECOND_DIGEST=''; CONTAINERFILE=''; BUDGET=''; POLICY='auto'
-RECIPE=''; COSIGN_KEY=''; SCOPE=''; LEDGER="$META_REPO/attest/passed-digests.tsv"
+RECIPE=''; FROM_IMAGE=''; COSIGN_KEY=''; SCOPE=''; LEDGER="$META_REPO/attest/passed-digests.tsv"
 declare -a INSTALL_RPMS=() FLATPAK_REFS=() REMOVE_PKGS=()
 DEFER=' '
 
@@ -29,6 +29,7 @@ usage: run-static.sh --image REF [options]
   --install-rpm PKG       repeatable
   --flatpak-ref REF       repeatable
   --remove-pkg PKG        repeatable (the recipe's declared remove: list)
+  --from-image REF        the image this one was built FROM, for S11 (default: its org.opencontainers.image.base.name label)
   --cosign-key PATH       public key for S8; default: the key the IMAGE itself ships
   --ledger PATH           attest ledger, read for S6's previous-digest comparison
   --defer S7|S8           repeatable. Do not evaluate this check here, because another CI job owns it
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
     --install-rpm) INSTALL_RPMS+=("$2"); shift 2;;
     --flatpak-ref) FLATPAK_REFS+=("$2"); shift 2;;
     --remove-pkg) REMOVE_PKGS+=("$2"); shift 2;;
+    --from-image) FROM_IMAGE=$2; shift 2;;
     --cosign-key) COSIGN_KEY=$2; shift 2;;
     --ledger) LEDGER=$2; shift 2;;
     --defer) case "$2" in S7|S8) DEFER="$DEFER$2 ";; *) die "--defer accepts only S7 or S8 (the checks another job can own), not '$2'";; esac; shift 2;;
@@ -136,6 +138,20 @@ else
   warn "pinned upstream $UP_REF is not in local storage — S5 cannot verify the removal closure independently and will fail closed"
 fi
 
+# S11 counts what the build removed as the image it was built FROM minus this image, never from the
+# plan. Both the floor and the FROM ref are read off the image under test, so a workflow cannot drift
+# from the recipe it is testing. A label podman cannot find prints "<no value>"; that is empty here.
+label() { podman image inspect --format "{{ index .Labels \"$1\" }}" "$IMAGE" 2>/dev/null | sed 's/^<no value>$//'; }
+FLOOR=$(label auros.prune.floor || true)
+[ -n "$FROM_IMAGE" ] || FROM_IMAGE=$(label org.opencontainers.image.base.name || true)
+: > "$W/from-rpms.txt"
+if [ -n "$FROM_IMAGE" ] && podman image exists "$FROM_IMAGE" 2>/dev/null; then
+  log "measuring the built-from image $FROM_IMAGE for S11"
+  podman run --rm --network=none --entrypoint= "$FROM_IMAGE" rpm -qa --qf '%{NAME}\n' 2>/dev/null | sort -u > "$W/from-rpms.txt" || : > "$W/from-rpms.txt"
+elif [ -n "$RECIPE" ]; then
+  warn "built-from image '${FROM_IMAGE:-<no label>}' is not in local storage — S11 cannot count what the build removed and will fail closed"
+fi
+
 printf '%s\n' "${INSTALL_RPMS[@]+"${INSTALL_RPMS[@]}"}" > "$W/install-rpms.txt"
 printf '%s\n' "${REMOVE_PKGS[@]+"${REMOVE_PKGS[@]}"}" > "$W/declared-remove.txt"
 
@@ -168,7 +184,8 @@ node "$HARNESS_DIR/lib/analyze.mjs" \
   --probe "$W/probe.txt" --out "$CHECKS_FILE" \
   --recipe "$RECIPE" --policy "$POLICY" --scope "$SCOPE" \
   --declared-remove "$W/declared-remove.txt" --install-rpms "$W/install-rpms.txt" \
-  --upstream-rpms "$W/upstream-rpms.tsv" --flatpak-result "$FP_RESULT"
+  --upstream-rpms "$W/upstream-rpms.tsv" --flatpak-result "$FP_RESULT" \
+  --from-rpms "$W/from-rpms.txt" ${FLOOR:+--floor "$FLOOR"}
 
 # ── S6 — Size budget ─────────────────────────────────────────────────────────────────────────────
 # Measured as COMPRESSED PULL SIZE, because that is the number that lands on a school's uplink
