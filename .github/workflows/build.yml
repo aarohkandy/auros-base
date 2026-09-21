@@ -579,6 +579,11 @@ jobs:
   boot:
     name: boot · ${{ matrix.profile }}
     needs: [plan, build]
+    # An empty profile list expanded into a matrix makes GitHub REJECT the whole workflow at startup:
+    # zero jobs, nothing in --log-failed. The job-level if: is evaluated before the matrix is, so an
+    # empty list skips boot instead — and a skipped boot skips sign, update, record and publish, which
+    # all need it. No placeholder profile: booting a profile that does not exist would be a lie.
+    if: needs.plan.outputs.profiles != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
