@@ -188,7 +188,12 @@ stop_swtpm() { local f="$AUROS_RUN_DIR/work/$1-swtpm.pid"; [ -f "$f" ] && kill "
 vm_alive() { [ -n "$VM_PID" ] && kill -0 "$VM_PID" 2>/dev/null; }
 
 # ── serial-log predicates, for poll_until ────────────────────────────────────────────────────────
-LOGIN_RE='login:|Reached target Graphical|Startup finished|sddm|Welcome to'
+# B1's criterion is "display manager active / greeter detected". `sddm` was in this alternation as
+# the display-manager name and on this base it matches NOTHING: the display manager is
+# /usr/bin/plasmalogin, resolved from display-manager.service rather than assumed (run 35550693484).
+# The other alternatives carried B1 on the probe boot, so the dead one was never noticed — which is
+# how an alternation quietly narrows until one day it is the only one left.
+LOGIN_RE='login:|Reached target Graphical|Startup finished|sddm|plasmalogin|Welcome to'
 agent_done()   { grep_file "$1" '#AUROS-DONE#'; }
 agent_booted() { grep_file "$1" "#AUROS-BOOT# $2\$"; }
 

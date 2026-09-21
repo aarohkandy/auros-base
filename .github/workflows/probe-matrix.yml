@@ -1,0 +1,515 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# probe-matrix — DEBUG THE CHECK MATRIX ITSELF, against a real image, before the hardened one arrives.
+#
+# WHY THIS EXISTS
+# `matrix/run.sh` has never executed. It is on the critical path: the moment the hardened base
+# finishes building, build.yml hands the image to it and every static, boot and update check fires for
+# the first time. Every bug in the harness costs a 25-minute build cycle to discover, and we have
+# already lost four cycles that way today.
+#
+# So this workflow runs the harness against a TRIVIAL DERIVATIVE of the pinned upstream base — the same
+# image probe-boot.yml builds, one marker file on top of `FROM <pinned digest>` — and invokes the three
+# phases with EXACTLY the command lines build.yml uses. Nothing here is a simplification of build.yml's
+# invocation; where it differs, that difference is called out in a comment, because a probe that tests
+# an easier command line than production tests nothing.
+#
+# WHAT A GREEN RUN OF THIS WORKFLOW MEANS, AND WHAT IT DOES NOT
+#   It means: the harness RAN, wrote a fragment, and every check reached a verdict.
+#   It does NOT mean the image is good. This derivative has no policy layer, no greenboot, no signing
+#   material and no desktop configuration, so a large number of checks SHOULD record `fail`. A `fail`
+#   here is the harness working. What this workflow hunts is the other thing: a check that ERRORS the
+#   harness — a missing path, a missing tool, a `set -u` on an unset variable, a jq path that does not
+#   match `bootc status --json` — instead of recording a verdict. That is the bug. It is why the phase
+#   steps capture the harness's exit status and keep going: a non-zero exit from failing CHECKS is the
+#   expected outcome and must not be confused with the harness falling over.
+#
+# THE JOB FAILS if, and only if, the fragment is missing, unparseable, or empty. That is the one
+# property this probe asserts, and it can go red: delete a `record` call from any run-*.sh and the
+# corresponding phase produces a fragment with a missing id, or no fragment at all.
+#
+# `ostree container commit` is NOT used (D20: obsolete on this base, fails confusingly).
+# D19: `set -o pipefail` everywhere.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+name: probe-matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      static:
+        description: run matrix/run.sh --phase static
+        type: boolean
+        default: true
+      boot:
+        description: run matrix/run.sh --phase boot --profile uefi-modern
+        type: boolean
+        default: true
+      update:
+        description: run matrix/run.sh --phase update (long — four boots)
+        type: boolean
+        default: false
+      profile:
+        description: hardware profile for the boot phase
+        type: string
+        default: uefi-modern
+  # So the harness can be iterated on a branch without pushing to main. build.yml does not trigger
+  # on these refs, and main runs are deliberately not cancellable, so an extra push here would put
+  # the image build everyone is waiting on an hour further away.
+  #
+  # workflow_dispatch only works from the DEFAULT branch, and this file is not on it yet, so the
+  # branch NAME selects the phases while it is being iterated:
+  #   probe/**          static + boot   (minutes, then ~90 minutes)
+  #   probe-update/**   update only     (four boots; hours — do not make it share a run)
+  push:
+    branches: ['probe/**', 'probe-update/**']
+
+permissions:
+  contents: read
+
+# Supersede, do not pile up. Each push while iterating used to leave its ninety-minute boot job
+# running alongside the new one; four accumulated in half an hour and they all tested the same image.
+# build.yml deliberately does NOT do this on main, because a run there may be mid-publish. This is a
+# probe: the newest answer is the only one worth waiting for.
+concurrency:
+  group: probe-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+env:
+  PROBE_IMAGE: localhost/auros-probe-matrix:latest
+  # workflow_dispatch gives booleans; a push gives none. `inputs.x` is the empty string on a push, so
+  # the `||` picks the push default. Written out rather than inferred, because a probe that silently
+  # ran a different set of phases than you asked for is its own kind of lie.
+  DO_STATIC: ${{ github.event_name != 'workflow_dispatch' && 'true' || inputs.static }}
+  DO_BOOT:   ${{ github.event_name != 'workflow_dispatch' && 'true' || inputs.boot }}
+  DO_UPDATE: ${{ github.event_name != 'workflow_dispatch' && startsWith(github.ref_name, 'probe-update/') || inputs.update }}
+  PROFILE:   ${{ github.event_name != 'workflow_dispatch' && 'uefi-modern' || inputs.profile }}
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  static:
+    name: probe · static S1-S10
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.static) || (github.event_name == 'push' && !startsWith(github.ref_name, 'probe-update/')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          echo "--- after reclaim ---"; df -h /
+
+      - name: What this runner actually has
+        run: |
+          # Never guess a tool. Print what IS there, so a "missing tool" failure in a check detail can
+          # be believed rather than re-derived.
+          for t in podman skopeo jq node cosign qemu-system-x86_64 flatpak curl virt-make-fs; do
+            printf '%-22s %s\n' "$t" "$(command -v "$t" || echo 'ABSENT')"
+          done
+          podman --version; node --version
+
+      - name: Build the trivial derivative
+        run: |
+          # FROM the PINNED digest, read from base.lock — the same source S1 checks the real
+          # Containerfile against. Nothing here is typed from memory.
+          set -a; . ./base.lock; set +a
+          : "${UPSTREAM_IMAGE:?base.lock has no UPSTREAM_IMAGE}"
+          : "${UPSTREAM_DIGEST:?base.lock has no UPSTREAM_DIGEST}"
+          echo "pinned base: ${UPSTREAM_IMAGE}@${UPSTREAM_DIGEST}"
+          cat > Containerfile.probe <<EOF
+          FROM ${UPSTREAM_IMAGE}@${UPSTREAM_DIGEST}
+          # D20: no \`ostree container commit\`. It belongs to the older rpm-ostree flow and fails on
+          # this base with "Not in an ostree-based container environment".
+          RUN echo "auros-probe-matrix" > /etc/auros-probe-matrix
+          EOF
+          cat Containerfile.probe
+          # The pinned upstream must ALSO be in root's local storage under its own name, because
+          # run-static.sh's S5 measures the upstream package closure from it and fails closed when it
+          # is absent. In build.yml it is there because it is the build's FROM.
+          time sudo podman build -t "$PROBE_IMAGE" -f Containerfile.probe .
+          sudo podman images --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          df -h /
+
+      - name: What the image's display manager actually is, and where it reads its config
+        run: |
+          # NEVER GUESS A PATH. guest/Containerfile.testwrap writes display-manager autologin to
+          # /etc/sddm.conf.d/ so that B7, B8 and B12 have a live desktop session. On this base the
+          # display manager resolved to /usr/bin/plasmalogin, not sddm (run 35550693484), so that
+          # path may be read by nothing — and three boot checks would fail for a reason that has
+          # nothing to do with the image. This step asks the image.
+          R() { sudo podman run --rm --network=none --entrypoint= "$PROBE_IMAGE" "$@" 2>&1 | head -25; }
+          echo "── display-manager.service resolves to ──"
+          R readlink -f /etc/systemd/system/display-manager.service || true
+          R sh -c 'sed -n "1,25p" "$(readlink -f /etc/systemd/system/display-manager.service)"' || true
+          echo "── which login-manager config paths exist ──"
+          R sh -c 'for d in /etc/sddm.conf.d /usr/lib/sddm/sddm.conf.d /usr/share/sddm/sddm.conf.d /etc/plasmalogin.conf.d /usr/lib/plasmalogin/plasmalogin.conf.d /etc/sddm.conf /etc/plasmalogin.conf; do [ -e "$d" ] && echo "PRESENT $d" || echo "absent  $d"; done' || true
+          echo "── what the binary says about its own config ──"
+          R sh -c '/usr/bin/plasmalogin --help' || true
+          R sh -c 'rpm -qf /usr/bin/plasmalogin; rpm -ql "$(rpm -qf --qf "%{NAME}" /usr/bin/plasmalogin)" | grep -iE "conf|autologin" | head -20' || true
+
+      - name: Static checks S1-S10
+        id: phase
+        run: |
+          mkdir -p fragments
+          # KEPT, not deleted: see the header of matrix/run.sh. Without this the harness removes every
+          # log it wrote before the upload step can see them.
+          export AUROS_RUN_DIR="$PWD/matrix-run"
+          # `sudo -E` ALONE IS NOT ENOUGH, and build.yml does exactly that. sudo replaces PATH with
+          # its secure_path, so anything the workflow installed into the runner tool cache is
+          # invisible to root. Measured: run 35548903285 failed U1-U5 and R1 with "cosign is not
+          # installed" while the job's own inventory printed /home/runner/.cosign/cosign.
+          # `env "PATH=$PATH"` hands root the PATH the runner actually has.
+          set +e
+          sudo -E env "PATH=$PATH" ./matrix/run.sh \
+            --phase static \
+            --image  "$PROBE_IMAGE" \
+            --checks matrix/checks.yaml \
+            --profiles matrix/profiles.yaml \
+            --out fragments/static.json
+          rc=$?
+          set -e
+          echo "harness exit status: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Verdict — did every check reach one?
+        if: always()
+        run: |
+          # THE ONLY ASSERTION THIS JOB MAKES. Failing checks are expected on a bare derivative; a
+          # missing fragment means the harness fell over before it could record anything.
+          bash ./.github/probe-matrix-verdict.sh fragments/static.json static "${{ steps.phase.outputs.rc }}"
+
+      - name: Make the run directory readable by the upload step
+        if: always()
+        run: sudo chmod -R a+rX matrix-run 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-static
+          path: |
+            fragments/
+            matrix-run/checks/
+            matrix-run/logs/
+            matrix-run/work/probe.txt
+            matrix-run/work/digest
+            matrix-run/work/pull-bytes
+            matrix-run/work/*.txt
+            matrix-run/work/*.tsv
+            matrix-run/work/*.json
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  boot:
+    name: probe · boot ${{ github.event_name != 'workflow_dispatch' && 'uefi-modern' || inputs.profile }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.boot) || (github.event_name == 'push' && !startsWith(github.ref_name, 'probe-update/')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reclaim disk, enable KVM, install QEMU
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          # Measured (docs/evidence/2026-09-20-runner-probe.md): /dev/kvm is present and writable
+          # after this chmod. The harness REFUSES to fall back to TCG, which is correct — emulation
+          # would void B1's 120s budget while the check stayed green.
+          sudo chmod 666 /dev/kvm || true
+          ls -l /dev/kvm || echo "::error::no writable /dev/kvm — the boot harness will refuse"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf swtpm swtpm-tools
+          qemu-system-x86_64 --version | head -1
+          echo "--- OVMF files the harness looks for ---"
+          ls -l /usr/share/OVMF/ || true
+          df -h /
+
+
+      - name: What bootc-image-builder's CLI actually accepts
+        run: |
+          # NEVER GUESS A FLAG. vm.sh calls bib with `--type qcow2 --rootfs <fs> --local <image>`,
+          # and a base build has already been lost to a CLI that did not have the option it was
+          # given. The pull is needed by the next step anyway, so asking costs nothing.
+          sudo podman pull -q quay.io/centos-bootc/bootc-image-builder:latest
+          # The top-level --help lists only the subcommands; --type/--rootfs/--local belong to
+          # `build`, which is also the default command — measured, run 35550414146. So ask `build`.
+          B=quay.io/centos-bootc/bootc-image-builder:latest
+          sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" version 2>&1 | head -5 || true
+          echo "──── build --help (the flags vm.sh actually passes) ────"
+          sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" build --help 2>&1 | head -60 \
+            || echo "::warning::could not get 'build --help' out of bootc-image-builder"
+          echo "──── are the three flags vm.sh passes present? ────"
+          H=$(sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" build --help 2>&1 || true)
+          for f in --type --rootfs --local --config; do
+            printf '%-10s %s\n' "$f" "$(printf '%s' "$H" | grep -qE -- "$f" && echo present || echo 'NOT IN --help')"
+          done
+
+      - name: Build the trivial derivative
+        run: |
+          set -a; . ./base.lock; set +a
+          : "${UPSTREAM_IMAGE:?}"; : "${UPSTREAM_DIGEST:?}"
+          cat > Containerfile.probe <<EOF
+          FROM ${UPSTREAM_IMAGE}@${UPSTREAM_DIGEST}
+          RUN echo "auros-probe-matrix" > /etc/auros-probe-matrix
+          EOF
+          time sudo podman build -t "$PROBE_IMAGE" -f Containerfile.probe .
+          df -h /
+
+      - name: Boot checks B1-B12
+        id: phase
+        run: |
+          mkdir -p fragments matrix-run/logs
+          export AUROS_RUN_DIR="$PWD/matrix-run"
+          # Fail fast while debugging the HARNESS. run-boot.sh's default agent deadline is 2400s per
+          # boot, so a stalled agent costs ninety minutes to observe twice. Seven minutes is plenty
+          # for a KVM boot that reaches a greeter in about thirty seconds, and every check that goes
+          # unreported under a shortened deadline says so in its own detail — a probe result can
+          # never be mistaken for a CI one. build.yml must NOT set this.
+          export AUROS_AGENT_DEADLINE="${AUROS_AGENT_DEADLINE:-420}"
+          # A HEARTBEAT, because this phase runs for over an hour and GitHub serves no job log until
+          # the job ends. Without it, debugging is: push, wait ninety minutes, read a post-mortem.
+          # run-boot.sh polls for markers with deadlines of 600s (greeter) and 2400s (the guest
+          # agent's #AUROS-DONE#), so "nothing has happened for forty minutes" and "it is thirty
+          # seconds from succeeding" look identical from outside — and the serial console is the one
+          # place that can tell them apart while it still matters.
+          heartbeat() {
+            local hpid=$1 t=0 f
+            while kill -0 "$hpid" 2>/dev/null; do
+              sleep 60; t=$((t+60))
+              echo "──────── ${t}s elapsed ($(date -u +%H:%M:%S)) ────────"
+              tail -4 harness.log 2>/dev/null | sed 's/^/  harness | /' || true
+              for f in matrix-run/logs/*serial.log matrix-run/logs/*agent.log; do
+                [ -e "$f" ] || continue
+                printf '  %-32s %10s bytes | %s\n' "${f##*/}" \
+                  "$(sudo wc -c < "$f" 2>/dev/null || echo '?')" \
+                  "$(sudo tail -2 "$f" 2>/dev/null | tr '\n\r' '  ' | tr -cd '[:print:] ' | tail -c 160)"
+              done
+            done
+          }
+          # `sudo -E` alone is not enough and build.yml does exactly that: sudo replaces PATH with its
+          # secure_path, so a tool the workflow installed into the runner tool cache is invisible to
+          # root (run 35548903285). `env "PATH=$PATH"` hands root the runner's real PATH.
+          set +e
+          sudo -E env "PATH=$PATH" ./matrix/run.sh \
+            --phase boot \
+            --profile "$PROFILE" \
+            --image  "$PROBE_IMAGE" \
+            --checks matrix/checks.yaml \
+            --profiles matrix/profiles.yaml \
+            --out "fragments/boot-${PROFILE}.json" > harness.log 2>&1 &
+          HPID=$!
+          heartbeat "$HPID"
+          wait "$HPID"; rc=$?
+          set -e
+          echo "════════ the harness's own output ════════"
+          cat harness.log
+          echo "harness exit status: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Verdict — did every check reach one?
+        if: always()
+        run: |
+          bash ./.github/probe-matrix-verdict.sh "fragments/boot-${PROFILE}.json" "$PROFILE" "${{ steps.phase.outputs.rc }}"
+
+      - name: Tail of every log, inline, so a failure is readable without downloading anything
+        if: always()
+        run: |
+          sudo chmod -R a+rX matrix-run 2>/dev/null || true
+          for f in matrix-run/logs/*; do
+            [ -f "$f" ] || continue
+            echo "═══════ $f ($(wc -c < "$f") bytes) ═══════"
+            tail -60 "$f" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-boot-${{ github.event_name != 'workflow_dispatch' && 'uefi-modern' || inputs.profile }}
+          path: |
+            fragments/
+            matrix-run/checks/
+            matrix-run/logs/
+            matrix-run/compat-rows.tsv
+            matrix-run/work/*.env
+            matrix-run/work/*.toml
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  update:
+    name: probe · update U1-U5 R1
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.update) || (github.event_name == 'push' && startsWith(github.ref_name, 'probe-update/')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read signing/cosign.lock — the only place a cosign version is written
+        id: cosign
+        run: |
+          set -a; . signing/cosign.lock; set +a
+          : "${COSIGN_VERSION:?signing/cosign.lock has no COSIGN_VERSION}"
+          echo "version=${COSIGN_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: ${{ steps.cosign.outputs.version }}
+
+      - name: Reclaim disk, enable KVM, install QEMU
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+          sudo chmod 666 /dev/kvm || true
+          [ -w /dev/kvm ] || echo "::warning::/dev/kvm is not writable; the update group will fail closed"
+          sudo apt-get update -qq
+          # libguestfs-tools provides virt-make-fs, which run-update.sh needs to build R1's
+          # migration disk. build.yml does not install it, so R1 fails closed there before it has
+          # looked at anything. Installed here so the rest of R1's path actually executes.
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf libguestfs-tools
+          df -h /
+
+      - name: What this runner actually has
+        run: |
+          for t in podman skopeo jq node cosign qemu-system-x86_64 curl virt-make-fs; do
+            printf '%-22s %s\n' "$t" "$(command -v "$t" || echo 'ABSENT')"
+          done
+          skopeo --version || true
+          cosign version 2>&1 | head -3 || true
+          # run-update.sh reads back what it pushed with exactly this invocation; a flag that does
+          # not exist in the installed skopeo is how U1-U5 all failed with one useless sentence.
+          skopeo inspect --help 2>&1 | grep -E 'no-tags|tls-verify' || echo "::warning::skopeo inspect has neither --no-tags nor --tls-verify in its help"
+
+      - name: Build the trivial derivative
+        run: |
+          set -a; . ./base.lock; set +a
+          : "${UPSTREAM_IMAGE:?}"; : "${UPSTREAM_DIGEST:?}"
+          cat > Containerfile.probe <<EOF
+          FROM ${UPSTREAM_IMAGE}@${UPSTREAM_DIGEST}
+          RUN echo "auros-probe-matrix" > /etc/auros-probe-matrix
+          EOF
+          time sudo podman build -t "$PROBE_IMAGE" -f Containerfile.probe .
+
+      - name: Update and rollback checks
+        id: phase
+        env:
+          # The DEVELOPMENT key (D32). It cannot publish anything; it exists so the signing machinery
+          # can be exercised end to end. This probe image ships no /usr/lib/pki/containers/ key at
+          # all, so the harness will WARN and continue — which is itself one of the paths worth
+          # watching run.
+          AUROS_DEV_SIGNING_KEY: ${{ secrets.AUROS_DEV_SIGNING_KEY }}
+        run: |
+          if [ -z "${AUROS_DEV_SIGNING_KEY:-}" ]; then
+            echo "::error::AUROS_DEV_SIGNING_KEY is not set; run-update.sh fails all of U1-U5 closed without a signer."
+          fi
+          # Shorten the WAITING so a harness bug costs twenty minutes instead of two hours. Every
+          # check that fails on a shortened deadline says so in its own detail. build.yml must not
+          # set this — U1's criterion really is twenty minutes.
+          export AUROS_DEADLINE_DIVISOR="${AUROS_DEADLINE_DIVISOR:-6}"
+          printf '%s' "${AUROS_DEV_SIGNING_KEY:-}" > /tmp/probe-signing.key
+          chmod 600 /tmp/probe-signing.key
+
+          # THE KEY IS IN THE WRONG FORMAT FOR COSIGN, and this is what U1-U5 and R1 died on:
+          #
+          #   reading key: unsupported pem type: EC PRIVATE KEY
+          #
+          # signing/keys/DEVELOPMENT-KEY.md says the pair was generated with
+          # `openssl ecparam -name prime256v1`, which emits a SEC1 "EC PRIVATE KEY" PEM. cosign's
+          # --key reads its OWN format ("ENCRYPTED SIGSTORE PRIVATE KEY"), and converting is what
+          # `cosign import-key-pair` is for. The import derives the same public key, so the image's
+          # /usr/lib/pki/containers/ half still matches.
+          #
+          # COSIGN_PASSWORD must also be set, or cosign prompts on a runner with no tty and fails
+          # with "inappropriate ioctl for device" before it ever looks at the PEM.
+          export COSIGN_PASSWORD="${COSIGN_PASSWORD:-}"
+          if grep -q 'SIGSTORE PRIVATE KEY' /tmp/probe-signing.key; then
+            echo "the secret is already in cosign's own format; using it as is"
+          else
+            echo "the secret is a raw PEM ($(head -1 /tmp/probe-signing.key)); converting with cosign import-key-pair"
+            cosign import-key-pair --help >/dev/null 2>&1               || { echo "::error::this cosign has no 'import-key-pair' subcommand, so the raw PEM cannot be converted. Regenerate the development key with 'cosign generate-key-pair' instead."; }
+            if cosign import-key-pair --key /tmp/probe-signing.key --output-key-prefix /tmp/auros-dev; then
+              mv -f /tmp/auros-dev.key /tmp/probe-signing.key
+              chmod 600 /tmp/probe-signing.key
+              echo "converted; the key now starts: $(head -1 /tmp/probe-signing.key)"
+              echo "public half derived by the import:"; cat /tmp/auros-dev.pub || true
+              echo "public half the repo ships:"; cat signing/keys/auros-development.pub || true
+            else
+              echo "::warning::cosign import-key-pair failed; U1-U5 and R1 will fail on the signer, honestly"
+            fi
+          fi
+          mkdir -p fragments matrix-run/logs
+          export AUROS_RUN_DIR="$PWD/matrix-run"
+          # Fail fast while debugging the HARNESS. run-boot.sh's default agent deadline is 2400s per
+          # boot, so a stalled agent costs ninety minutes to observe twice. Seven minutes is plenty
+          # for a KVM boot that reaches a greeter in about thirty seconds, and every check that goes
+          # unreported under a shortened deadline says so in its own detail — a probe result can
+          # never be mistaken for a CI one. build.yml must NOT set this.
+          export AUROS_AGENT_DEADLINE="${AUROS_AGENT_DEADLINE:-420}"
+          # A HEARTBEAT, because this phase runs for over an hour and GitHub serves no job log until
+          # the job ends. Without it, debugging is: push, wait ninety minutes, read a post-mortem.
+          # run-boot.sh polls for markers with deadlines of 600s (greeter) and 2400s (the guest
+          # agent's #AUROS-DONE#), so "nothing has happened for forty minutes" and "it is thirty
+          # seconds from succeeding" look identical from outside — and the serial console is the one
+          # place that can tell them apart while it still matters.
+          heartbeat() {
+            local hpid=$1 t=0 f
+            while kill -0 "$hpid" 2>/dev/null; do
+              sleep 60; t=$((t+60))
+              echo "──────── ${t}s elapsed ($(date -u +%H:%M:%S)) ────────"
+              tail -4 harness.log 2>/dev/null | sed 's/^/  harness | /' || true
+              for f in matrix-run/logs/*serial.log matrix-run/logs/*agent.log; do
+                [ -e "$f" ] || continue
+                printf '  %-32s %10s bytes | %s\n' "${f##*/}" \
+                  "$(sudo wc -c < "$f" 2>/dev/null || echo '?')" \
+                  "$(sudo tail -2 "$f" 2>/dev/null | tr '\n\r' '  ' | tr -cd '[:print:] ' | tail -c 160)"
+              done
+            done
+          }
+          set +e
+          sudo -E env "PATH=$PATH" ./matrix/run.sh \
+            --phase update \
+            --profile uefi-modern \
+            --image  "$PROBE_IMAGE" \
+            --checks matrix/checks.yaml \
+            --profiles matrix/profiles.yaml \
+            --out fragments/update.json \
+            -- --signing-key /tmp/probe-signing.key > harness.log 2>&1 &
+          HPID=$!
+          heartbeat "$HPID"
+          wait "$HPID"; rc=$?
+          set -e
+          echo "════════ the harness's own output ════════"
+          cat harness.log
+          shred -u /tmp/probe-signing.key 2>/dev/null || rm -f /tmp/probe-signing.key
+          echo "harness exit status: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Verdict — did every check reach one?
+        if: always()
+        run: |
+          bash ./.github/probe-matrix-verdict.sh fragments/update.json update "${{ steps.phase.outputs.rc }}"
+
+      - name: Tail of every log
+        if: always()
+        run: |
+          sudo chmod -R a+rX matrix-run 2>/dev/null || true
+          for f in matrix-run/logs/*; do
+            [ -f "$f" ] || continue
+            echo "═══════ $f ($(wc -c < "$f") bytes) ═══════"
+            tail -60 "$f" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-update
+          path: |
+            fragments/
+            matrix-run/checks/
+            matrix-run/logs/
+            matrix-run/work/*.env
+            matrix-run/work/*.toml
+          if-no-files-found: warn

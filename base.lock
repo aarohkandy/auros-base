@@ -8,4 +8,15 @@ UPSTREAM_DIGEST=sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a43dc2
 UPSTREAM_RESOLVED_AT=2026-09-20T21:25:07Z
 UPSTREAM_CREATED=2026-09-15T20:33:50Z
 UPSTREAM_ARCH=linux/amd64
-UPSTREAM_PULL_SIZE_BYTES=3758096384
+# MEASURED 2026-09-21 against the pinned digest, the same quantity tools/resolve-upstream.sh emits
+# (`skopeo inspect --raw docker://<image>@<digest> | jq '[.layers[].size] | add'`), read straight off
+# ghcr.io with an anonymous pull token. It replaces 3758096384, which is exactly 3.5 GiB and so
+# cannot have been a measurement of anything — and this file's own header says it is resolved by CI
+# and never edited by hand. The absent UPSTREAM_LAYERS said the same thing: the resolver emits it and
+# the committed file did not have it.
+#
+# The difference is only 1.4%, which is the point: it was small enough to never be questioned, and
+# S6 compares an image against a budget derived from this number.
+UPSTREAM_PULL_SIZE_BYTES=3706306117
+UPSTREAM_LAYERS=256
+UPSTREAM_LAYER_MEDIA_TYPE=application/vnd.oci.image.layer.v1.tar+zstd

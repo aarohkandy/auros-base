@@ -70,6 +70,18 @@ fail_all() {
   exit 1
 }
 
+# THE PROFILE IS VALIDATED BEFORE ANYTHING IS BUILT.
+# `eval "$(profile.mjs "$PROFILE")"` used to sit AFTER build_qcow2. On an unknown profile id
+# profile.mjs exits 2 and prints nothing, so the eval was of an empty string, and the failure landed
+# ten minutes later as `P_DISK_GB: unbound variable` — a typo diagnosed as a shell error, after a
+# full image build. profile.mjs's own message lists the ids that do exist; it belongs here, before
+# the expensive part, where it can be read.
+PROFILE_ENV="$(node "$HARNESS_DIR/lib/profile.mjs" "$PROFILE" 2>"$AUROS_RUN_DIR/logs/profile.err")" || {
+  fail_all "profile '${PROFILE}' could not be resolved from matrix/profiles.yaml: $(tr '\n' ' ' < "$AUROS_RUN_DIR/logs/profile.err")"
+}
+eval "$PROFILE_ENV"
+[ -n "${P_DISK_GB:-}" ] && [ -n "${P_RAM_MB:-}" ] || fail_all "profile '${PROFILE}' resolved but produced no P_DISK_GB/P_RAM_MB — lib/profile.mjs and this script disagree about the variable names, and every later use would be an unbound-variable error somewhere unhelpful. It printed: $(printf '%s' "$PROFILE_ENV" | tr '\n' ' ')"
+
 ACCEL=$(accel_mode)
 if [ "$ACCEL" = tcg ] && [ "$AUROS_ALLOW_TCG" != 1 ]; then
   fail_all "no writable /dev/kvm on this host and AUROS_ALLOW_TCG is not set. The runner probe measured KVM as present and usable after 'chmod 666 /dev/kvm'; a CI job silently falling back to emulation would quietly stop enforcing B1's 120-second budget, so the harness refuses instead."
@@ -97,7 +109,8 @@ fi
 chmod 666 "$QCOW" 2>/dev/null || true
 
 # The profile's disk floor. small-disk exists to prove two deployments plus Flatpaks fit at 64 GB.
-eval "$(node "$HARNESS_DIR/lib/profile.mjs" "$PROFILE")"
+# (Already evaluated above, before the build; re-evaluated here so this block still reads on its own.)
+eval "$PROFILE_ENV"
 VIRT_BYTES=$(qemu-img info --output=json "$QCOW" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)["virtual-size"]||0))}catch{process.stdout.write("0")}})')
 WANT_BYTES=$(( P_DISK_GB * 1024 * 1024 * 1024 ))
 if [ "${VIRT_BYTES:-0}" -gt "$WANT_BYTES" ]; then
@@ -142,7 +155,13 @@ boot_once() {
 
   # Wait for the agent to finish this boot's work — or for QEMU to die, which we notice immediately
   # rather than at the end of a timeout.
-  local agent_deadline; agent_deadline=$(scale 2400)
+  #
+  # AUROS_AGENT_DEADLINE exists so a PROBE can fail fast. It changes how long we WAIT, never what we
+  # CONCLUDE — the same distinction vm.sh's scale() already makes for TCG. A shortened deadline makes
+  # a slow-but-correct agent look like a stalled one, so every check that goes unreported under a
+  # non-default deadline SAYS SO in its detail (see agent_evidence below). A run that waited seven
+  # minutes must never be mistakable for one that waited forty.
+  local agent_deadline; agent_deadline=$(scale "${AUROS_AGENT_DEADLINE:-2400}")
   poll_until "$agent_deadline" "agent done (boot ${n})" -- bash -c '
      grep -qa "#AUROS-DONE#" "$1" && exit 0
      kill -0 "$2" 2>/dev/null || exit 0
@@ -193,10 +212,45 @@ else
 fi
 
 # ── anything the agent never reported is a FAIL, never a silence ─────────────────────────────────
+#
+# And the failure has to say what IS there. "the agent produced no record" is true of four completely
+# different situations — QEMU never opened the second serial port, the unit never started, the agent
+# started and stalled, or it ran and its output never reached the host — and they have four different
+# fixes. So the detail carries the agent log's size, which framing markers it did emit, and its last
+# lines. Reading ten of these strings must not require downloading ten artifacts.
+agent_evidence() {
+  local f
+  for f in "$L/${PROFILE}-boot2-agent.log" "$L/${PROFILE}-boot1-agent.log"; do
+    [ -s "$f" ] && break
+  done
+  if [ ! -e "$f" ]; then
+    printf 'no agent log exists at %s — QEMU never opened the second serial port, so nothing the guest wrote could have reached the host' "$f"
+    return
+  fi
+  local bytes boot status ready done_ tail_
+  bytes=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+  boot=$(grep -ac '#AUROS-BOOT#' "$f" 2>/dev/null || true)
+  status=$(grep -ac '#AUROS-STATUS#' "$f" 2>/dev/null || true)
+  ready=$(grep -ac '#AUROS-READY-SUSPEND#' "$f" 2>/dev/null || true)
+  done_=$(grep -ac '#AUROS-DONE#' "$f" 2>/dev/null || true)
+  tail_=$(tail -c 400 "$f" 2>/dev/null | tr '\n\r\t' '   ' | tr -cd '[:print:] ')
+  printf '%s is %s bytes; markers seen: #AUROS-BOOT#=%s #AUROS-STATUS#=%s #AUROS-READY-SUSPEND#=%s #AUROS-DONE#=%s. ' \
+    "${f##*/}" "${bytes:-0}" "${boot:-0}" "${status:-0}" "${ready:-0}" "${done_:-0}"
+  if [ "${boot:-0}" = 0 ]; then
+    printf 'The agent never announced a boot at all, so auros-matrix-agent.service did not run — check logs/testwrap-build.log for whether `systemctl enable` took, and the serial console for the unit failing. '
+  elif [ "${done_:-0}" = 0 ]; then
+    printf 'The agent STARTED and never finished: it emitted its boot line but no #AUROS-DONE#, so it stalled inside a check rather than failing to launch. The first thing it does after the status line is `systemctl is-system-running --wait`. '
+  fi
+  printf 'Last of the log: %s' "${tail_:-<empty>}"
+  if [ -n "${AUROS_AGENT_DEADLINE:-}" ] && [ "${AUROS_AGENT_DEADLINE}" != 2400 ]; then
+    printf ' — AND NOTE: this run waited only %ss for the agent (AUROS_AGENT_DEADLINE), not the default 2400s. A slow agent and a stalled one are indistinguishable under a shortened deadline, so this result is a PROBE result and is not evidence that the check would fail in CI.' "$AUROS_AGENT_DEADLINE"
+  fi
+}
+AGENT_EVIDENCE="$(agent_evidence)"
 for id in B2 B4 B5 B6 B7 B8 B9 B10 B11 B12; do
   if ! grep -qa "\"id\":\"$id\"" "$CHECKS_FILE"; then
     check_begin
-    record "$id" fail "the in-guest agent produced no record for ${id} on profile ${PROFILE}. A check that did not report did not pass."
+    record "$id" fail "the in-guest agent produced no record for ${id} on profile ${PROFILE}. A check that did not report did not pass. ${AGENT_EVIDENCE}"
   fi
 done
 

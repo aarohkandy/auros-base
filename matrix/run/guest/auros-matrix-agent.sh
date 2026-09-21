@@ -137,12 +137,24 @@ if [ "$FULL" != 1 ]; then
 fi
 
 # ── B2 — Not degraded. `--wait` blocks until startup finishes; that is a poll, not a sleep. ───────
+#
+# BOUNDED, and the bound is not paranoia. This exact line hung forever on every boot of the first
+# real run (35548005729): the agent unit was Type=oneshot and WantedBy=multi-user.target, so its own
+# start job was in the transaction that `--wait` waits for. The unit is Type=simple now and the
+# cycle is gone, but a future ordering change could recreate it, and the cost of that is forty
+# minutes of a CI job producing the word "timeout" and nothing else. `timeout` returns 124 and SYS
+# comes back empty, so B2 records a fail that says what happened. A bounded wrong answer beats an
+# unbounded silence.
 tick
-SYS=$(systemctl is-system-running --wait 2>/dev/null || true)
+SYS=$(timeout 900 systemctl is-system-running --wait 2>/dev/null || true)
+if [ -z "$SYS" ]; then
+  say "#AUROS-NOTE# is-system-running --wait produced nothing within 900s; continuing so the rest of the checks still report"
+fi
 if [ "$SYS" = running ]; then emit B2 pass "systemctl is-system-running = running"
 else
   FAILED=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
-  emit B2 fail "systemctl is-system-running = ${SYS:-<no answer>}; failed units: ${FAILED:-none}"
+  JOBS=$(systemctl list-jobs --no-legend 2>/dev/null | head -5 | tr '\n' ';')
+  emit B2 fail "systemctl is-system-running = ${SYS:-<no answer within 900s>}; failed units: ${FAILED:-none}; jobs still queued: ${JOBS:-none}"
 fi
 
 # ── B4 — Locale and keyboard, exactly as declared ────────────────────────────────────────────────

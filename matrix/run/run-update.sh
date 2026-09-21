@@ -55,6 +55,7 @@ export AUROS_RUN_DIR TEST_USER TEST_PASSWORD AUTOLOGIN
 mkdir -p "$AUROS_RUN_DIR/checks" "$AUROS_RUN_DIR/logs" "$AUROS_RUN_DIR/work"
 CHECKS_FILE="$AUROS_RUN_DIR/checks/update.jsonl"; : > "$CHECKS_FILE"
 L="$AUROS_RUN_DIR/logs"; W="$AUROS_RUN_DIR/work"
+sign_err() { [ -s "$L/cosign.log" ] && printf 'Last of cosign.log: %s' "$(tail -4 "$L/cosign.log" | tr '\n' ' ')" || printf 'cosign.log is empty, so cosign produced no output at all — check that the key file is non-empty and that COSIGN_PASSWORD matches it'; }
 need podman; need qemu-system-x86_64; need node
 
 fail_all() {
@@ -65,9 +66,24 @@ fail_all() {
   exit 1
 }
 
+# ── deadlines, and the one knob that may shorten them ────────────────────────────────────────────
+# The update group's deadlines add up to about two hours: U1 1200s, U3 1200+2400, U4 600, U5
+# 600+1200. That is correct for CI — U1's criterion IS twenty minutes — and it makes debugging the
+# HARNESS cost a morning per bug. AUROS_DEADLINE_DIVISOR shortens the WAITING, never the CONCLUSION:
+# any check that fails on a shortened deadline carries a sentence saying so, so a probe run can never
+# be read as a CI run. build.yml must not set it. Same distinction vm.sh's scale() draws for TCG.
+DIV=${AUROS_DEADLINE_DIVISOR:-1}
+case "$DIV" in ''|*[!0-9]*|0) DIV=1 ;; esac
+short() { local s=$1; echo $(( (s + DIV - 1) / DIV )); }
+DEADLINE_NOTE=''
+if [ "$DIV" != 1 ]; then
+  DEADLINE_NOTE=" — AND NOTE: every deadline in this run was divided by ${DIV} (AUROS_DEADLINE_DIVISOR). A slow path and a broken one are indistinguishable under a shortened deadline, so this is a PROBE result about whether the HARNESS runs, and is not evidence about what this check would do in CI."
+  warn "AUROS_DEADLINE_DIVISOR=${DIV}: deadlines shortened. Every deadline failure will say so."
+fi
+
 ACCEL=$(accel_mode)
 [ "$ACCEL" = kvm ] || [ "$AUROS_ALLOW_TCG" = 1 ] || fail_all "no writable /dev/kvm and AUROS_ALLOW_TCG is unset; the update group involves four boots and would take hours under emulation"
-have cosign || fail_all "cosign is not installed. U4 is the only check that proves signing works, and it cannot be run without a signer. cosign is NOT preinstalled on ubuntu-latest; the workflow must add it, pinned (D17)."
+have cosign || fail_all "$(tool_missing_detail cosign) U4 is the only check that proves signing works, and it cannot be run without a signer. cosign is not preinstalled on ubuntu-latest, so the workflow adds it with sigstore/cosign-installer, pinned (D17) — check that it did AND that root can see it."
 [ -n "$SIGNING_KEY" ] || fail_all "no --signing-key. Without one the harness can only offer unsigned images, which would let U4 pass while U1 fails — the exact opposite of proving anything."
 
 # ── the namespace the guest trusts ───────────────────────────────────────────────────────────────
@@ -87,7 +103,12 @@ if [ -z "$PUBKEY" ]; then
   fi
 fi
 if [ -n "$PUBKEY" ]; then
-  cosign public-key --key "$SIGNING_KEY" > "$W/signing.pub" 2>/dev/null || true
+  cosign public-key --key "$SIGNING_KEY" > "$W/signing.pub" 2>>"$L/cosign.log" || true
+  if [ ! -s "$W/signing.pub" ]; then
+    # Silently skipping the comparison here is how a wrong or unreadable key reaches sign_digest and
+    # fails four images later with no reason attached.
+    warn "could not derive a public key from --signing-key: the image/key match could NOT be checked. $(sign_err)"
+  fi
   if [ -s "$W/signing.pub" ] && ! diff -q <(tr -d ' \n' < "$W/signing.pub") <(tr -d ' \n' < "$PUBKEY") >/dev/null 2>&1; then
     fail_all "the signing key does not match the public key the image ships at /usr/lib/pki/containers/. Every image the harness offers would be refused, U1 would fail and U4 would 'pass' for a reason that has nothing to do with the check."
   fi
@@ -108,12 +129,44 @@ trap 'stop_vm; stop_swtpm "$PROFILE"; stop_registry' EXIT
 start_registry || fail_all "could not start a local registry container (docker.io/library/registry:2)"
 
 DEST_OPTS=(--dest-tls-verify=false)
+
+# WHY THIS FUNCTION IS THIS LONG NOW. It used to be two lines, the second of which sent skopeo's
+# stderr to /dev/null. Run 35549334886 spent sixteen minutes building a qcow2 and then failed all six
+# of U1-U5 and R1 with one sentence — "could not push image A to the harness registry" — while
+# logs/registry.log ended with "Writing manifest to image destination", i.e. the push had SUCCEEDED.
+# The step that actually failed had had its error message discarded on the line above.
+#
+# Three things can go wrong here and they need three different answers: the copy fails, the copy
+# works and the read-back fails, or both work and skopeo's output has no Digest field in it. The
+# reason is written to $W/push-err because the caller invokes this in a command substitution, so a
+# shell variable set in here would die with the subshell.
 push_as() {  # push_as <local image> <tag> ; echoes the pushed digest
+  # SPLIT, and the repo's own tests/shell-idioms.test.sh is why. bash expands every word of a `local`
+  # line before assigning any of them, so `dest` on a single line would read the OUTER, unset `tag`
+  # and die under set -u. mk_variant below carries the same note; I wrote the bug it warns about
+  # anyway, and the idiom scan caught it before it cost a run.
   local img=$1 tag=$2
-  skopeo copy "${DEST_OPTS[@]}" "containers-storage:$img" "docker://127.0.0.1:${REG_PORT}/${REPO_PATH}:${tag}" >>"$L/registry.log" 2>&1 || return 1
-  skopeo inspect --tls-verify=false --no-tags "docker://127.0.0.1:${REG_PORT}/${REPO_PATH}:${tag}" 2>/dev/null \
-    | sed -n 's/.*"Digest": *"\(sha256:[a-f0-9]\{64\}\)".*/\1/p' | head -1
+  local dest="docker://127.0.0.1:${REG_PORT}/${REPO_PATH}:${tag}" out d
+  : > "$W/push-err"
+  if ! skopeo copy "${DEST_OPTS[@]}" "containers-storage:$img" "$dest" >>"$L/registry.log" 2>&1; then
+    printf 'skopeo copy containers-storage:%s -> %s FAILED. Last of registry.log: %s' \
+      "$img" "$dest" "$(tail -4 "$L/registry.log" | tr '\n' ' ')" > "$W/push-err"
+    return 1
+  fi
+  if ! out=$(skopeo inspect --tls-verify=false --no-tags "$dest" 2>>"$L/registry.log"); then
+    printf 'the COPY SUCCEEDED and the read-back failed: `skopeo inspect --tls-verify=false --no-tags %s` exited non-zero. skopeo is %s. Last of registry.log: %s' \
+      "$dest" "$(skopeo --version 2>&1 | head -1)" "$(tail -4 "$L/registry.log" | tr '\n' ' ')" > "$W/push-err"
+    return 1
+  fi
+  d=$(printf '%s' "$out" | sed -n 's/.*"Digest": *"\(sha256:[a-f0-9]\{64\}\)".*/\1/p' | head -1)
+  if [ -z "$d" ]; then
+    printf 'copy and inspect both succeeded, but no "Digest": "sha256:…" field matched in skopeo inspect output. skopeo is %s. First 400 chars of what it printed: %s' \
+      "$(skopeo --version 2>&1 | head -1)" "$(printf '%s' "$out" | tr '\n\t' '  ' | cut -c1-400)" > "$W/push-err"
+    return 1
+  fi
+  printf '%s' "$d"
 }
+push_err() { [ -s "$W/push-err" ] && cat "$W/push-err" || printf 'no reason was recorded, which is itself a bug in push_as'; }
 sign_digest() {  # sign_digest <digest>
   # --new-bundle-format=false keeps the signature discoverable by containers/image (D17, and the whole
   # reason check S8 has two halves).
@@ -234,8 +287,8 @@ QCOW=$(build_qcow2 "$WRAP" "$W/disk-update") || fail_all "bootc-image-builder pr
 chmod 666 "$QCOW" 2>/dev/null || true
 
 # ── push and sign A and B ────────────────────────────────────────────────────────────────────────
-DIG_A=$(push_as "$WRAP" "$TAG") || fail_all "could not push image A to the harness registry"
-sign_digest "$DIG_A" || fail_all "cosign could not sign image A"
+DIG_A=$(push_as "$WRAP" "$TAG") || fail_all "could not push image A to the harness registry. $(push_err)"
+sign_digest "$DIG_A" || fail_all "cosign could not sign image A. $(sign_err)"
 log "A (booted image) = $DIG_A"
 
 VM_NETDEV_EXTRA="guestfwd=tcp:${GUEST_REG_IP}:443-tcp:127.0.0.1:${REG_PORT},guestfwd=tcp:${GUEST_REG_IP}:80-tcp:127.0.0.1:${REG_PORT}"
@@ -249,8 +302,8 @@ EXTRA=()
 
 start_vm "$QCOW" "$PROFILE" "$SERIAL" "$AGENT" "$QMP" "${EXTRA[@]+"${EXTRA[@]}"}" \
   || fail_all "QEMU would not start for the update run"
-poll_until "$(scale 900)" "first boot" -- grep_file "$AGENT" '#AUROS-STATUS#' \
-  || fail_all "the VM never reported its status; nothing in the update group can be evaluated"
+poll_until "$(scale "$(short 900)")" "first boot" -- grep_file "$AGENT" '#AUROS-STATUS#' \
+  || fail_all "the VM never reported its status; nothing in the update group can be evaluated. Read logs/update-serial.log.${DEADLINE_NOTE}"
 BOOTED_A=$(last_status_field "$AGENT" digest)
 log "guest reports booted digest: ${BOOTED_A:-<none>}"
 
@@ -262,10 +315,10 @@ wait_for_digest() {
 
 # ── U1 — the update applies with NO human action ─────────────────────────────────────────────────
 check_begin
-DIG_B=$(push_as "localhost/auros-matrix-b:test" "$TAG") || fail_all "could not push image B"
-sign_digest "$DIG_B" || fail_all "cosign could not sign image B"
+DIG_B=$(push_as "localhost/auros-matrix-b:test" "$TAG") || fail_all "could not push image B to the harness registry. $(push_err)"
+sign_digest "$DIG_B" || fail_all "cosign could not sign image B. $(sign_err)"
 log "B (the update) = $DIG_B — nothing else is touched from here; the machine must do this itself"
-U1_DEADLINE=$(scale 1200)   # U1's criterion is 20 minutes
+U1_DEADLINE=$(scale "$(short 1200)")   # U1's criterion is 20 minutes; short() only bites in a probe
 if wait_for_digest "$DIG_B" "$U1_DEADLINE"; then
   SIG_B=$(last_status_field "$AGENT" signature)
   if [ "$SIG_B" = containerPolicy ]; then
@@ -274,7 +327,7 @@ if wait_for_digest "$DIG_B" "$U1_DEADLINE"; then
     record U1 fail "the update applied unattended (${DIG_A} -> ${DIG_B}) but bootc reports signature=\"${SIG_B:-<absent>}\", not containerPolicy. The machine took an image it did not verify — an update path that works and does not check is D8's failure with a green light on it."
   fi
 else
-  record U1 fail "after ${U1_DEADLINE}s the booted digest is still $(last_status_field "$AGENT" digest) (expected ${DIG_B}). This is the Gate 1 exit condition; read logs/update-serial.log."
+  record U1 fail "after ${U1_DEADLINE}s the booted digest is still $(last_status_field "$AGENT" digest) (expected ${DIG_B}). This is the Gate 1 exit condition; read logs/update-serial.log.${DEADLINE_NOTE}"
 fi
 
 # ── U2 — the previous deployment is still there (D10: two, and exactly two) ──────────────────────
@@ -289,12 +342,12 @@ fi
 # ── U3 — automatic rollback from a deliberately unhealthy image ──────────────────────────────────
 check_begin
 PRE_U3=$(last_status_field "$AGENT" digest)
-DIG_C=$(push_as "localhost/auros-matrix-c:test" "$TAG") || fail_all "could not push image C"
-sign_digest "$DIG_C" || fail_all "cosign could not sign image C"
+DIG_C=$(push_as "localhost/auros-matrix-c:test" "$TAG") || fail_all "could not push image C to the harness registry. $(push_err)"
+sign_digest "$DIG_C" || fail_all "cosign could not sign image C. $(sign_err)"
 log "C (fails greenboot on purpose) = $DIG_C"
-U3_DEADLINE=$(scale 2400)
+U3_DEADLINE=$(scale "$(short 2400)")
 SAW_C=0
-if wait_for_digest "$DIG_C" "$(scale 1200)"; then SAW_C=1; log "the VM booted into C, as intended"; fi
+if wait_for_digest "$DIG_C" "$(scale "$(short 1200)")"; then SAW_C=1; log "the VM booted into C, as intended"; fi
 # Now the machine must rescue itself. greenboot marks the boot bad, the counter runs out, GRUB falls
 # back, and we must land on the OLD digest — not merely "some digest that is not C".
 if poll_until "$U3_DEADLINE" "rollback to ${PRE_U3:0:20}…" -- bash -c 'grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$AGENT" "$PRE_U3"; then
@@ -309,16 +362,16 @@ if poll_until "$U3_DEADLINE" "rollback to ${PRE_U3:0:20}…" -- bash -c 'grep -a
     record U3 fail "the machine is on ${PRE_U3}, but it never demonstrably booted into ${DIG_C} — it may simply have refused the update, which is U4's property, not U3's. Rollback is unproven."
   fi
 else
-  record U3 fail "offered the unhealthy image ${DIG_C}; after ${U3_DEADLINE}s the booted digest is $(last_status_field "$AGENT" digest), not the expected rollback target ${PRE_U3}. A school has no out-of-band console: an update that bricks a machine has to be recoverable by the machine."
+  record U3 fail "offered the unhealthy image ${DIG_C}; after ${U3_DEADLINE}s the booted digest is $(last_status_field "$AGENT" digest), not the expected rollback target ${PRE_U3}. A school has no out-of-band console: an update that bricks a machine has to be recoverable by the machine.${DEADLINE_NOTE}"
 fi
 
 # ── U4 — an unsigned image is REFUSED, and refused for the right reason ──────────────────────────
 check_begin
 PRE_U4=$(last_status_field "$AGENT" digest)
-DIG_D=$(push_as "localhost/auros-matrix-d:test" "$TAG") || fail_all "could not push image D"
+DIG_D=$(push_as "localhost/auros-matrix-d:test" "$TAG") || fail_all "could not push image D to the harness registry. $(push_err)"
 log "D (deliberately UNSIGNED) = $DIG_D — pushed with no cosign signature at all"
 # Give the timer a couple of cycles to try and fail, polling for evidence rather than sleeping blind.
-U4_DEADLINE=$(scale 600)
+U4_DEADLINE=$(scale "$(short 600)")
 poll_until "$U4_DEADLINE" "an update attempt against the unsigned image" -- bash -c '
   grep -qaE "Source image rejected|signature|Signature|SignatureValidationFailed|policy|invalid" "$1" \
   || grep -a "^#AUROS-STATUS#" "$1" | tail -1 | grep -q "$2"' _ "$SERIAL" "$DIG_D" || true
@@ -348,7 +401,7 @@ elif [ -z "$SIG_EVIDENCE" ]; then
   # The booted image's own signature source is U1's assertion, and it is already made there (U1, above:
   # the update is a fail if bootc reports anything other than signature=containerPolicy). It is not a
   # substitute for observing a refusal, so it is no longer allowed to stand in for one.
-  record U4 fail "the booted digest is unchanged (${PRE_U4}), but nothing in the console says the image was rejected for its SIGNATURE. An update that failed because the registry was slow, or because the timer never fired inside ${U4_DEADLINE}s, looks identical to one that was refused on policy — and only one of those is the property U4 claims. Refusing to score this as a pass on the strength of an absence. Read logs/update-serial.log; if the refusal is there under wording this harness does not match, widen SIG_EVIDENCE rather than widening the pass branch."
+  record U4 fail "the booted digest is unchanged (${PRE_U4}), but nothing in the console says the image was rejected for its SIGNATURE. An update that failed because the registry was slow, or because the timer never fired inside ${U4_DEADLINE}s, looks identical to one that was refused on policy — and only one of those is the property U4 claims. Refusing to score this as a pass on the strength of an absence. Read logs/update-serial.log; if the refusal is there under wording this harness does not match, widen SIG_EVIDENCE rather than widening the pass branch.${DEADLINE_NOTE}"
 else
   record U4 pass "unsigned image ${DIG_D} refused, booted digest UNCHANGED at ${PRE_U4}; the guest gave a signature reason on the console: ${SIG_EVIDENCE}"
 fi
@@ -363,16 +416,16 @@ PRE_U5=$(last_status_field "$AGENT" digest)
 sign_digest "$DIG_D" || warn "could not sign D for the U5 phase"
 stop_registry
 log "registry killed; the machine must now do nothing, gracefully"
-U5_DEADLINE=$(scale 600)
+U5_DEADLINE=$(scale "$(short 600)")
 poll_until "$U5_DEADLINE" "two failed fetch cycles" -- bash -c 'c=$(grep -ac "bootc-fetch-apply-updates" "$1" 2>/dev/null || true); [ "${c:-0}" -ge 2 ]' _ "$SERIAL" || true
 MID_U5=$(last_status_field "$AGENT" digest)
 start_registry || warn "could not restart the registry for U5's retry half"
-if wait_for_digest "$DIG_D" "$(scale 1200)"; then RETRIED=1; else RETRIED=0; fi
+if wait_for_digest "$DIG_D" "$(scale "$(short 1200)")"; then RETRIED=1; else RETRIED=0; fi
 POST_SYS=$(grep -ac 'Failed to start\|emergency mode\|Freezing execution' "$SERIAL" 2>/dev/null || true)
 if [ "$MID_U5" != "$PRE_U5" ]; then
   record U5 fail "the booted digest changed to ${MID_U5} while the registry was unreachable"
 elif [ "$RETRIED" != 1 ]; then
-  record U5 fail "nothing broke while the registry was down (digest held at ${PRE_U5}), but the machine did not pick the update up once the registry came back. 'Retry later' is the half of U5 that matters on school Wi-Fi."
+  record U5 fail "nothing broke while the registry was down (digest held at ${PRE_U5}), but the machine did not pick the update up once the registry came back. 'Retry later' is the half of U5 that matters on school Wi-Fi.${DEADLINE_NOTE}"
 else
   record U5 pass "registry unreachable: booted digest held at ${PRE_U5}, no emergency-mode or freeze messages on the console (${POST_SYS} suspicious lines), and the update applied on its own once the registry returned"
 fi

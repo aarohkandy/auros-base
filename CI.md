@@ -351,8 +351,11 @@ red build and not a bad publish.
 
 ### `matrix/run.sh` — the check-matrix harness (TASKS A8)
 
-**Verified against the landed harness**, not assumed — `matrix/run.sh` was adapted to this interface in
-commit `b1806cc`, and the update phase's real contract turned out to differ from what I first guessed.
+**Verified by READING the landed harness, and — until 2026-09-21 — never by running it.** `matrix/run.sh`
+was adapted to this interface in commit `b1806cc`. The sentence that used to stand here said "verified
+against the landed harness, not assumed", which was a claim about evidence that did not exist: the two
+programs agreed on paper and disagreed in every way that mattered. See **"What the first execution
+found"** below before trusting anything in this section.
 
 ```
 matrix/run.sh --phase static|boot|update
@@ -393,6 +396,81 @@ opposite of proving anything.
 
 It also refuses to run without a writable `/dev/kvm` unless `AUROS_ALLOW_TCG=1`. **CI does not set that.**
 The update group is four boots; under emulation it would exceed the 6-hour job limit and prove nothing.
+
+#### How to run the probe
+
+```
+workflow_dispatch          static / boot / update as booleans, plus a profile
+push to probe/**           static + boot
+push to probe-update/**    the update group alone (it is long; do not make it share a run)
+```
+
+It builds `FROM` the digest in `base.lock` plus one marker file — the same trivial derivative
+`probe-boot.yml` uses, and no `ostree container commit` (D20) — and drives `matrix/run.sh` with
+build.yml's exact command lines. Two knobs exist, **for the probe only, and `build.yml` must not set
+either**: `AUROS_AGENT_DEADLINE` (default 2400s per boot, probe uses 420) and
+`AUROS_DEADLINE_DIVISOR` (probe uses 6). Both shorten the *waiting* and never the *conclusion* — any
+check that fails on a shortened deadline carries a sentence in its own `detail` saying so, so a probe
+result cannot be read as a CI one. `AUROS_RUN_DIR` makes `matrix/run.sh` keep its run directory
+instead of deleting it, which is what makes the logs uploadable at all.
+
+The boot and update phases print a per-minute heartbeat naming the size and last lines of every
+serial and agent log, because GitHub serves no job log until the job ends and these phases run for
+over an hour.
+
+#### What the first execution found — 2026-09-21
+
+`.github/workflows/probe-matrix.yml` runs all three phases against a trivial derivative of the pinned
+base, with build.yml's exact command lines, so harness bugs cost a five-minute probe instead of a
+fifty-minute build. Checks that fail on that image are expected; what the probe asserts is that every id
+`matrix/checks.yaml` declares reaches a **verdict**.
+
+Before the first run, the harness could not have produced a single verdict for any check, on any image:
+
+| found | consequence |
+|---|---|
+| the collector matched `/\.json$/` and `JSON.parse`d whole files; every run-\*.sh writes JSON **Lines** to `checks/*.jsonl` | every phase reported "ZERO checks", wrote no fragment, exited 1 |
+| `set -e` aborted `run.sh` at the phase invocation, because each run-\*.sh exits non-zero when a check fails | **no fragment on any failing run.** build.yml's `jq -e … fragments/static.json` failed with "no such file", naming no check |
+| the verdict line used `require(process.argv[1])` on `--out fragments/static.json` | `Cannot find module` → the phase failed even when every check passed |
+| `analyze.mjs` read `--recipe ""` as the literal string `true` | S3 failed on **every base build** with `recipe "true" resolved an EMPTY removal set` |
+| the run directory was `mktemp -d` + `trap rm -rf EXIT` | every serial console, bib and QEMU log was deleted before the upload step ran |
+| S6 measured `containers-storage:`, whose layers are `application/vnd.oci.image.layer.v1.tar` | 8,439,590,767 B reported as a "compressed pull size"; base.lock records the same upstream at 3,758,096,384 B |
+| `sudo -E` alone: sudo replaces PATH with its secure_path | U1–U5 and R1 all failed "cosign is not installed" while the job printed `/home/runner/.cosign/cosign` |
+| `base.lock`'s `UPSTREAM_PULL_SIZE_BYTES` was `3758096384` — exactly 3.5 GiB | not a measurement. The real figure, read off ghcr.io against the pinned digest with the resolver's own definition, is **3,706,306,117 B across 256 `…tar+zstd` layers**. 1.4% out, and S6 budgets against it |
+| `push_as()` sent skopeo's stderr to `/dev/null` | sixteen minutes of qcow2, then U1–U5 and R1 all failed with one sentence — "could not push image A to the harness registry" — while `registry.log` ended with "Writing manifest to image destination". The push had *succeeded*; the read-back on the next line was what failed, and its message had been discarded |
+| `image-probe.sh` looked for a display manager in a list of six hardcoded paths | the list matched **nothing**. This base's display manager is `/usr/bin/plasmalogin` (`display-manager.service` → `plasmalogin.service`). S9's kiosk branch would have certified "no display-manager binary" on an image that still shipped one, and `vm.sh`'s greeter regex carried a dead `sddm` alternative |
+| `auros-matrix-agent.service` was `Type=oneshot` **and** `WantedBy=multi-user.target`, and its first act was `systemctl is-system-running --wait` | the agent's own start job was in the transaction it was waiting for. It printed `#AUROS-BOOT#` and `#AUROS-STATUS#` and then hung, on both cold boots, for the full 2400 s deadline. **B2 and B4–B12 were unreachable on every image, forever**, and would have read as a broken hardened base. `Type=simple`, plus a `timeout 900` on the wait so a future ordering change costs ten minutes and a named fail rather than forty and a silence |
+| the development signing key is a SEC1 `EC PRIVATE KEY` PEM from `openssl ecparam`; cosign's `--key` reads its own format | `unsupported pem type: EC PRIVATE KEY`. U1–U5 and R1 fail on the signer in every run. `COSIGN_PASSWORD` unset also makes cosign prompt on a tty-less runner and die with `inappropriate ioctl for device` first |
+| the profile was resolved by `eval` **after** `build_qcow2` | an unknown profile id surfaced ten minutes later as `P_DISK_GB: unbound variable`, with `profile.mjs`'s own "Known: …" list swallowed |
+
+**B1 passes on a real image.** `[PASS] B1 — greeter within 17s (budget 120s, accel=kvm)`, twice, on a
+qcow2 `bootc-image-builder` produced from the derivative. The bootable-artifact half of the boot phase
+— testwrap build, bib, profile sizing, OVMF, KVM, serial console, greeter detection — works end to end.
+
+**What the run also confirmed working**, since a probe that only finds bugs is not reporting honestly:
+S1, S2, S3 and S4 pass on the derivative; the in-image probe returns 2,168 rpms and a readable
+`policy.json`; and S5's measured removal closure against the pinned upstream is **exactly 0 packages in
+both directions**, so the closure arithmetic does not manufacture phantom removals on an unchanged
+package set.
+
+**`build.yml` still needs three changes of its own**, and they are not harness bugs:
+
+1. The `static` job passes no `--budget-bytes`, no `--second-digest` and no `--registry-ref`, so **S6, S7
+   and S8 fail by construction** — on a perfect image, forever. S6 additionally cannot be answered at all
+   from local storage, since its unit is the compressed download.
+2. The `update` job must invoke the harness as `sudo -E env "PATH=$PATH" …` or cosign stays invisible to
+   root, and must install `libguestfs-tools` or `virt-make-fs` is missing and R1 fails closed before
+   looking at anything.
+   None of this is a guess about what the checks want. `matrix/run/ci/check-matrix.yml` — the harness
+   author's own reference workflow — passes `--second-digest`, `--budget-bytes` and a
+   `--registry-ref` pointing at an `auros-base-staging` repository, installs `libguestfs-tools`
+   alongside qemu and swtpm, and invokes the scripts **without `sudo`**. `build.yml` adopted the
+   phase interface and dropped every argument the checks are evaluated from. Diff the two files.
+
+3. `run-static.sh` records its own S1/S7/S8 verdicts while the `build` and `sign` jobs write separate
+   fragments for the same three ids. The merge in `publish` concatenates without deduplicating and the
+   verdict is `all(.status == "pass")`, so **the duplicate fails poison the result regardless of the
+   image**. This is the S8 ordering problem in `matrix/run/README.md`, now with a measured consequence.
 
 ### `tools/gate.mjs` — the publish gate (TASKS 0.5, meta repo)
 

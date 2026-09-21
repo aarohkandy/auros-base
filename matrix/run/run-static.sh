@@ -163,7 +163,7 @@ else
   BAD=''; METHOD=''
   if have flatpak; then METHOD=flatpak; elif have curl; then METHOD=flathub-api; fi
   if [ -z "$METHOD" ]; then
-    printf '{"status":"fail","detail":"cannot resolve flatpak refs: neither flatpak nor curl is available on this host. A missing tool is a FAIL, not a skip — otherwise the check quietly stops testing."}' > "$FP_RESULT"
+    printf '{"status":"fail","detail":"cannot resolve flatpak refs: %s AND %s A missing tool is a FAIL, not a skip — otherwise the check quietly stops testing."}' "$(tool_missing_detail flatpak)" "$(tool_missing_detail curl)" > "$FP_RESULT"
   else
     for ref in "${FLATPAK_REFS[@]}"; do
       appid=$ref; case "$ref" in */*) appid=$(printf '%s' "$ref" | cut -d/ -f2);; esac
@@ -190,22 +190,49 @@ node "$HARNESS_DIR/lib/analyze.mjs" \
 # ── S6 — Size budget ─────────────────────────────────────────────────────────────────────────────
 # Measured as COMPRESSED PULL SIZE, because that is the number that lands on a school's uplink
 # (BLOCKED.md B6), and it is the same unit as base.lock's UPSTREAM_PULL_SIZE_BYTES.
+# THE SOURCE MATTERS, AND THE OLD ORDER GOT IT BACKWARDS.
+# `containers-storage:` was tried FIRST. That store keeps layers UNCOMPRESSED, so its manifest
+# reports `application/vnd.oci.image.layer.v1.tar` and sizes that are nothing like a pull. Measured
+# on run 35548005729 against a bare derivative of the pinned base: 257 layers, 8,439,590,767 bytes,
+# every layer `...layer.v1.tar`. base.lock records the same upstream as 3,758,096,384 bytes
+# compressed. So S6 was reporting a number 2.2x too large and calling it "compressed pull size",
+# and any budget set to make it pass would have been a budget for the wrong quantity.
+#
+# The unit S6 is about is what lands on a school's uplink (BLOCKED.md B6). That can only be read
+# from a REGISTRY. So: the registry first, and local storage only as a fallback that says plainly
+# it cannot answer the question.
 check_begin
-PULL_BYTES=''
+PULL_BYTES=''; PULL_SOURCE=''; PULL_COMPRESSED=0; LAYER_TYPES=''
 if have skopeo; then
-  skopeo inspect --raw "containers-storage:$IMAGE" > "$W/manifest.json" 2>/dev/null \
-    || { [ -n "$REGISTRY_REF" ] && skopeo inspect --raw "docker://$REGISTRY_REF" > "$W/manifest.json" 2>/dev/null; } || true
+  REG_SRC=''
+  if [ -n "$REGISTRY_REF" ]; then REG_SRC="docker://$REGISTRY_REF"
+  elif [[ "$IMAGE" == *.*/* ]] || [[ "$IMAGE" == *:*/* ]]; then REG_SRC="docker://$IMAGE"; fi
+  if [ -n "$REG_SRC" ] && skopeo inspect --raw "$REG_SRC" > "$W/manifest.json" 2>"$L/s6-skopeo.log"; then
+    PULL_SOURCE="$REG_SRC"
+  elif skopeo inspect --raw "containers-storage:$IMAGE" > "$W/manifest.json" 2>>"$L/s6-skopeo.log"; then
+    PULL_SOURCE="containers-storage:$IMAGE"
+  fi
   if [ -s "$W/manifest.json" ]; then
-    PULL_BYTES=$(node -e '
+    # The layer media types decide whether this is a pull size at all. Asked, not assumed.
+    read -r PULL_BYTES PULL_COMPRESSED LAYER_TYPES <<<"$(node -e '
       const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
-      const ls=m.layers||[]; process.stdout.write(String(ls.reduce((a,l)=>a+(l.size||0),0)+(m.config?.size||0)));' "$W/manifest.json" || true)
+      const ls=m.layers||[];
+      const bytes=ls.reduce((a,l)=>a+(l.size||0),0)+(m.config?.size||0);
+      const types=[...new Set(ls.map(l=>l.mediaType||"?"))];
+      const compressed=ls.length>0 && types.every(t=>/gzip|zstd/.test(t)) ? 1 : 0;
+      process.stdout.write(`${bytes} ${compressed} ${types.join(",")}`);' "$W/manifest.json" || echo '0 0 unreadable')"
   fi
 fi
 printf '%s' "${PULL_BYTES:-0}" > "$W/pull-bytes"
 if [ -z "$PULL_BYTES" ] || [ "$PULL_BYTES" = "0" ]; then
-  record S6 fail "could not measure the compressed pull size (skopeo inspect --raw produced nothing usable). An unmeasured size is a fail — subtraction is the product, and a product we cannot weigh is a product we cannot sell."
+  record S6 fail "could not measure the compressed pull size (skopeo inspect --raw produced nothing usable from ${PULL_SOURCE:-any source}). An unmeasured size is a fail — subtraction is the product, and a product we cannot weigh is a product we cannot sell."
+elif [ "$PULL_COMPRESSED" != "1" ]; then
+  # The comparison number is READ FROM base.lock, never typed here. A hardcoded byte count in a
+  # failure message is a second copy of a fact, and the copy is the one that goes stale.
+  LOCK_PULL=$(read_lock UPSTREAM_PULL_SIZE_BYTES 2>/dev/null || true)
+  record S6 fail "measured ${PULL_BYTES} B from ${PULL_SOURCE}, but its layers are [${LAYER_TYPES}] — UNCOMPRESSED. That is the on-disk size, not the download, and S6's unit is what lands on a school's uplink. Local container storage cannot answer that: base.lock records the pinned upstream at ${LOCK_PULL:-<unreadable>} B compressed, against ${PULL_BYTES} B on disk here. Pass --registry-ref pointing at the pushed image, or give --image a registry reference."
 elif [ -z "$BUDGET" ]; then
-  record S6 fail "measured compressed pull size ${PULL_BYTES} bytes, but NO BUDGET IS DECLARED. Pass --budget-bytes. An undeclared budget is not an infinite budget; it is an image that can grow forever without anyone noticing."
+  record S6 fail "measured compressed pull size ${PULL_BYTES} bytes from ${PULL_SOURCE}, but NO BUDGET IS DECLARED. Pass --budget-bytes. An undeclared budget is not an infinite budget; it is an image that can grow forever without anyone noticing."
 else
   PREV=''
   if [ -f "$LEDGER" ]; then
@@ -214,7 +241,7 @@ else
       { if (c > 0) { v=$c; if (v ~ /^[0-9]+$/ && v+0 > 0) last=v } }
       END { if (last) print last }' "$LEDGER" 2>/dev/null || true)
   fi
-  MSG="measured ${PULL_BYTES} B compressed pull vs budget ${BUDGET} B"
+  MSG="measured ${PULL_BYTES} B compressed pull (from ${PULL_SOURCE}, layers [${LAYER_TYPES}]) vs budget ${BUDGET} B"
   if [ "$PULL_BYTES" -gt "$BUDGET" ]; then
     record S6 fail "$MSG — over budget by $(( PULL_BYTES - BUDGET )) B"
   elif [ -n "$PREV" ] && [ "$PREV" -gt 0 ] && [ "$PULL_BYTES" -gt $(( PREV + PREV / 10 )) ]; then
@@ -250,9 +277,9 @@ if [[ "$DEFER" == *" S8 "* ]]; then
 elif [ -z "$REGISTRY_REF" ]; then
   record S8 fail "no --registry-ref. S8 is a statement about what a customer's laptop can find in the registry, so it cannot be evaluated against a local image. See run/README.md 'The S8 ordering problem'."
 elif ! have cosign; then
-  record S8 fail "cosign is not installed on this host (it is NOT preinstalled on ubuntu-latest — the workflow must add sigstore/cosign-installer, pinned per D17). A missing verifier is a fail."
+  record S8 fail "$(tool_missing_detail cosign) A missing verifier is a fail."
 elif ! have skopeo; then
-  record S8 fail "skopeo is not installed; the discoverability half of S8 cannot be evaluated"
+  record S8 fail "$(tool_missing_detail skopeo) The discoverability half of S8 cannot be evaluated without it."
 else
   KEY="$COSIGN_KEY"
   if [ -z "$KEY" ]; then

@@ -111,6 +111,39 @@ need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1${2:
 # detail naming the tool, so the run goes red rather than quietly narrowing what is being tested.
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# tool_missing_detail <tool> — what a "not installed" message has to carry to be worth reading.
+#
+# THE HOUR THIS COST. run 35548903285 failed U1-U5 and R1 with "cosign is not installed. cosign is
+# NOT preinstalled on ubuntu-latest; the workflow must add it". The workflow HAD added it, with
+# sigstore/cosign-installer, and the job's own inventory step printed
+#     cosign                 /home/runner/.cosign/cosign
+# The harness runs under `sudo -E`, and sudo resets PATH to its secure_path
+# (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin). A tool installed into
+# the runner tool cache is on the RUNNER's PATH and invisible to root. build.yml's update job has
+# exactly this shape, so U1-U5 and R1 would have failed this way on every real build — and the
+# message would have sent whoever read it to go add a step that was already there.
+#
+# So: say which PATH was searched, and say whether the binary exists somewhere outside it. Those
+# are different problems with different fixes, and they used to produce the same sentence.
+tool_missing_detail() {
+  local t=$1 hits='' root
+  # Bounded, and only runs on the failure path. These are the trees where a CI-installed tool hides.
+  for root in /opt/hostedtoolcache /usr/local /home /root /snap; do
+    [ -d "$root" ] || continue
+    hits="$hits $(find "$root" -maxdepth 5 -name "$t" -type f -perm -u+x 2>/dev/null | head -3 | tr '\n' ' ')"
+  done
+  hits=$(printf '%s' "$hits" | tr -s ' ' | sed 's/^ //;s/ $//')
+  # The detail string is truncated downstream (2000 chars in matrix/run.sh's collector). A developer
+  # laptop's PATH can be longer than that on its own and would push the useful half off the end.
+  local shown_path=$PATH
+  [ ${#shown_path} -le 400 ] || shown_path="${shown_path:0:400}… (${#PATH} chars)"
+  if [ -n "$hits" ]; then
+    printf '%s is NOT on the PATH this process was given (%s), but it EXISTS at: %s. That is the sudo trap: sudo replaces PATH with its secure_path, so a tool the workflow installed into the runner tool cache is invisible to `sudo -E`. Invoke as `sudo -E env "PATH=$PATH" ...`, or symlink the binary into /usr/local/bin.' "$t" "$shown_path" "$hits"
+  else
+    printf '%s is not on PATH (%s) and no executable of that name exists under /opt/hostedtoolcache, /usr/local, /home, /root or /snap either, so it is genuinely not installed on this host.' "$t" "$shown_path"
+  fi
+}
+
 # ─── image helpers ───────────────────────────────────────────────────────────────────────────────
 # podman_in <image> <cmd...> — run a command inside the image under test, read-only, no network.
 podman_in() {
