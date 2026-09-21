@@ -134,8 +134,13 @@ jobs:
           # KEPT, not deleted: see the header of matrix/run.sh. Without this the harness removes every
           # log it wrote before the upload step can see them.
           export AUROS_RUN_DIR="$PWD/matrix-run"
+          # `sudo -E` ALONE IS NOT ENOUGH, and build.yml does exactly that. sudo replaces PATH with
+          # its secure_path, so anything the workflow installed into the runner tool cache is
+          # invisible to root. Measured: run 35548903285 failed U1-U5 and R1 with "cosign is not
+          # installed" while the job's own inventory printed /home/runner/.cosign/cosign.
+          # `env "PATH=$PATH"` hands root the PATH the runner actually has.
           set +e
-          sudo -E ./matrix/run.sh \
+          sudo -E env "PATH=$PATH" ./matrix/run.sh \
             --phase static \
             --image  "$PROBE_IMAGE" \
             --checks matrix/checks.yaml \
@@ -216,7 +221,7 @@ jobs:
           mkdir -p fragments
           export AUROS_RUN_DIR="$PWD/matrix-run"
           set +e
-          sudo -E ./matrix/run.sh \
+          sudo -E env "PATH=$PATH" ./matrix/run.sh \
             --phase boot \
             --profile "$PROFILE" \
             --image  "$PROBE_IMAGE" \
@@ -283,7 +288,10 @@ jobs:
           sudo chmod 666 /dev/kvm || true
           [ -w /dev/kvm ] || echo "::warning::/dev/kvm is not writable; the update group will fail closed"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf
+          # libguestfs-tools provides virt-make-fs, which run-update.sh needs to build R1's
+          # migration disk. build.yml does not install it, so R1 fails closed there before it has
+          # looked at anything. Installed here so the rest of R1's path actually executes.
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf libguestfs-tools
           df -h /
 
       - name: What this runner actually has
@@ -319,7 +327,7 @@ jobs:
           mkdir -p fragments
           export AUROS_RUN_DIR="$PWD/matrix-run"
           set +e
-          sudo -E ./matrix/run.sh \
+          sudo -E env "PATH=$PATH" ./matrix/run.sh \
             --phase update \
             --profile uefi-modern \
             --image  "$PROBE_IMAGE" \

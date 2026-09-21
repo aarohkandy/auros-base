@@ -141,7 +141,7 @@ else
   BAD=''; METHOD=''
   if have flatpak; then METHOD=flatpak; elif have curl; then METHOD=flathub-api; fi
   if [ -z "$METHOD" ]; then
-    printf '{"status":"fail","detail":"cannot resolve flatpak refs: neither flatpak nor curl is available on this host. A missing tool is a FAIL, not a skip — otherwise the check quietly stops testing."}' > "$FP_RESULT"
+    printf '{"status":"fail","detail":"cannot resolve flatpak refs: %s AND %s A missing tool is a FAIL, not a skip — otherwise the check quietly stops testing."}' "$(tool_missing_detail flatpak)" "$(tool_missing_detail curl)" > "$FP_RESULT"
   else
     for ref in "${FLATPAK_REFS[@]}"; do
       appid=$ref; case "$ref" in */*) appid=$(printf '%s' "$ref" | cut -d/ -f2);; esac
@@ -247,9 +247,9 @@ check_begin
 if [ -z "$REGISTRY_REF" ]; then
   record S8 fail "no --registry-ref. S8 is a statement about what a customer's laptop can find in the registry, so it cannot be evaluated against a local image. See run/README.md 'The S8 ordering problem'."
 elif ! have cosign; then
-  record S8 fail "cosign is not installed on this host (it is NOT preinstalled on ubuntu-latest — the workflow must add sigstore/cosign-installer, pinned per D17). A missing verifier is a fail."
+  record S8 fail "$(tool_missing_detail cosign) A missing verifier is a fail."
 elif ! have skopeo; then
-  record S8 fail "skopeo is not installed; the discoverability half of S8 cannot be evaluated"
+  record S8 fail "$(tool_missing_detail skopeo) The discoverability half of S8 cannot be evaluated without it."
 else
   KEY="$COSIGN_KEY"
   if [ -z "$KEY" ]; then

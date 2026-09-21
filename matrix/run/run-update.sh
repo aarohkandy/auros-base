@@ -66,7 +66,7 @@ fail_all() {
 
 ACCEL=$(accel_mode)
 [ "$ACCEL" = kvm ] || [ "$AUROS_ALLOW_TCG" = 1 ] || fail_all "no writable /dev/kvm and AUROS_ALLOW_TCG is unset; the update group involves four boots and would take hours under emulation"
-have cosign || fail_all "cosign is not installed. U4 is the only check that proves signing works, and it cannot be run without a signer. cosign is NOT preinstalled on ubuntu-latest; the workflow must add it, pinned (D17)."
+have cosign || fail_all "$(tool_missing_detail cosign) U4 is the only check that proves signing works, and it cannot be run without a signer. cosign is not preinstalled on ubuntu-latest, so the workflow adds it with sigstore/cosign-installer, pinned (D17) — check that it did AND that root can see it."
 [ -n "$SIGNING_KEY" ] || fail_all "no --signing-key. Without one the harness can only offer unsigned images, which would let U4 pass while U1 fails — the exact opposite of proving anything."
 
 # ── the namespace the guest trusts ───────────────────────────────────────────────────────────────
@@ -363,7 +363,7 @@ fi
 # ── R1 — the migration archive restores and re-verifies ──────────────────────────────────────────
 check_begin
 if [ -z "$MIG_IMG" ]; then
-  record R1 fail "no migration disk could be built on this host: virt-make-fs (libguestfs-tools) is not installed, so R1 had nothing to restore. A missing tool is a fail — otherwise the one check that stands between a school and losing its files quietly stops running."
+  record R1 fail "no migration disk could be built on this host. $(tool_missing_detail virt-make-fs) It ships in libguestfs-tools. R1 had nothing to restore, and a missing tool is a fail — otherwise the one check that stands between a school and losing its files quietly stops running."
 else
   R1_EVID=$(grep -aoE 'auros-restore[^"]{0,160}' "$SERIAL" 2>/dev/null | head -3 | tr '\n' ' ')
   RESTORED=$(grep -aoE 'restored ([0-9]+) file' "$SERIAL" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true)
