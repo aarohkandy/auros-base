@@ -6,7 +6,7 @@
 #
 #     an ordinary user cannot change this machine WITHOUT AN ADMINISTRATOR'S PASSWORD.
 #
-# So every polkit answer below must be "not for this user" -- pkcheck 1 (no) and 3 (an administrator
+# So every polkit answer below must be "not for this user" -- pkcheck 1 (no) and 2 (an administrator
 # could authorise this) are both correct. What would be wrong is 0.
 #
 # What this file must NOT do is quietly assert locked's stricter promise and pass anyway. If it did,

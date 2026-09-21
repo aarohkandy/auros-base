@@ -156,11 +156,11 @@ remembered:
 Two polkit actions sit between the two rows and are marked `session-dependent` in `a_deny`:
 `org.freedesktop.NetworkManager.network-control` and `…enable-disable-network` carry
 `allow_active=yes` in NetworkManager's own policy, so whether a *sessionless* probe is answered 1 or
-3 on an **open** image depends on the base's defaults rather than on ours — and nobody here has
+2 on an **open** image depends on the base's defaults rather than on ours — and nobody here has
 measured it, because D5 says this machine cannot boot one. Guessing in either direction would be
 wrong: guessing "discriminating" reds the base image on an assumption, guessing "not" throws away
 evidence we may have. So they are counted as corroborating in every mode, and the negative control
-prints **PROMOTE** if it observes 0 or 3 for one of them — that is the measurement, and D24 says the
+prints **PROMOTE** if it observes 0 or 2 for one of them — that is the measurement, and D24 says the
 measurement wins. Tighten the classification in the commit that records it.
 
 **`open/assert.sh` now runs the same suites at level `control`** and makes the claim testable rather

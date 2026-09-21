@@ -44,7 +44,22 @@ EOS
 # A stub pkcheck whose answer comes from $PK_RC, so the three polkit judgements can be driven.
 cat > "$BIN/pkcheck" <<'EOS'
 #!/usr/bin/env bash
+[ "${PK_RC:-1}" = 0 ] || echo "stub pkcheck: answer ${PK_RC:-1}" >&2
 exit "${PK_RC:-1}"
+EOS
+# A stub dbus-send that enforces what the stock system-bus policy enforces for an unprivileged sender
+# (measured on dbus-broker 37 and dbus-daemon 1.16, Fedora 43): methods on the org.freedesktop.DBus
+# interface of the driver are allowed, org.freedesktop.DBus.Peer.Ping is refused. $BUS=dead refuses
+# everything, as a bus that is really not there would.
+cat > "$BIN/dbus-send" <<'EOS'
+#!/usr/bin/env bash
+if [ "${BUS:-live}" = dead ]; then
+    echo 'Failed to open connection to "system" message bus: Connection refused' >&2; exit 1
+fi
+for a in "$@"; do case "$a" in
+    org.freedesktop.DBus.Peer.*) echo 'Error org.freedesktop.DBus.Error.AccessDenied: Sender is not authorized to send message' >&2; exit 1 ;;
+esac; done
+echo 'method return'; exit 0
 EOS
 # macOS has no coreutils `timeout`, which every attempt primitive in the library uses. The image
 # does (coreutils is in the protected set), so this stub is a host-portability shim for the test and
@@ -101,7 +116,7 @@ reset; a_kde_door kde.missing open /nonexistent-kde-binary "a door that is gone"
 [ "$A_FAIL" = 1 ] && ok "expect=open + absent binary => FAIL (the control cannot establish anything)" || no "expect=open + absent binary => FAIL" "$(last)"
 
 echo "── a_pk_not_hard_denied: the negative control that stops the polkit half from rotting ──────"
-for rc in 0 3; do
+for rc in 0 2; do
     reset; PK_RC=$rc a_pk_not_hard_denied ctl org.example.action >/dev/null 2>&1
     [ "$A_FAIL" = 0 ] && ok "open image answers pkcheck $rc => control passes" || no "open image answers pkcheck $rc => control passes" "$(last)"
 done
@@ -112,12 +127,39 @@ grep -q 'artefact of the probe subject' <<<"$(last)" \
     || no "  ...and says a locked denial of that action would be an artefact" "$(last)"
 
 echo "── the locked/managed distinction is still enforced ────────────────────────────────────────"
-reset; PK_RC=3 a_pk_hard_deny x org.example.action >/dev/null 2>&1
-[ "$A_FAIL" = 1 ] && ok "locked rejects pkcheck 3 (that is managed behaviour)" || no "locked rejects pkcheck 3" "$(last)"
+# pkcheck.c: 2 is the challenge ("requires authentication and -u wasn't passed"), 3 is "dismissed",
+# which needs -u and so never happens here. Reading 3 as the challenge made every auth_admin action an
+# "error" in every mode.
+reset; PK_RC=2 a_pk_hard_deny x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "locked rejects pkcheck 2 (that is managed behaviour)" || no "locked rejects pkcheck 2" "$(last)"
+grep -q "managed' behaviour" <<<"$(last)" && ok "  ...and calls it managed behaviour, not an error" || no "  ...and calls it managed behaviour, not an error" "$(last)"
+reset; PK_RC=2 a_pk_admin_only x org.example.action >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "managed accepts pkcheck 2 (an administrator could authorise this)" || no "managed accepts pkcheck 2" "$(last)"
 reset; PK_RC=3 a_pk_admin_only x org.example.action >/dev/null 2>&1
-[ "$A_FAIL" = 0 ] && ok "managed accepts pkcheck 3" || no "managed accepts pkcheck 3" "$(last)"
+[ "$A_FAIL" = 1 ] && ok "managed does NOT accept pkcheck 3 (dismissed) as an answer" || no "managed does not accept pkcheck 3" "$(last)"
 reset; PK_RC=0 a_pk_admin_only x org.example.action >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "managed rejects pkcheck 0" || no "managed rejects pkcheck 0" "$(last)"
+
+echo "── a_controls: the preconditions, against a bus that behaves like the real system bus ───────"
+# Run 35566336512: B5 aborted in 56 ms on the first real boot, because the bus probe was Peer.Ping,
+# which the stock system-bus policy refuses to every unprivileged sender. The abort said nothing about
+# WHICH precondition failed, because the reason sat above the three lines B5 copies into its detail.
+ctl() { ( a_controls ) 2>&1; }
+out="$(PK_RC=0 ctl)"; rc=$?
+[ "$rc" = 0 ] && ok "a live bus that refuses Peer.Ping but answers the driver => controls pass" \
+              || no "a live bus that refuses Peer.Ping => controls pass" "$out"
+out="$(BUS=dead PK_RC=0 ctl)"; rc=$?
+[ "$rc" = 1 ] && ok "a dead bus => ABORT (never a pass)" || no "a dead bus => ABORT" "$out"
+grep -q 'RESULT: fail (assertion aborted.*D-Bus is not reachable' <<<"$(tail -3 <<<"$out")" \
+    && ok "  ...and the precondition is named in the last three lines, which is all B5 keeps" \
+    || no "  ...and the precondition is named in the last three lines" "$out"
+grep -q 'Connection refused' <<<"$(tail -3 <<<"$out")" \
+    && ok "  ...with what dbus-send actually said" || no "  ...with what dbus-send actually said" "$out"
+out="$(PK_RC=127 ctl)"; rc=$?
+[ "$rc" = 1 ] && ok "control-allow not authorised => ABORT (never a pass)" || no "control-allow not authorised => ABORT" "$out"
+grep -q 'control-allow returned pkcheck 127 (stub pkcheck: answer 127)' <<<"$(tail -3 <<<"$out")" \
+    && ok "  ...naming the pkcheck answer and its message in the last three lines" \
+    || no "  ...naming the pkcheck answer and its message" "$out"
 
 echo "── a_deny refuses to guess ─────────────────────────────────────────────────────────────────"
 reset; a_deny nonsense x org.example.action >/dev/null 2>&1
@@ -127,7 +169,7 @@ echo "── evidence classification: session-dependent actions never red the ba
 reset; PK_RC=1 a_deny control net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
 [ "$A_FAIL" = 0 ] && ok "a session-dependent action answering 1 on open is RECORDED, not a base failure" || no "session-dependent answering 1 is recorded" "$(last)"
 [ "${#A_CONTROL_NON_DISCRIMINATING[@]}" = 1 ] && ok "  ...and lands in the non-discriminating list" || no "  ...and lands in the non-discriminating list"
-reset; PK_RC=3 a_deny control net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
+reset; PK_RC=2 a_deny control net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
 grep -q 'PROMOTE' <<<"$(last)" && ok "  ...and says PROMOTE when the measurement shows it DOES discriminate" || no "  ...says PROMOTE" "$(last)"
 reset; PK_RC=1 a_deny control root.pkexec-policy org.freedesktop.policykit.exec >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "a PRIMARY action answering 1 on open still FAILS the control" || no "a primary action answering 1 still fails" "$(last)"
