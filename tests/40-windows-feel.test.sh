@@ -273,4 +273,100 @@ t_exempt b12.packages \
        it refuses to survive — rather than about a runtime decision. B12 itself is driven into green
        and red per policy mode by desktop/tests/b12-modes.test.sh, which owns that coverage."
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the welcome pages — the honest one is not optional"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# Two pages ship: the orientation, and the page that says plainly which Windows programs do not come
+# across. The second one is the one a customer would rather not read and the one we are least likely
+# to notice going missing, because everything else still works. `-ge 2` is what makes it mandatory,
+# and `-ge 1` would let the honest page disappear with the build still green.
+PAGES_BLOCK="$(extract_between "$W" '^pages=0$' 'the Windows-programs page, installed')"
+
+pages_run() { # <root> <n pages>
+  local root="$1" n="$2" i
+  mkdir -p "$root/src/welcome/extra-pages"
+  i=1; while [ "$i" -le "$n" ]; do printf 'import QtQuick\n' > "$root/src/welcome/extra-pages/${i}0-page.qml"; i=$((i+1)); done
+  ROOT="$root" SRC="$root/src" bash -c "$PRE
+install_file() { mkdir -p \"\$(dirname \"\$ROOT\$2\")\"; install -m \"\${3:-0644}\" \"\$1\" \"\$ROOT\$2\"; }
+$PAGES_BLOCK"
+}
+
+R="$(newroot)"; run_check welcome.pages green "both pages are installed" -- pages_run "$R" 2
+assert_file "the first page landed" "$R/usr/share/plasma/plasma-welcome/extra-pages/10-page.qml"
+assert_file "so did the second"     "$R/usr/share/plasma/plasma-welcome/extra-pages/20-page.qml"
+R="$(newroot)"; run_check welcome.pages green "a third page was added" -- pages_run "$R" 3
+
+# THE ONE THAT MATTERS. One page is the orientation with the Windows-programs page missing.
+R="$(newroot)"; run_check welcome.pages red "only ONE page — the honest page went missing" -- pages_run "$R" 1
+assert_has "names both pages it expected" "the orientation page and the Windows-programs page" "$T_LAST_OUT"
+assert_has "and says how many it found"   "installed 1"                                        "$T_LAST_OUT"
+R="$(newroot)"; run_check welcome.pages red "extra-pages/ is empty" -- pages_run "$R" 0
+
+# And the repository must ship at least the two the build insists on, or the check and the payload
+# disagree and one of them is wrong.
+NPAGES="$(find "$D/welcome/extra-pages" -name '*.qml' 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$NPAGES" -ge 2 ]; then ok "the repo ships $NPAGES welcome pages, which is what the build demands"
+else bad "the repo ships $NPAGES welcome page(s); build/40-windows-feel.sh demands at least 2"; fi
+assert_has "and one of them is the Windows-programs page" "windows" \
+  "$(find "$D/welcome/extra-pages" -name '*.qml' -exec basename {} \; | tr 'A-Z' 'a-z' | tr '\n' ' ')"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "enable_user_unit — 'enabled for every future user' is a symlink, not a log line"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# These are `systemd --user` units, and every user of these machines is created long after the image
+# was built — so the symlink has to be IN THE IMAGE. If it is not, the first-run wizard and the
+# Bottles materialiser simply never run, for anybody, ever, and the build log says "enabled".
+#
+# Two deletions are each invisible without this: the `[ -e "$dir/$u" ] || die` after the ln, and the
+# `[ -f /usr/lib/systemd/user/$u ] || die` before it.
+EUU_FN="$(extract_fn "$W" enable_user_unit | rootify /usr/lib/systemd/user)"
+
+euu_run() { # <root> <unit> <create-unit: yes|no> [noln]
+  local root="$1" path="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" sdir
+  mkdir -p "$root/usr/lib/systemd/user"
+  [ "$3" = yes ] && printf '[Unit]\nDescription=%s\n[Install]\nWantedBy=graphical-session.target\n' "$2" \
+    > "$root/usr/lib/systemd/user/$2"
+  if [ "${4:-}" = noln ]; then
+    sdir="$root/lnbin"; mkdir -p "$sdir"
+    # An `ln` that exits 0 and creates nothing. The build would report "enabled user unit" and the
+    # wizard would never run on any machine.
+    stub "$sdir" ln <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    path="$sdir:$path"
+  fi
+  ROOT="$root" PATH="$path" AUROS_WRITTEN_LIST="$root/written" bash -c "$PRE
+auros_stamp(){ :; }
+$EUU_FN
+enable_user_unit '$2' graphical-session.target"
+}
+
+R="$(newroot)"
+run_check welcome.user-unit green "the unit exists and is enabled for graphical-session.target" \
+  -- euu_run "$R" auros-first-run.service yes
+assert_symlink_to "the .wants link is relative, pointing at the unit beside it" \
+  "$R/usr/lib/systemd/user/graphical-session.target.wants/auros-first-run.service" "../auros-first-run.service"
+assert_has "and reading through it reaches the real unit" "Description=auros-first-run.service" \
+  "$(cat "$R/usr/lib/systemd/user/graphical-session.target.wants/auros-first-run.service" 2>/dev/null || echo '<dangling>')"
+assert_has "the path is recorded for the mtime re-stamp" "graphical-session.target.wants" "$(cat "$R/written" 2>/dev/null || true)"
+
+# Idempotent: the build must be runnable twice over one filesystem (check S7).
+run_check welcome.user-unit green "running it a second time" -- euu_run "$R" auros-first-run.service yes
+
+R="$(newroot)"
+run_check welcome.user-unit red "the user unit was never installed" -- euu_run "$R" auros-bottles-setup.service no
+assert_has "names the file it could not find" "does not exist" "$T_LAST_OUT"
+
+# THE REFUSAL THAT HAD NO TEST: ln exits 0 and creates nothing.
+R="$(newroot)"
+run_check welcome.user-unit red "ln exits 0 and creates no link" -- euu_run "$R" auros-first-run.service yes noln
+assert_has "says it could not enable it" "could not enable" "$T_LAST_OUT"
+
+# And the two user units the layer actually ships must be the ones that pass.
+for uu in welcome/auros-first-run.service compat/auros-bottles-setup.service; do
+  assert_file "the repo ships $uu" "$D/$uu"
+done
+
 t_finish "40-windows-feel.sh"

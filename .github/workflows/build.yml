@@ -369,7 +369,11 @@ jobs:
             # identity of the filesystem itself — immune to compression settings and to the `created`
             # field, both of which vary for reasons that have nothing to do with what we built.
             sha256sum < "/tmp/chunked-$n.diffids" | cut -d' ' -f1 > "/tmp/chunked-$n.content"
-            sudo podman rmi "$raw" >/dev/null   # peak disk, not politeness
+            # NOT removed here. The S7 failure diagnostic inspects raw-a and raw-b to say WHY two
+            # builds differ, and deleting them first made it report "PACKAGE SETS ARE IDENTICAL
+            # (0 packages)" — a comparison of two empty lists, which is exactly the vacuous pass this
+            # repository keeps finding. They are removed after the comparison instead; disk was
+            # measured at ~110 GB free, and two raw images fit.
             df -h /
           }
 
@@ -408,8 +412,17 @@ jobs:
                 rpm -qa --qf '%{NAME}-%{EPOCH}:%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null \
                 | LC_ALL=C sort > "/tmp/pkgs-$v.txt" || echo "(could not read packages from raw-$v)"
             done
-            if diff -q /tmp/pkgs-a.txt /tmp/pkgs-b.txt >/dev/null 2>&1; then
-              echo "PACKAGE SETS ARE IDENTICAL ($(wc -l < /tmp/pkgs-a.txt | tr -d ' ') packages)."
+            NA=$(wc -l < /tmp/pkgs-a.txt 2>/dev/null | tr -d ' ' || echo 0)
+            NB=$(wc -l < /tmp/pkgs-b.txt 2>/dev/null | tr -d ' ' || echo 0)
+            if [ "${NA:-0}" -lt 100 ] || [ "${NB:-0}" -lt 100 ]; then
+              # A Fedora KDE image has thousands of packages. Fewer than a hundred means the read
+              # failed, not that the image is small — and "identical" computed from two empty lists is
+              # the vacuous pass this diagnostic exists to avoid producing.
+              echo "::error::could not read package sets (a=${NA}, b=${NB}). DRAWING NO CONCLUSION."
+              echo "The images may have been removed before this step, or the entrypoint override failed."
+              sudo podman images --format '{{.Repository}}:{{.Tag}}' | head -20
+            elif diff -q /tmp/pkgs-a.txt /tmp/pkgs-b.txt >/dev/null 2>&1; then
+              echo "PACKAGE SETS ARE IDENTICAL (${NA} packages)."
               echo "So the cause is (b): identical packages, different bytes. Look below for which files."
             else
               echo "::error::PACKAGE SETS DIFFER — dnf resolved differently between two builds in one run."
@@ -423,13 +436,21 @@ jobs:
                 sh -c 'find / -xdev -type f -printf "%p\t%s\t%T@\n" 2>/dev/null | LC_ALL=C sort' \
                 > "/tmp/files-$v.txt" 2>/dev/null || echo "(could not enumerate raw-$v)"
             done
-            diff /tmp/files-a.txt /tmp/files-b.txt | head -60 || true
+            FA=$(wc -l < /tmp/files-a.txt 2>/dev/null | tr -d ' ' || echo 0)
+            if [ "${FA:-0}" -lt 1000 ]; then
+              echo "::error::file enumeration produced ${FA} lines — the images were not readable. NO CONCLUSION."
+            else
+              echo "(enumerated ${FA} files per image)"
+              diff /tmp/files-a.txt /tmp/files-b.txt | head -60 || true
+            fi
             echo "--- differing paths, deduplicated, by directory ---"
             diff /tmp/files-a.txt /tmp/files-b.txt 2>/dev/null \
               | grep -E '^[<>]' | awk '{print $2}' | sed 's#/[^/]*$##' | LC_ALL=C sort | uniq -c \
               | sort -rn | head -20 || true
           fi
 
+          # Now the raw images have served their purpose — the diagnostic above has read them.
+          sudo podman rmi localhost/auros-base:raw-a localhost/auros-base:raw-b >/dev/null 2>&1 || true
           # Keep only build a. b has served its purpose and is 15 GB.
           sudo podman rmi localhost/auros-base:chunked-b >/dev/null 2>&1 || true
           df -h /

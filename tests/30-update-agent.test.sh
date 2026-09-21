@@ -467,7 +467,7 @@ group "the ExecStart drop-in — systemd APPENDS unless the drop-in clears it fi
 # `grep -qx 'ExecStart='` is an exact whole-line match for the CLEARING line. Weakened to `grep -q`
 # it matches `ExecStart=/usr/libexec/auros/auros-update` — the very line whose presence is not the
 # question — and can never fail.
-EXEC_BLOCK="$(extract_between "$U" "^grep -qx 'ExecStart='" 'does not clear ExecStart' \
+EXEC_BLOCK="$(extract_between "$U" "^grep -q.*'ExecStart='" 'does not clear ExecStart' \
   | rootify /usr/lib/systemd/system)"
 
 exec_run() { # <root> <drop-in body>

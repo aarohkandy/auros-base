@@ -459,18 +459,18 @@ mutate "U07: the registries.d more-specific-scope check is made never-match" \
        tests/30-update-agent.test.sh "MORE SPECIFIC scope under ours" <<'MUT'
 p = 'build/30-update-agent.sh'
 s = open(p).read()
-old = 'if grep -qE "^[[:space:]]*[\'\\"]?${AUROS_SCOPE}[\'\\"]?/" "$other"; then'
-assert old in s
-open(p, 'w').write(s.replace(old, 'if grep -qE "^@never@${AUROS_SCOPE}/" "$other"; then'))
+old = '}/" "$other"; then'
+assert s.count(old) == 1, "the more-specific-scope grep is no longer the only line of its shape"
+open(p, 'w').write(s.replace(old, '}/@never@" "$other"; then'))
 MUT
 
 mutate "U07b: the registries.d duplicate-scope check is made never-match" \
        tests/30-update-agent.test.sh "the SAME scope as ours" <<'MUT'
 p = 'build/30-update-agent.sh'
 s = open(p).read()
-old = 'if grep -qE "^[[:space:]]*[\'\\"]?${AUROS_SCOPE}[\'\\"]?:" "$other"; then'
-assert old in s
-open(p, 'w').write(s.replace(old, 'if grep -qE "^@never@${AUROS_SCOPE}:" "$other"; then'))
+old = '?:" "$other"; then'
+assert s.count(old) == 1, "the duplicate-scope grep is no longer the only line of its shape"
+open(p, 'w').write(s.replace(old, '?:@never@" "$other"; then'))
 MUT
 
 mutate "U08: enforce-container-sigpolicy is checked by name only, so '= false' ships" \
@@ -535,6 +535,37 @@ assert old in s
 open(p, 'w').write(s.replace(old, '[ -n "$actual" ] \\'))
 MUT
 
+mutate "W02: the welcome-page count drops to -ge 1, so the honest Windows-programs page can vanish" \
+       tests/40-windows-feel.test.sh "the honest page went missing" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '[ "$pages" -ge 2 ] || die'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ "$pages" -ge 1 ] || die'))
+MUT
+
+mutate "W06: enable_user_unit stops verifying the link, so the first-run wizard never runs for anyone" \
+       tests/40-windows-feel.test.sh "ln exits 0 and creates no link" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '  [ -e "$dir/$u" ] || die "could not enable $u for $t"'
+assert old in s
+i = s.index(old)
+j = s.index('\n', i)
+open(p, 'w').write(s[:i] + '  :' + s[j:])
+MUT
+
+mutate "W06b: enable_user_unit stops checking the unit file exists before linking to it" \
+       tests/40-windows-feel.test.sh "the user unit was never installed" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '  [ -f "/usr/lib/systemd/user/$u" ] || die "cannot enable $u'
+assert old in s
+i = s.index(old)
+j = s.index('\n', i)
+open(p, 'w').write(s[:i] + '  :' + s[j:])
+MUT
+
 printf '\n%s\n' "$(c 1 'build/90-cleanup.sh — the protected set')"
 
 mutate "an unknown kind in protected.list passes unconditionally again" \
@@ -571,6 +602,26 @@ s = open(p).read()
 old = '[ ! -e "$AUROS_BUILD_DIR" ] || die'
 assert old in s
 open(p, 'w').write(s.replace(old, '[ -e "$AUROS_BUILD_DIR" ] || true || die'))
+MUT
+
+mutate "X04: the no-protected.list fallback drops bootc, so an unpatchable image passes the gate" \
+       tests/90-cleanup.test.sh "bootc is gone" <<'MUT'
+p = 'build/90-cleanup.sh'
+s = open(p).read()
+old = '''  for c in bootc systemctl; do
+    have_cmd "$c" || fatal_missing="$fatal_missing cmd:$c"'''
+assert old in s
+open(p, 'w').write(s.replace(old, '''  for c in systemctl; do
+    have_cmd "$c" || fatal_missing="$fatal_missing cmd:$c"'''))
+MUT
+
+mutate "X05: build scratch files are no longer removed, so /tmp ships in the image" \
+       tests/90-cleanup.test.sh "no longer removes anything under /tmp" <<'MUT'
+p = 'build/90-cleanup.sh'
+s = open(p).read()
+old = 'rm -rf /tmp/* /var/tmp/* 2>/dev/null || true'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true'))
 MUT
 
 printf '\n%s\n' "$(c 1 'policy — the B5 rule')"
@@ -619,6 +670,15 @@ s = open(p).read()
 s2 = re.sub(r'^(a_suite_[a-z_]+ +)control', r'\1hard', s, flags=re.M)
 assert s2 != s
 open(p, 'w').write(s2)
+MUT
+
+mutate "P01: the base's default policy mode becomes 'locked', so every matrix result describes another image" \
+       tests/20-policy.test.sh "the base builds OPEN" <<'MUT'
+p = 'build/20-policy.sh'
+s = open(p).read()
+old = 'MODE="${AUROS_POLICY:-open}"'
+assert old in s
+open(p, 'w').write(s.replace(old, 'MODE="${AUROS_POLICY:-locked}"'))
 MUT
 
 printf '\n%s\n' "$(c 1 'the harness itself')"

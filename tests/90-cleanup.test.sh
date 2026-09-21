@@ -307,4 +307,105 @@ for f in "$REPO"/build/*.sh; do
   fi
 done
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the protected set — the FALLBACK, for when protected.list was not preserved"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# `plist=""` is not a hypothetical: the list is copied into the image by 10-hardening.sh, and this
+# script runs after the build context has been deleted. If that copy ever fails to arrive, the
+# fallback is the entire protected-set gate — and it is two command names. bootc is the one that
+# matters, because bootc IS the update path: an image without it can never be patched again, by
+# anyone, for the life of the machine.
+#
+# The loop group above always supplies the real list, so the fallback branch had never run.
+FALLBACK_BLOCK="$(extract_between "$C" '^if \[ -n "\$plist" \]; then' '^did "protected set intact"')"
+
+fallback_run() { # <present commands...>
+  local d c
+  d="$(stubdir)"
+  for c in "$@"; do printf '#!/usr/bin/env bash\nexit 0\n' > "$d/$c"; chmod 0755 "$d/$c"; done
+  # bash by absolute path: a PATH holding only the stubs cannot find bash either, and
+  # "env: bash: not found" is a red that a case expecting a refusal would score as a success.
+  env -i PATH="$d" HOME=/nonexistent "$BASH" -c "$PRE
+have_cmd()  { command -v \"\$1\" >/dev/null 2>&1; }
+have_pkg()  { return 1; }
+have_unit() { return 1; }
+plist=\"\"
+fatal_missing=\"\"
+pending_missing=\"\"
+check_one() { return 1; }
+$FALLBACK_BLOCK"
+}
+
+run_check protected.fallback green "no protected.list, and both fallback commands are present" -- fallback_run bootc systemctl
+assert_has "says the protected set is intact" "protected set intact" "$T_LAST_OUT"
+
+run_check protected.fallback red "no protected.list, and bootc is gone — an unpatchable image" -- fallback_run systemctl
+assert_has "refuses to produce the image" "PROTECTED SET BROKEN" "$T_LAST_OUT"
+assert_has "and names bootc"              "cmd:bootc"            "$T_LAST_OUT"
+assert_has "saying what it costs"         "never update"         "$T_LAST_OUT"
+
+run_check protected.fallback red "no protected.list, and systemctl is gone" -- fallback_run bootc
+assert_has "names systemctl" "cmd:systemctl" "$T_LAST_OUT"
+run_check protected.fallback red "no protected.list and neither command is present" -- fallback_run
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "build scratch files do not ship"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# `rm -rf /tmp/* /var/tmp/*` sits in the middle of the build-context removal and has no assertion
+# after it, so deleting it is completely silent. What it costs is not dramatic — leftover scratch
+# files are a determinism problem (check S7 builds twice and compares content digests) and a small
+# disclosure one, since whatever a build step happened to write to /tmp ships to a customer.
+#
+# The ctx group above deliberately seds this line OUT of the block before running it, because the
+# literal `/tmp/*` in a test running on a laptop is not something to point at the real /tmp. That
+# left the line itself untested by anything. Here the same block is run with /tmp and /var/tmp
+# REWRITTEN INTO THE FAKE ROOT instead of removed, so the line under test is the shipping line.
+SCRATCH_BLOCK="$(extract_between "$C" 'rm -rf "\$AUROS_BUILD_DIR"' 'did "removed the build context' \
+  | rootify /var/tmp /tmp)"
+SCRATCH_ROOTED=1
+case "$SCRATCH_BLOCK" in
+  *'$ROOT/tmp/'*) ;;
+  *) SCRATCH_ROOTED=0 ;;
+esac
+if [ "$SCRATCH_ROOTED" = 0 ]; then
+  bad "the build-inputs block no longer removes anything under /tmp — every build scratch file would ship in the image, and check S7 (build twice, compare content digests) would fail far from the cause"
+  note "the block was NOT executed: with nothing to rootify, its /tmp/* would have been the laptop's real /tmp"
+  _t_record cleanup.scratch red
+fi
+if [ "$SCRATCH_ROOTED" = 1 ]; then
+
+scratch_run() { # <root>
+  ROOT="$1" AUROS_BUILD_DIR="$1/tmp/auros-build" bash -c "$PRE
+$SCRATCH_BLOCK"
+}
+
+R="$(newroot)"
+mkdir -p "$R/tmp/auros-build/build" "$R/tmp/scratch" "$R/var/tmp"
+printf 'a package list step 20 wrote\n' > "$R/tmp/leftover"
+printf 'x\n'                            > "$R/tmp/scratch/nested"
+printf 'a tarball somebody downloaded\n' > "$R/var/tmp/leftover"
+# THE CONTROL. Without these, the four assertions below would be a test of their own fixture: an
+# empty /tmp is also a /tmp with nothing left in it, and `rm -rf` on nothing exits 0.
+assert_file "control: the fixture starts with a scratch file in /tmp"     "$R/tmp/leftover"
+assert_file "control: and a nested one"                                   "$R/tmp/scratch/nested"
+assert_file "control: and one in /var/tmp"                                "$R/var/tmp/leftover"
+
+run_check cleanup.scratch green "the build-inputs removal runs over a dirty /tmp" -- scratch_run "$R"
+assert_nofile "/tmp/leftover does not ship"     "$R/tmp/leftover"
+assert_nofile "nor does /tmp/scratch"           "$R/tmp/scratch"
+assert_nofile "nor does /var/tmp/leftover"      "$R/var/tmp/leftover"
+assert_nofile "and the build context is gone"   "$R/tmp/auros-build"
+assert_file   "while the directories themselves survive" "$R/tmp"
+
+fi
+
+t_exempt cleanup.scratch \
+  "the shipping line is \`rm -rf /tmp/* /var/tmp/* 2>/dev/null || true\` — deliberately non-fatal,
+       because a scratch file that will not delete is a determinism problem and not a reason to fail
+       an otherwise good build. It has no exit code of its own to score in two directions. The
+       direction is asserted on the FILESYSTEM instead: the fixture is built dirty (the three control
+       assertions above), the line is run, and the dirt must be gone. Removing the line makes those
+       assertions fail, which is the property this group exists for."
+
 t_finish "90-cleanup.sh"

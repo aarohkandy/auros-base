@@ -370,4 +370,59 @@ t_exempt policy.payload \
        every mode's assert.sh present and executable, every sudoers drop-in 0440, both entry points
        moved out of the payload — which is where a silent partial install would show."
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "build/20-policy.sh — which mode the BASE is built as, when nobody says"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# Spec §3: there is exactly one base image, and it is built `open`. Every matrix result for the base
+# — B1 and B12 especially — is a statement about an OPEN image, and a recipe selects its own mode in
+# a derived layer. Change the default and the matrix keeps passing while describing something else:
+# B12's "install an application through the GUI" would be measuring a locked image that forbids it.
+#
+# The default lives in one parameter expansion, `${AUROS_POLICY:-open}`, and nothing read it back.
+MODE_BLOCK="$(extract_between "$P" '^MODE="' '^record policy-mode')"
+
+mode_run() { # <root> [AUROS_POLICY value|'']
+  local root="$1"
+  mkdir -p "$root/libexec"
+  # A recording stub rather than the real apply-policy: what is under test is WHICH MODE the build
+  # asks for, not what apply-policy then does with it (policy/tests/ owns that).
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" > "%s/asked-for"\n' "$root" > "$root/libexec/apply-policy"
+  chmod 0755 "$root/libexec/apply-policy"
+  if [ -n "${2:-}" ]; then
+    LIBEXEC="$root/libexec" AUROS_POLICY="$2" bash -c "$PRE
+$MODE_BLOCK"
+  else
+    env -u AUROS_POLICY LIBEXEC="$root/libexec" bash -c "$PRE
+$MODE_BLOCK"
+  fi
+}
+
+R="$(newroot)"
+run_check policy.base-mode green "AUROS_POLICY is unset — the base builds OPEN" -- mode_run "$R" ''
+assert_eq  "apply-policy was asked for 'open'" "open" "$(cat "$R/asked-for" 2>/dev/null || true)"
+assert_has "and said which mode it was activating" "activating: open" "$T_LAST_OUT"
+assert_not "with no single-mode warning, because this is not a single-mode image" "single-mode image" "$T_LAST_OUT"
+
+# The override still has to work — a recipe building a locked image is the supported path, and it
+# must carry the ordering warning, because 40-windows-feel.sh runs afterwards and rewrites kdeglobals.
+R="$(newroot)"
+run_check policy.base-mode green "AUROS_POLICY=locked is honoured" -- mode_run "$R" locked
+assert_eq  "apply-policy was asked for 'locked'" "locked" "$(cat "$R/asked-for" 2>/dev/null || true)"
+assert_has "and the ordering hazard is stated"   "ORDERING HAZARD" "$T_LAST_OUT"
+
+R="$(newroot)"
+run_check policy.base-mode green "AUROS_POLICY=open explicitly is the same as unset" -- mode_run "$R" open
+assert_eq  "apply-policy was asked for 'open'" "open" "$(cat "$R/asked-for" 2>/dev/null || true)"
+assert_not "and no warning, because it IS the default" "single-mode image" "$T_LAST_OUT"
+
+# The refusal: apply-policy failing must stop the build. An image whose mode was never applied but
+# which still gets stamped is the worst of both.
+R="$(newroot)"
+mkdir -p "$R/libexec"; printf '#!/usr/bin/env bash\nexit 1\n' > "$R/libexec/apply-policy"; chmod 0755 "$R/libexec/apply-policy"
+run_check policy.base-mode red "apply-policy itself fails" -- bash -c "$PRE
+set -e
+LIBEXEC='$R/libexec'
+$MODE_BLOCK"
+
 t_finish "20-policy.sh"
