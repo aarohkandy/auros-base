@@ -9,7 +9,8 @@ separately called a `mirror` subcommand the script never had.
 Rule 1 (scripts): a single-line case arm `pat) WORD ... ;;` whose WORD is not a shell builtin/keyword,
 not on PATH and not in KNOWN_EXTERNALS must be a function defined in the script or in a file it
 sources. Multi-line arms are not parsed — ponytail: extend if a dispatcher ever uses them.
-Rule 2 (workflows): `./path/x.sh WORD` in .github/workflows/*.yml must name a case-arm pattern in x.sh.
+Rule 2 (workflows): `./path/x.sh WORD` in .github/workflows/*.yml must name a case-arm pattern in x.sh,
+when x.sh dispatches on case arms at all.
 """
 import os, re, shutil, subprocess, sys
 
@@ -88,7 +89,9 @@ def main(root, scripts):
                     problems.append(f".github/workflows/{f}:{n}: calls ./{script}, which does not exist")
                     continue
                 pats = {p.strip().strip("\"'") for _, pat, _ in arms(target) for p in pat.split("|")}
-                if word not in pats:
+                # A script with no case-arm dispatch takes positional arguments, not subcommands
+                # (probe-matrix-verdict.sh takes a directory). Only a dispatcher can lack a subcommand.
+                if pats and word not in pats:
                     problems.append(f".github/workflows/{f}:{n}: calls './{script} {word}', but {script} "
                                     f"dispatches only: {', '.join(sorted(p for p in pats if p not in ('*', '')))}")
     for p in problems:

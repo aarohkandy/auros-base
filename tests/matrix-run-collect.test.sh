@@ -204,6 +204,10 @@ group "completeness — a check that never reported is recorded as a fail, not o
 # it is short, and build.yml's only shape assertion is `checks|length > 0`. So the collector reads
 # checks.yaml and fills the gap with an explicit fail, which is both the honest verdict and the
 # thing that keeps the gate closed.
+# The static ids come from checks.yaml, not from this file: S11 was added and these counts broke.
+STATIC_IDS="$(python3 -c 'import yaml,sys; print(" ".join(c["id"] for c in yaml.safe_load(open(sys.argv[1]))["static"]))' "$REPO/matrix/checks.yaml")"
+N_STATIC="$(printf '%s\n' $STATIC_IDS | wc -l | tr -d ' ')"
+[ "$N_STATIC" -ge 10 ] || t_abort "read only [$N_STATIC] static ids from checks.yaml — the parse is wrong, not the collector"
 R9="$(mkrun)"
 cat > "$R9/checks/static.jsonl" <<'EOF'
 {"id":"S1","status":"pass","detail":"FROM pinned"}
@@ -215,16 +219,16 @@ run_check completeness green "a static phase that recorded only S1 and S2 still 
 assert_file "and it still wrote the fragment, so the evidence survives" "$R9/frag.json"
 assert_eq "S1's real verdict is preserved" "pass" "$(status_of "$R9/frag.json" S1)"
 assert_eq "S10, never reached, is recorded as a fail" "fail" "$(status_of "$R9/frag.json" S10)"
-assert_eq "all ten static ids are present" "10"   "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R9/frag.json" 2>/dev/null || echo '?')"
+assert_eq "every static id in checks.yaml is present" "$N_STATIC"   "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R9/frag.json" 2>/dev/null || echo '?')"
 assert_has "and the synthesised detail says the harness never reached it" "recorded NO verdict"   "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.checks.find(c=>c.id==="S10").detail)' "$R9/frag.json" 2>/dev/null || echo '')"
 
 # GREEN: a complete phase is left alone.
 R10="$(mkrun)"
-for id in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10; do
+for id in $STATIC_IDS; do
   printf '{"id":"%s","status":"pass","detail":"synthetic"}\n' "$id" >> "$R10/checks/static.jsonl"
 done
-run_check completeness green "a static phase with all ten ids passes through untouched" -- collect_phase "$R10" static "$R10/frag.json" static
-assert_eq "nothing was added" "10"   "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R10/frag.json" 2>/dev/null || echo '?')"
+run_check completeness green "a static phase with every id passes through untouched" -- collect_phase "$R10" static "$R10/frag.json" static
+assert_eq "nothing was added" "$N_STATIC"   "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R10/frag.json" 2>/dev/null || echo '?')"
 
 # The update phase's contract spans two sections of checks.yaml: `update` and `restore` (R1).
 R11="$(mkrun)"
