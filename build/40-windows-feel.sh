@@ -139,8 +139,11 @@ case "$PKG_MGR" in
   dnf5|dnf)
     # dnf4 spells it --noautoremove, dnf5 --no-autoremove. Probing beats guessing: guessing wrong
     # fails the whole base build on an option name.
-    if   "$PKG_MGR" remove --help 2>&1 | grep -q -- '--no-autoremove'; then RMFLAGS=(--no-autoremove)
-    elif "$PKG_MGR" remove --help 2>&1 | grep -q -- '--noautoremove';  then RMFLAGS=(--noautoremove)
+    # Captured, not `--help | grep -q`: under pipefail grep's early exit SIGPIPEs the help text and a
+    # supported flag reads as unsupported.
+    rmhelp="$("$PKG_MGR" remove --help 2>&1 || true)"
+    if   grep -q -- '--no-autoremove' <<<"$rmhelp"; then RMFLAGS=(--no-autoremove)
+    elif grep -q -- '--noautoremove' <<<"$rmhelp";  then RMFLAGS=(--noautoremove)
     else found "$PKG_MGR accepts neither --noautoremove nor --no-autoremove; removing without it"
     fi ;;
 esac

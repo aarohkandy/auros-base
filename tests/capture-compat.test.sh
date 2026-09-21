@@ -371,7 +371,7 @@ assert_has "webcam from USB interface class 0e"        "webcam=usb:04f2:b39a" "$
 
 # A marketing name can never appear, because nothing in the script has access to one: every id is
 # built from two four-hex-digit sysfs files. Asserted anyway, as the property rather than the code.
-if printf '%s' "$IDS" | grep -Eq '^([a-z]+=(pci|usb):[0-9a-f]{4}:[0-9a-f]{4}(,(pci|usb):[0-9a-f]{4}:[0-9a-f]{4})*)(;[a-z]+=(pci|usb):[0-9a-f]{4}:[0-9a-f]{4}(,(pci|usb):[0-9a-f]{4}:[0-9a-f]{4})*)*$'
+if grep -Eq '^([a-z]+=(pci|usb):[0-9a-f]{4}:[0-9a-f]{4}(,(pci|usb):[0-9a-f]{4}:[0-9a-f]{4})*)(;[a-z]+=(pci|usb):[0-9a-f]{4}:[0-9a-f]{4}(,(pci|usb):[0-9a-f]{4}:[0-9a-f]{4})*)*$' <<<"$IDS"
 then ok "every ids entry is role=bus:vvvv:dddd in lowercase hex"
 else bad "ids does not match the numeric shape compat-lint requires: [$IDS]"; fi
 

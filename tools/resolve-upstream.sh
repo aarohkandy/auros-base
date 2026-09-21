@@ -134,7 +134,7 @@ resolve_tag() {
   raw="$(skopeo inspect --raw "docker://${image}@${RESOLVED_DIGEST}")" || die "cannot read manifest"
   local mt
   mt="$(printf '%s' "$raw" | jq -r '.mediaType // ""')"
-  if printf '%s' "$mt" | grep -qE 'image.index|manifest.list'; then
+  if grep -qE 'image.index|manifest.list' <<<"$mt"; then
     # Multi-arch index: descend to our architecture before measuring, or we measure nothing.
     local child
     child="$(printf '%s' "$raw" \
@@ -169,7 +169,7 @@ read_containerfile_base() {
   CF_STYLE=""
   CF_REF=""
 
-  if printf '%s' "$from_line" | grep -qE '\$\{?BASE_IMAGE\}?'; then
+  if grep -qE '\$\{?BASE_IMAGE\}?' <<<"$from_line"; then
     CF_STYLE="build-arg"
     argdef="$(grep -E '^[[:space:]]*ARG[[:space:]]+BASE_IMAGE=' "$CONTAINERFILE" | head -1 || true)"
     if [ -n "$argdef" ]; then
@@ -215,7 +215,7 @@ cmd_assert() {
   say "S1: base.lock                    = ${image}@${locked}"
 
   # fails_on: any tag-only reference
-  if ! printf '%s' "$CF_REF" | grep -qE "@${DIGEST_RE}$"; then
+  if ! grep -qE "@${DIGEST_RE}$" <<<"$CF_REF"; then
     emit s1_status fail
     die "S1 FAIL — the base reference is not pinned by digest: '${CF_REF}'.
        A tag is a moving target. Two builds a day apart would be different operating systems wearing
@@ -234,7 +234,7 @@ cmd_assert() {
     # name — which is exactly why accepting it here is safe rather than a loophole.
     if [ -n "$mirror" ] && [ "$cf_image" = "$mirror" ]; then
       via="mirror"
-    elif [ -z "$mirror" ] && printf '%s' "$cf_image" | grep -qE '/auros-upstream-mirror$'; then
+    elif [ -z "$mirror" ] && grep -qE '/auros-upstream-mirror$' <<<"$cf_image"; then
       # No mirror name was supplied (a bare local run). Accept on the D21 naming convention and say
       # so out loud, so nobody reads this as the script having verified which mirror it is.
       via="mirror (accepted on name convention; no --mirror supplied to verify against)"

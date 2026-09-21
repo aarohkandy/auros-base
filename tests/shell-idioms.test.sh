@@ -67,5 +67,71 @@ hits=$(python3 "$HERE/tests/lib/local_selfref.py" "$HERE")
 if [ -z "$hits" ]; then ok "no local line reads a name it assigns in the same statement"
 else no "a local line reads a name it assigns in the same statement:"; printf '%s\n' "$hits" | sed 's/^/          /'; fi
 
+echo
+echo "producer | grep -q under pipefail (grep -q exits on the match, the producer dies of SIGPIPE, pipefail reports a MISS):"
+# Polarity decides the damage. `if ! x | grep -q GOOD; then fail` goes falsely RED. `if x | grep -q BAD;
+# then fail` goes falsely GREEN — a check that can never fail. prove-red.sh hit this 88/3000 on Linux.
+# D19 says every script sets pipefail, and libraries inherit it from whoever sources them, so every shell
+# file is scanned, not just the ones that spell out `pipefail`. Comment lines are skipped (they name the
+# idiom to warn against it). Plain substrings again: find "| grep -", then read the flag word after it
+# with shell string operations. No regex, for the reason at the top of this file.
+# ponytail: only the first flag word after grep is read, so `| grep -E -q` slips through; none exist today.
+sigpipe_scan() { # <dir> — prints file:line for every pipe into an early-exiting grep
+  local f line n pre rest flags
+  while IFS= read -r f; do
+    case "$f" in
+      *.sh) ;;
+      *) IFS= read -r line < "$f" || true
+         case "$line" in '#!'*sh*) ;; *) continue ;; esac ;;
+    esac
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      n=$((n+1))
+      case "${line#"${line%%[![:space:]]*}"}" in '#'*) continue ;; esac
+      rest="$line"
+      while [ "${rest#*| grep -}" != "$rest" ]; do
+        pre="${rest%%"| grep -"*}"; rest="${rest#*| grep -}"; flags="${rest%% *}"
+        case "$pre" in *'|') continue ;; esac   # `a || grep -q` is an or-list, not a pipe
+        case "$flags" in
+          -quiet*|-silent*) ;;   # --quiet / --silent
+          -*) continue ;;        # any other long option
+          *q*) ;;                # -q, -qE, -Eq, -qxF ...
+          *) continue ;;
+        esac
+        printf '%s:%s: %s\n' "${f#"$1"/}" "$n" "$line"; break
+      done
+    done < "$f"
+  done < <(grep -rlIF -e '| grep -' "$1" --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.github 2>/dev/null \
+           | grep -v '/tests/shell-idioms\.test\.sh$' || true)
+}
+
+# Prove the race is real, deterministically: the producer writes far more than a pipe holds, so after
+# grep -q has matched line 1 and gone, the producer's next write MUST hit SIGPIPE.
+rc=$(bash -c 'set -o pipefail; { echo BAD; seq 1 200000; } | grep -q BAD; echo $?')
+[ "$rc" = 141 ] && ok "confirmed: a MATCHING producer | grep -q returns 141 under pipefail (the bug is real)" \
+                || no "expected 141 from a matching pipe, got [$rc] — re-check this hazard"
+v=$(bash -c 'set -o pipefail; if { echo BAD; seq 1 200000; } | grep -q BAD; then echo RED; else echo GREEN; fi')
+[ "$v" = GREEN ] && ok "  ...so 'if x | grep -q BAD; then fail' reads GREEN with BAD in the output (the false pass)" \
+                 || no "  ...expected the false GREEN, got [$v]"
+rc=$(bash -c 'set -o pipefail; grep -q BAD <<<"$({ echo BAD; seq 1 200000; })"; echo $?')
+[ "$rc" = 0 ] && ok "the here-string form matches reliably" || no "here-string form gave [$rc]"
+
+# Prove the scan fires on planted examples, and stays quiet on the safe forms.
+PLANT="$(mktemp -d)"; trap 'rm -rf "$PLANT"' EXIT
+printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail' 'if journalctl -k | grep -qE "oops"; then echo bad; fi' > "$PLANT/planted"
+printf '%s\n' 'x() { kcmshell6 --list | grep -Eq "$1"; }' 'y() { dnf --help | grep --quiet flag; }' > "$PLANT/lib.sh"
+printf '%s\n' 'set -uo pipefail' 'grep -q oops <<<"$(journalctl -k)"' '  # never x | grep -q y' \
+              'n=$(x | grep -c y || true)' 'x | grep -v y | sort' 'a || grep -q b f' > "$PLANT/fine.sh"
+got=$(sigpipe_scan "$PLANT")
+case "$got" in *"planted:3:"*) ok "the scan catches a planted 'journalctl | grep -qE' in an extensionless script" ;;
+  *) no "the scan MISSED the planted example: [$got]" ;; esac
+case "$got" in *"lib.sh:1:"*) ok "  ...and 'grep -Eq' (q not first) in a sourced library" ;; *) no "  ...missed grep -Eq: [$got]" ;; esac
+case "$got" in *"lib.sh:2:"*) ok "  ...and 'grep --quiet'" ;; *) no "  ...missed grep --quiet: [$got]" ;; esac
+case "$got" in *"fine.sh"*) no "the scan flagged a safe form: [$got]" ;; *) ok "  ...and leaves here-strings, comments, grep -c and grep -v alone" ;; esac
+
+hits=$(sigpipe_scan "$HERE")
+if [ -z "$hits" ]; then ok "no pipe into grep -q anywhere in auros-base's shell"
+else no "pipe into grep -q (use: grep -q PATTERN <<<\"\$(producer)\", or capture first):"; printf '%s\n' "$hits" | sed 's/^/          /'; fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

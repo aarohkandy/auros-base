@@ -190,7 +190,9 @@ desktop_entry() { # first readable path for a desktop file id, across XDG_DATA_D
     done
     return 1
 }
-kcm_exists() { kcmshell6 --list 2>/dev/null | grep -qw -- "$1"; }
+# Here-string, not `kcmshell6 --list | grep -q`: under pipefail grep -q's early exit SIGPIPEs the
+# (long) listing and a present KCM reads as absent — in a `none` mode that is a false PASS.
+kcm_exists() { grep -qw -- "$1" <<<"$(kcmshell6 --list 2>/dev/null)"; }
 first_kcm() { local c; for c in "$@"; do kcm_exists "$c" && { printf '%s' "$c"; return 0; }; done; return 1; }
 backends() { find /usr/lib64/qt6/plugins/discover /usr/lib/qt6/plugins/discover \
                   /usr/lib64/qt5/plugins/discover /usr/lib/qt5/plugins/discover \
@@ -289,7 +291,7 @@ else
     fi
 
     if [[ -r /etc/flatpak/remotes.d/flathub.flatpakrepo ]] || \
-       flatpak remotes --system 2>/dev/null | grep -q '^flathub'; then
+       grep -q '^flathub' <<<"$(flatpak remotes --system 2>/dev/null)"; then
         pass "install-app/flathub" "Flathub configured system-wide"
     else
         fail "install-app/flathub" "no Flathub remote — Discover would open on an empty shop"

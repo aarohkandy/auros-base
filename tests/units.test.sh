@@ -19,7 +19,7 @@ PASS=0; FAIL=0
 KNOWN_LIST=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$' "$KNOWN")
 [ -n "$KNOWN_LIST" ] || { echo "units.known is empty — failing closed rather than passing vacuously"; exit 2; }
 
-is_known () { printf '%s\n' "$KNOWN_LIST" | grep -qxF "$1"; }
+is_known () { grep -qxF -- "$1" <<<"$KNOWN_LIST"; }
 
 # The enable list: the `for u in ... ; do auros_enable` block.
 ENABLED=$(sed -n '/^for u in /,/auros_enable/p' "$HERE/build/30-update-agent.sh" \

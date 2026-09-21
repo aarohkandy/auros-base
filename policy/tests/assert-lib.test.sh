@@ -80,7 +80,7 @@ reset; KDE_DOOR=open a_kde_door kde.konsole open konsole "konsole -e <script>" -
 reset; KDE_DOOR=shut a_kde_door kde.konsole open konsole "konsole -e <script>" -- -e @SCRIPT@ >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "open image + SHUT door => FAIL (the control catches a probe that can never succeed)" \
                   || no "open image + SHUT door => FAIL" "$(last)"
-printf '%s' "$(last)" | grep -q 'artefact of the probe' \
+grep -q 'artefact of the probe' <<<"$(last)" \
     && ok "  ...and says every KAuthorized denial elsewhere would be an artefact" \
     || no "  ...and says every KAuthorized denial elsewhere would be an artefact" "$(last)"
 
@@ -90,7 +90,7 @@ reset; KDE_DOOR=shut a_kde_door kde.konsole shut konsole "konsole -e <script>" -
 
 reset; KDE_DOOR=open a_kde_door kde.konsole shut konsole "konsole -e <script>" -- -e @SCRIPT@ >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "locked + OPEN door => FAIL — a shell ran through konsole" || no "locked + OPEN door => FAIL" "$(last)"
-printf '%s' "$(last)" | grep -q 'kdeglobals' \
+grep -q 'kdeglobals' <<<"$(last)" \
     && ok "  ...and names the kdeglobals ordering hazard as the usual cause" \
     || no "  ...and names the kdeglobals ordering hazard as the usual cause" "$(last)"
 
@@ -107,7 +107,7 @@ for rc in 0 3; do
 done
 reset; PK_RC=1 a_pk_not_hard_denied ctl org.example.action >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "open image answers pkcheck 1 => control FAILS" || no "open image answers pkcheck 1 => control FAILS" "$(last)"
-printf '%s' "$(last)" | grep -q 'artefact of the probe subject' \
+grep -q 'artefact of the probe subject' <<<"$(last)" \
     && ok "  ...and says a locked denial of that action would be an artefact" \
     || no "  ...and says a locked denial of that action would be an artefact" "$(last)"
 
@@ -128,14 +128,14 @@ reset; PK_RC=1 a_deny control net.enable org.freedesktop.NetworkManager.enable-d
 [ "$A_FAIL" = 0 ] && ok "a session-dependent action answering 1 on open is RECORDED, not a base failure" || no "session-dependent answering 1 is recorded" "$(last)"
 [ "${#A_CONTROL_NON_DISCRIMINATING[@]}" = 1 ] && ok "  ...and lands in the non-discriminating list" || no "  ...and lands in the non-discriminating list"
 reset; PK_RC=3 a_deny control net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
-printf '%s' "$(last)" | grep -q 'PROMOTE' && ok "  ...and says PROMOTE when the measurement shows it DOES discriminate" || no "  ...says PROMOTE" "$(last)"
+grep -q 'PROMOTE' <<<"$(last)" && ok "  ...and says PROMOTE when the measurement shows it DOES discriminate" || no "  ...says PROMOTE" "$(last)"
 reset; PK_RC=1 a_deny control root.pkexec-policy org.freedesktop.policykit.exec >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "a PRIMARY action answering 1 on open still FAILS the control" || no "a primary action answering 1 still fails" "$(last)"
 reset; PK_RC=1 a_deny hard net.enable org.freedesktop.NetworkManager.enable-disable-network session-dependent >/dev/null 2>&1
 [ "${#A_CORROBORATING[@]}" = 1 ] && ok "under locked it is counted as corroborating, not primary" || no "under locked it is corroborating"
 
 echo "── the update timer list is shared, and includes uupd (D22) ───────────────────────────────"
-printf '%s\n' "${A_UPDATE_TIMERS[@]}" | grep -qx 'uupd.timer' \
+grep -qx 'uupd.timer' <<<"$(printf '%s\n' "${A_UPDATE_TIMERS[@]}")" \
     && ok "A_UPDATE_TIMERS includes uupd.timer" || no "A_UPDATE_TIMERS includes uupd.timer"
 if grep -qE "for t in [^\"]*(bootc-fetch|rpm-ostreed)" "$HERE/../open/assert.sh"; then
     no "open/assert.sh still keeps its own hand-written timer list"
@@ -148,7 +148,7 @@ grep -q 'A_UPDATE_TIMERS' "$HERE/../open/assert.sh" \
 echo "── corroborating attempts are declared as such ─────────────────────────────────────────────"
 reset; a_corroborate c1 "a thing that fails everywhere" -- /usr/bin/false >/dev/null 2>&1
 [ "${#A_CORROBORATING[@]}" = 1 ] && ok "a_corroborate records the id for the a_finish summary" || no "a_corroborate records the id"
-printf '%s' "$(last)" | grep -q 'corroborating' && ok "  ...and labels the line" || no "  ...and labels the line" "$(last)"
+grep -q 'corroborating' <<<"$(last)" && ok "  ...and labels the line" || no "  ...and labels the line" "$(last)"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAILED"
 [ "$FAILED" -eq 0 ]

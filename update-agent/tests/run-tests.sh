@@ -301,8 +301,9 @@ then
 else
   bad "A6 auros-update captures an exit status through a negation -- there \$? is the NEGATION's status, which is 0 exactly when the command failed"
 fi
-if grep -n 'bootc_json | json_get' "$AU" | grep -qv '|| true'; then
-  bad "A6 a 'bootc_json | json_get' substitution is missing '|| true'; under set -e + pipefail it aborts the unit"
+unguarded="$(grep -n 'bootc_json | json_get' "$AU" | grep -v '|| true' || true)"
+if [ -n "$unguarded" ]; then
+  bad "A6 a 'bootc_json | json_get' substitution is missing '|| true'; under set -e + pipefail it aborts the unit: $unguarded"
 else
   ok "A6 every bootc_json|json_get substitution is guarded with || true"
 fi
@@ -521,7 +522,7 @@ assert_has "E5 Persistent is stated, not assumed" "Persistent=false" "$(body "$T
 SVCD="$UA/systemd/bootc-fetch-apply-updates.service.d/10-auros.conf"
 assert_has "E6 the service drop-in clears ExecStart before setting ours" "ExecStart=
 ExecStart=/usr/libexec/auros/auros-update" "$(body "$SVCD")"
-if body "$SVCD" | grep -q '^SuccessExitStatus='; then
+if grep -q '^SuccessExitStatus=' <<<"$(body "$SVCD")"; then
   bad "E7 SuccessExitStatus= is back. SuccessExitStatus=0 is a no-op (0 is already success) and implies a protection it does not provide."
 else
   ok "E7 no no-op SuccessExitStatus= line"

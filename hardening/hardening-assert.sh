@@ -85,14 +85,18 @@ else
     esac
   done
   [ -n "$svcs" ] && pass "zone auros inbound allowlist: $svcs"
-  if firewall-cmd --zone=auros --list-ports 2>/dev/null | grep -q '[0-9]'; then
-    fail "zone auros has open ports beyond the service allowlist: $(firewall-cmd --zone=auros --list-ports)"
+  ports="$(firewall-cmd --zone=auros --list-ports 2>/dev/null || true)"
+  if grep -q '[0-9]' <<<"$ports"; then
+    fail "zone auros has open ports beyond the service allowlist: $ports"
   fi
 fi
 
 # ── sudo: no passwordless escalation anywhere in the effective configuration ─────────────────────
-if grep -rlsE '^[^#]*NOPASSWD' "${R}/etc/sudoers" "${R}/etc/sudoers.d" 2>/dev/null | grep -q .; then
-  fail "NOPASSWD rule in force: $(grep -rlsE '^[^#]*NOPASSWD' "${R}/etc/sudoers" "${R}/etc/sudoers.d" 2>/dev/null | tr '\n' ' ')"
+# Captured, not piped to grep -q: pipefail + grep's exit 2 on any unreadable file (or a SIGPIPE) would
+# turn a real NOPASSWD hit into a pass. Any filename printed is a hit, whatever grep exited with.
+nopw="$(grep -rlsE '^[^#]*NOPASSWD' "${R}/etc/sudoers" "${R}/etc/sudoers.d" 2>/dev/null || true)"
+if [ -n "$nopw" ]; then
+  fail "NOPASSWD rule in force: $(tr '\n' ' ' <<<"$nopw")"
 else
   pass "no NOPASSWD sudo rule"
 fi

@@ -143,7 +143,7 @@ probe() {
 is_junk() { # <value> — true if this is a DMI placeholder rather than data
   local v; v="$(lc "$1")"
   [ -z "$v" ] && return 0
-  printf '%s' "$v" | grep -Eq "^(${DMI_JUNK})$"
+  grep -Eq "^(${DMI_JUNK})$" <<<"$v"
 }
 
 slug() { # TSV-safe identifier: no tabs, no runs of whitespace, no leading/trailing punctuation
