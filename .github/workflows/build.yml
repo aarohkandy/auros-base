@@ -37,19 +37,21 @@
 # WHAT REACHES THE REGISTRY, AND WHEN
 #
 #   stage-<run_id>   pushed early, UNSIGNED, so the parallel check jobs have something to pull.
-#                    A customer machine cannot install it: D8's in-image policy is sigstoreSigned for
-#                    the whole `ghcr.io/aarohkandy` scope, and an unsigned image fails that policy.
-#                    SAID PLAINLY, because it is easy to read the paragraph above as a guarantee it is
-#                    not: this push has no `if:` guard, so a same-repo pull request also pushes an
-#                    unsigned, as-yet-unchecked image into the customer-facing package, before the
-#                    static and boot jobs have run. Nothing can install it and nothing follows the
-#                    tag, but it is there and it accumulates until the cleanup job can delete it. The
-#                    fix that removes the accumulation rather than apologising for it is to stage into
-#                    a separate package; that is a change to how the check jobs are fed and is tracked
+#                    UNSIGNED ONLY UNTIL THE `sign` JOB RUNS. D8's in-image policy is sigstoreSigned
+#                    for the whole `ghcr.io/aarohkandy` scope, so while it is unsigned no machine will
+#                    install it. But `sign` signs the DIGEST this tag points at, and policy.json uses
+#                    `signedIdentity: matchRepository`, which accepts ANY tag in the repository. So from
+#                    the moment `sign` succeeds — before `update`, `record` and `publish` — the staging
+#                    tag IS INSTALLABLE by any machine pointed at it, whether or not the rest of the
+#                    run passes. If `update` (the rollback proof) then fails, that signed, ungated image
+#                    stays under this tag until the cleanup job deletes it, and it MUST be deleted.
+#                    A same-repo pull request also pushes here (no `if:` guard) but is never signed.
+#                    The fix that removes the exposure rather than describing it is to stage into a
+#                    separate package; that is a change to how the check jobs are fed and is tracked
 #                    rather than half-done here.
 #   <digest>         signed once static + boot are green, because U1-U5 need a real signature to
-#                    exercise the real enforcement path. A signed digest with no tag pointing at it is
-#                    not reachable by any machine that has not been hand-fed the digest.
+#                    exercise the real enforcement path. The staging tag above points at it, so it is
+#                    reachable by tag until cleanup deletes that tag — not only by hand-fed digest.
 #   :hardened        moved ONLY after tools/gate.mjs exits 0. This is the tag machines follow, so this
 #                    is the tag the gate protects.
 #
@@ -167,15 +169,32 @@ jobs:
         run: ./tools/resolve-upstream.sh assert --mirror '${{ steps.cfg.outputs.mirror }}'
 
       - name: Is D21 actually in force?
+        env:
+          BASE_VIA: ${{ steps.s1.outputs.base_via }}
+          MIRROR: ${{ steps.cfg.outputs.mirror }}
         run: |
-          # Not a gate — A1 owns the Containerfile and may not have flipped FROM to the mirror yet.
-          # But it must be visible, because the day it matters is the day upstream garbage-collects
-          # our pin and every build fails on an image nobody touched.
-          if [ '${{ steps.s1.outputs.base_via }}' = 'upstream' ]; then
-            echo "::warning::FROM still resolves against upstream, not the mirror. D21 says the pin is deleted by upstream's weekly GHCR cleanup after ~90 days or 7 newer stable tags. The mirror is populated by this run regardless, so flipping FROM to '${{ steps.cfg.outputs.mirror }}' is a one-line change in the Containerfile."
-          else
-            echo "D21 in force: FROM resolves via the mirror."
+          # D21 calls the mirror "not optional": upstream's weekly GHCR cleanup deletes our pin after
+          # ~90 days or 7 newer stable tags. This used to be only a ::warning::, lost in a fifty-minute
+          # build's log (SYSTEM-REVIEW §2.18, H6). Now it GATES, from the moment flipping is possible:
+          # if the mirror verifiably holds base.lock's digest and FROM still points upstream, the build
+          # stops. If the mirror is not (yet, or not visibly) populated, flipping would break the
+          # build, so that case stays a warning. Tested by tests/d21-gate.test.sh.
+          #
+          # Inspected by DIGEST, which is how the Containerfile would pin it, and anonymously: a mirror
+          # only an authenticated runner can pull does not keep a customer's fork buildable, which is
+          # the whole of D21's point.
+          if [ "$BASE_VIA" != 'upstream' ]; then
+            echo "D21 in force: FROM resolves via the mirror (${BASE_VIA})."
+            exit 0
           fi
+          DIGEST=$(grep -m1 -E '^UPSTREAM_DIGEST=sha256:[0-9a-f]{64}$' base.lock | cut -d= -f2) \
+            || { echo "::error::base.lock has no well-formed UPSTREAM_DIGEST, so whether D21 can be enforced is unknown"; exit 1; }
+          if skopeo inspect --raw "docker://${MIRROR}@${DIGEST}" >/dev/null 2>/tmp/mirror.err; then
+            echo "::error::D21 not in force: the mirror holds ${MIRROR}@${DIGEST} (skopeo inspect succeeded), but the Containerfile's FROM still resolves against upstream, which deletes that digest after ~90 days or 7 newer stable tags. Flip the FROM line to '${MIRROR}@${DIGEST}' — one line; resolve-upstream.sh assert already accepts it."
+            exit 1
+          fi
+          echo "::warning::FROM still resolves against upstream, and ${MIRROR}@${DIGEST} could not be inspected anonymously, so D21 cannot be enforced yet. A publishable run on main populates the mirror; from then on this step fails the build until FROM is flipped."
+          sed -n '1,5p' /tmp/mirror.err
 
       - name: Upstream drift (information, not a gate)
         run: |
@@ -293,6 +312,9 @@ jobs:
           # in every file mtime, and S7 would be measuring the clock rather than the build.
           SDE=$(git log -1 --pretty=%ct)
           echo "SOURCE_DATE_EPOCH=$SDE" >> "$GITHUB_ENV"
+          # The org.opencontainers.image.created label, which is what `bootc status` reports as the
+          # image's age. Derived from SDE, never from the clock, so both builds carry the same value.
+          echo "IMAGE_CREATED=$(date -u -d @"$SDE" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           echo "source_date_epoch=$SDE" >> "$GITHUB_OUTPUT"
           echo "SOURCE_DATE_EPOCH=$SDE ($(date -u -d @"$SDE" +%FT%TZ))"
 
@@ -306,7 +328,7 @@ jobs:
           # step fails, the build fails. Publishing an unflattened image would leave the product's
           # central claim ("we removed 214 packages") true on disk and false on the wire.
           # BASE_REF USED TO BE PASSED AS `--build-arg BASE_IMAGE=…` AND DID NOTHING.
-          # Containerfile declares only UPSTREAM_IMAGE / UPSTREAM_TAG / UPSTREAM_DIGEST /
+          # Containerfile declares only UPSTREAM_IMAGE / UPSTREAM_TAG / UPSTREAM_DIGEST / IMAGE_CREATED /
           # SOURCE_DATE_EPOCH, and its FROM is a hardcoded literal on purpose (Containerfile lines
           # 30-31: written as a literal so the digest is greppable without evaluating build args).
           # podman warns about an unused build-arg and carries on, so the flag looked like the D21
@@ -333,6 +355,7 @@ jobs:
             # build a's layer cache, so S7 compared an image with itself and reported PASS.
             sudo podman build --no-cache \
               --timestamp "$SOURCE_DATE_EPOCH" \
+              --build-arg IMAGE_CREATED="$IMAGE_CREATED" \
               -t "$raw" -f Containerfile . 2>&1 | tee "/tmp/build-$n.log"
             if grep -q 'Using cache' "/tmp/build-$n.log"; then
               echo "::error::build $n reused cached layers — S7 would compare an image with itself. Refusing."
@@ -358,6 +381,22 @@ jobs:
             # filesystem, chunk it with --rootfs, write an oci-archive, then pull that back into
             # storage. Fewer moving parts than reading and writing the same container store from
             # inside a container that is itself running out of that store.
+            # LABELS DO NOT SURVIVE THIS STEP ON THEIR OWN. With --rootfs, build-chunked-oci writes a
+            # fresh config from the filesystem: stage-35550863705 carried only containers.bootc,
+            # ostree.commit and ostree.final-diffid — none of the Containerfile's LABELs, so not
+            # image.created (what bootc reports as the image's age) and not base.digest either. So
+            # every LABEL the Containerfile declares is read back off the raw image and passed on
+            # with --label, the way ublue-os passes its labels to this same invocation
+            # (docs/evidence/research-dossiers.json). containers.bootc is skipped: --bootc sets it.
+            local -a label_args=()
+            local cfg k v
+            cfg="$(sudo skopeo inspect --config "containers-storage:$raw")"
+            for k in $(sed -nE 's/^LABEL ([^=[:space:]]+)=.*/\1/p' Containerfile); do
+              [ "$k" = containers.bootc ] && continue
+              v="$(jq -r --arg k "$k" '.config.Labels[$k] // empty' <<<"$cfg")"
+              [ -n "$v" ] || { echo "::error::the Containerfile declares LABEL $k but the built image has no value for it"; exit 1; }
+              label_args+=(--label "$k=$v")
+            done
             RECHUNK_DIR="$(mktemp -d "${RUNNER_TEMP}/rechunk-XXXXXX")"
             sudo podman run --rm --pull=never --privileged \
               --mount=type=image,src="$raw",target=/rpm-ostree \
@@ -365,13 +404,21 @@ jobs:
               --entrypoint /usr/bin/rpm-ostree \
               "$raw" \
               compose build-chunked-oci --bootc --max-layers 127 --format-version 2 \
+                "${label_args[@]}" \
                 --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci
             chunked="$(sudo podman pull -q "oci-archive:${RECHUNK_DIR}/chunked.oci")"
             sudo podman tag "$chunked" "$out"
             sudo rm -rf "$RECHUNK_DIR"
             echo "::endgroup::"
 
-            sudo skopeo inspect --config "containers-storage:$out" | jq -c '.rootfs.diff_ids' > "/tmp/chunked-$n.diffids"
+            sudo skopeo inspect --config "containers-storage:$out" > "/tmp/chunked-$n.config"
+            jq -c '.rootfs.diff_ids' "/tmp/chunked-$n.config" > "/tmp/chunked-$n.diffids"
+            # What a laptop will report as this image's age. Not Aurora's, not the chunker's clock.
+            got="$(jq -r '.config.Labels["org.opencontainers.image.created"] // "(absent)"' "/tmp/chunked-$n.config")"
+            if [ "$got" != "$IMAGE_CREATED" ]; then
+              echo "::error::the flattened image's org.opencontainers.image.created is ${got}, not ${IMAGE_CREATED} — bootc would report the wrong image age"
+              exit 1
+            fi
             # The content digest. diff_ids are the sha256 of each UNCOMPRESSED layer, so this is an
             # identity of the filesystem itself — immune to compression settings and to the `created`
             # field, both of which vary for reasons that have nothing to do with what we built.
@@ -529,7 +576,7 @@ jobs:
             echo "| upstream base | \`${{ needs.plan.outputs.base_ref }}\` |"
             echo "| content digest (S7) | \`${{ steps.s7.outputs.content_digest }}\` |"
             echo "| staging digest | \`${DIGEST}\` |"
-            echo "| staging tag | \`${IMAGE}:${STAGE_TAG}\` — unsigned, not installable |"
+            echo "| staging tag | \`${IMAGE}:${STAGE_TAG}\` — unsigned now; once the sign job signs this digest the tag IS installable, until cleanup deletes it |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -580,6 +627,11 @@ jobs:
   boot:
     name: boot · ${{ matrix.profile }}
     needs: [plan, build]
+    # An empty profile list expanded into a matrix makes GitHub REJECT the whole workflow at startup:
+    # zero jobs, nothing in --log-failed. The job-level if: is evaluated before the matrix is, so an
+    # empty list skips boot instead — and a skipped boot skips sign, update, record and publish, which
+    # all need it. No placeholder profile: booting a profile that does not exist would be a lie.
+    if: needs.plan.outputs.profiles != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -712,7 +764,9 @@ jobs:
           # D17 belt and braces: on the pinned 2.6 line this flag is already the default, but
           # passing it explicitly documents the intent at the call site and survives a version bump.
           FLAG='${{ steps.cosign.outputs.flag }}'
-          if [ -n "$FLAG" ] && ! cosign sign --help 2>&1 | grep -q -- "${FLAG%%=*}"; then
+          # A here-string, not `cosign sign --help | grep -q`: under pipefail grep -q exits on the match,
+          # cosign dies of SIGPIPE mid-write, and the MATCH reads as a miss — silently dropping the flag.
+          if [ -n "$FLAG" ] && ! grep -q -- "${FLAG%%=*}" <<<"$(cosign sign --help 2>&1)"; then
             echo "::warning::this cosign has no ${FLAG%%=*} flag; relying on S8 to prove the signature is still discoverable"
             FLAG=""
           fi
@@ -1175,6 +1229,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AUROS_DISPATCH_TOKEN || github.token }}
           IMAGE: ${{ needs.plan.outputs.image }}
+          SIGN_RESULT: ${{ needs.sign.result }}
         run: |
           # THIS USED TO BE `echo "would remove tag ${T}"`, which is not a cleanup job, it is a
           # picture of one. D19: a step that cannot fail is not a check, and a step that cannot act
@@ -1184,13 +1239,27 @@ jobs:
           PKG="${IMAGE##*/}"                 # ghcr.io/<org>/<name> -> <name>
           ORG="${IMAGE%/*}"; ORG="${ORG##*/}"
 
+          # What it means that the tag stays (SYSTEM-REVIEW §2.16). `sign` signs the digest this tag
+          # points at, and policy.json's matchRepository accepts any tag in the repository — so once
+          # sign has run, a staging tag left behind is an INSTALLABLE image that may never have passed
+          # update/record/publish. This used to say "unsigned and cannot be installed" in every case,
+          # which is the one message read during an incident, reassuring about the one case that is not.
+          stays () { # <how the operator deletes it>
+            if [ "${SIGN_RESULT}" = skipped ]; then
+              echo "::warning::the staging tag ${IMAGE}:${STAGE_TAG} stays. The sign job did not run, so it is unsigned and no machine will install it; it still accumulates — $1"
+            else
+              echo "::error::the staging tag ${IMAGE}:${STAGE_TAG} stays, and the sign job ran (result: ${SIGN_RESULT}), so this digest may be SIGNED. A signed staging tag IS INSTALLABLE by any machine pointed at it (policy.json matches the repository, not the tag), whether or not update/record/publish passed. It must be deleted — $1"
+            fi
+          }
+
           # Find the package version whose tags include our staging tag. A version id is required;
           # GHCR has no delete-by-tag endpoint.
           if ! gh api --paginate \
                 "/orgs/${ORG}/packages/container/${PKG}/versions" > /tmp/versions.json 2>/tmp/versions.err \
              && ! gh api --paginate \
                 "/users/${ORG}/packages/container/${PKG}/versions" > /tmp/versions.json 2>>/tmp/versions.err; then
-            echo "::warning::could not list versions of ${IMAGE}; the staging tag ${STAGE_TAG} stays. It is unsigned and cannot be installed."
+            echo "could not list versions of ${IMAGE}"
+            stays "find the version tagged ${STAGE_TAG} under the ${PKG} package's versions on GitHub and delete it."
             sed -n '1,20p' /tmp/versions.err
             exit 0
           fi
@@ -1207,7 +1276,8 @@ jobs:
               exit 0
             fi
           done
-          echo "::warning::could not delete ${IMAGE}:${STAGE_TAG} (version ${ID}) — the token lacks delete:packages. The tag stays; it is unsigned and cannot be installed, but it does accumulate."
+          echo "could not delete ${IMAGE}:${STAGE_TAG} (version ${ID}) — the token lacks delete:packages."
+          stays "gh api -X DELETE /orgs/${ORG}/packages/container/${PKG}/versions/${ID} (or /users/${ORG}/...) with a token that has delete:packages."
           sed -n '1,20p' /tmp/del.err
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════

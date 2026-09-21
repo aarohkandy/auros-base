@@ -71,8 +71,8 @@ The four layers that actually hold, per PLAN.md §3.2 — the CI gate is only th
 
 | Ref | When | Signed? | Reachable by a customer? |
 |---|---|---|---|
-| `:stage-<run_id>` | before any check runs | **no** | No. D8's in-image policy is `sigstoreSigned` for the whole `ghcr.io/aarohkandy` scope, so an unsigned image fails it. |
-| `@sha256:…` | after static + boot pass | yes | Only by someone who hand-types the digest. No tag points at it. |
+| `:stage-<run_id>` | before any check runs | **no, until `sign` runs — then yes** | Not while unsigned (D8's policy is `sigstoreSigned` for the whole `ghcr.io/aarohkandy` scope). **Yes once `sign` has signed its digest**: `signedIdentity: matchRepository` accepts any tag, so from then until `cleanup` deletes it this tag is installable even if `update`/`record`/`publish` fail. A staging tag that `cleanup` could not delete after a signed run must be deleted by hand (SYSTEM-REVIEW §2.16). |
+| `@sha256:…` | after static + boot pass | yes | By the staging tag above until it is deleted, and by anyone who has the digest. |
 | `:hardened`, `:<date>`, `:<sha12>` | after `gate.mjs` exits 0 | yes | **Yes.** This is the tag machines follow, so this is the tag the gate protects. |
 
 ### Signing is keyed, not keyless — and that is not the instruction I was given

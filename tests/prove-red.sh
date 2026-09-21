@@ -817,6 +817,49 @@ assert old in s
 open(p, 'w').write(s.replace(old, 'MODE="${AUROS_POLICY:-locked}"'))
 MUT
 
+printf '\n%s\n' "$(c 1 'workflow run: blocks — pipe into grep -q under pipefail')"
+
+mutate "build.yml's cosign flag probe goes back to piping its --help into grep -q (SIGPIPE drops the flag)" \
+       tests/shell-idioms.test.sh "build.yml:" <<'MUT'
+p = '.github/workflows/build.yml'
+s = open(p).read()
+old = '! grep -q -- "${FLAG%%=*}" <<<"$(cosign sign --help 2>&1)"'
+assert old in s
+# The pipe is chr(124) so this file does not itself carry the idiom shell-idioms.test.sh scans for.
+open(p, 'w').write(s.replace(old, '! cosign sign --help 2>&1 ' + chr(124) + ' grep -q -- "${FLAG%%=*}"'))
+MUT
+
+printf '\n%s\n' "$(c 1 'D21 — the mirror gate in build.yml plan')"
+
+mutate "H6: D21 goes back to a ::warning:: when the mirror is populated and FROM still points upstream" \
+       tests/d21-gate.test.sh "the build FAILS" <<'MUT'
+p = '.github/workflows/build.yml'
+s = open(p).read()
+old = "resolve-upstream.sh assert already accepts it.\"\n            exit 1\n"
+assert old in s
+open(p, 'w').write(s.replace(old, "resolve-upstream.sh assert already accepts it.\"\n"))
+MUT
+
+printf '\n%s\n' "$(c 1 'org.opencontainers.image.created — the image age bootc reports')"
+
+mutate "the image.created LABEL is dropped, so laptops report Aurora's build date" \
+       tests/image-created.test.sh "the shipping Containerfile" <<'MUT'
+p = 'Containerfile'
+s = open(p).read()
+old = 'LABEL org.opencontainers.image.created="${IMAGE_CREATED}"\n'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "the flatten stops refusing a declared LABEL the built image lacks" \
+       tests/image-created.test.sh "missing a declared label" <<'MUT'
+p = '.github/workflows/build.yml'
+s = open(p).read()
+old = '[ -n "$v" ] || { echo "::error::the Containerfile declares LABEL $k but the built image has no value for it"; exit 1; }'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ -n "$v" ] || continue'))
+MUT
+
 printf '\n%s\n' "$(c 1 'the harness itself')"
 
 mutate "an extraction stops matching — the suite must ABORT, not quietly test an empty program" \

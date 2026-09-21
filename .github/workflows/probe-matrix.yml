@@ -246,7 +246,7 @@ jobs:
           echo "──── are the three flags vm.sh passes present? ────"
           H=$(sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" build --help 2>&1 || true)
           for f in --type --rootfs --local --config; do
-            printf '%-10s %s\n' "$f" "$(printf '%s' "$H" | grep -qE -- "$f" && echo present || echo 'NOT IN --help')"
+            printf '%-10s %s\n' "$f" "$(grep -qE -- "$f" <<<"$H" && echo present || echo 'NOT IN --help')"
           done
 
       - name: Build the trivial derivative
