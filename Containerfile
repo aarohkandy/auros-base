@@ -29,7 +29,7 @@
 #
 # Written as a literal rather than through an ARG so that the digest is greppable from this line by a
 # checker that does not have to evaluate build arguments to find it.
-FROM ghcr.io/ublue-os/aurora@sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a43dc28d0d2f1
+FROM ghcr.io/aarohkandy/auros-upstream-mirror@sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a43dc28d0d2f1
 
 # Same three values again, as build arguments, so the build scripts and the OCI labels can see them.
 # 00-common.sh compares UPSTREAM_DIGEST against base.lock and fails the build on a mismatch.
