@@ -15,7 +15,16 @@ function parseArgs(a) {
   for (let i = 0; i < a.length; i++) {
     if (!a[i].startsWith('--')) continue;
     const k = a[i].slice(2);
-    const v = a[i + 1] && !a[i + 1].startsWith('--') ? a[++i] : 'true';
+    // `a[i + 1] &&` was the bug, and it cost S3 on every base build. run-static.sh passes
+    // `--recipe ""` for a base image; an EMPTY STRING is falsy, so the flag was treated as a bare
+    // boolean and took the literal value 'true'. `isBase` then read the recipe name as "true",
+    // S3 stopped holding vacuously over zero packages, and the check recorded
+    //   FAIL  recipe "true" resolved an EMPTY removal set
+    // on an image that has no recipe and is not supposed to remove anything. Measured on a real run
+    // against a bare derivative; the hardened base would have failed S3 the same way, forever.
+    // PRESENCE, not truthiness: only an absent token or the next flag ends an option.
+    const next = a[i + 1];
+    const v = next !== undefined && !next.startsWith('--') ? a[++i] : 'true';
     o[k] = v;
   }
   return o;

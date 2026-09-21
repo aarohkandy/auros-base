@@ -24,6 +24,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN="${HERE}/run"
+MATRIX_CHECKS="${HERE}/checks.yaml"
 
 PHASE=''; IMAGE=''; DIGEST=''; PROFILE=''; OUT=''; CHECKS=''; PROFILES=''
 declare -a PASSTHRU=()
@@ -68,27 +69,44 @@ else
 fi
 mkdir -p "$(dirname "$OUT")"
 
+# THE IMPLEMENTATION'S EXIT STATUS IS CAPTURED, NEVER ALLOWED TO KILL THIS SCRIPT.
+#
+# Every run-*.sh ends by exiting non-zero when any check failed — correctly, because that is how a
+# caller learns the phase did not pass. But this script runs under `set -e`, so that exit used to
+# abort it AT THE INVOCATION LINE, before the collector below ever ran. The result: on any run with
+# a single failing check, NO FRAGMENT WAS WRITTEN AT ALL. The ten verdicts run-static.sh had just
+# recorded went into the run directory and nowhere else, and build.yml's next line —
+# `jq -e ... fragments/static.json` — failed with "no such file", naming no check.
+#
+# build.yml's update job even carries the comment "A non-zero harness still writes a fragment
+# recording WHICH checks failed, and that fragment is what the gate reads." It did not. Measured on
+# a real run: 10 checks recorded, 7 failed, fragments/ empty.
+#
+# So: capture the status, ALWAYS collect, and re-raise afterwards. A failing phase must leave
+# evidence naming what failed; that is the entire purpose of the fragment.
+PHASE_RC=0
 case "$PHASE" in
   static)
     [ -x "$RUN/run-static.sh" ] || die "matrix/run/run-static.sh is absent"
-    "$RUN/run-static.sh" --image "$IMAGE" ${DIGEST:+--digest "$DIGEST"} --out "$WORKDIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}"
+    "$RUN/run-static.sh" --image "$IMAGE" ${DIGEST:+--digest "$DIGEST"} --out "$WORKDIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}" || PHASE_RC=$?
     FRAG_PROFILE='static'
     ;;
   boot)
     [ -n "$PROFILE" ] || die "--profile is required for the boot phase"
     [ -x "$RUN/run-boot.sh" ] || die "matrix/run/run-boot.sh is absent"
-    "$RUN/run-boot.sh" --profile "$PROFILE" --image "$IMAGE" --out "$WORKDIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}"
+    "$RUN/run-boot.sh" --profile "$PROFILE" --image "$IMAGE" --out "$WORKDIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}" || PHASE_RC=$?
     FRAG_PROFILE="$PROFILE"
     ;;
   update)
     [ -x "$RUN/run-update.sh" ] || die "matrix/run/run-update.sh is absent"
-    "$RUN/run-update.sh" --image "$IMAGE" ${PROFILE:+--profile "$PROFILE"} --out "$WORKDIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}"
+    "$RUN/run-update.sh" --image "$IMAGE" ${PROFILE:+--profile "$PROFILE"} --out "$WORKDIR" "${PASSTHRU[@]+"${PASSTHRU[@]}"}" || PHASE_RC=$?
     FRAG_PROFILE="${PROFILE:-update}"
     ;;
   *)
     die "unknown phase '$PHASE' — expected static, boot or update"
     ;;
 esac
+[ "$PHASE_RC" = 0 ] || echo "matrix/run.sh: the ${PHASE} implementation exited ${PHASE_RC}; collecting its records anyway so the fragment says WHICH checks failed" >&2
 
 # The harness writes its per-check results under the run directory. Collect them into the single
 # fragment shape build.yml merges: { profile, checks: [ {id, status, detail, duration_ms} ] }.
@@ -108,9 +126,20 @@ esac
 # U1 — could ever have reached a verdict, on any image, however perfect. The matrix had never been
 # run, so nothing had ever contradicted it. Reproduced on a two-line synthetic `static.jsonl` before
 # this fix, and the same file is what the meta-test now replays.
-node - "$WORKDIR" "$FRAG_PROFILE" "$DIGEST" "$OUT" <<'NODE'
+# `--checks` used to be accepted "for interface stability" and ignored. It is read now: the
+# collector asserts that every id checks.yaml declares for this phase actually reached a verdict,
+# and records a fail for any that did not. A phase that stopped halfway used to be indistinguishable
+# from one that ran to the end, because both produced a fragment full of real records.
+CHECKS_FILE_FOR_COLLECTOR="$MATRIX_CHECKS"
+if [ -n "$CHECKS" ]; then
+  if [ -f "$CHECKS" ]; then CHECKS_FILE_FOR_COLLECTOR="$CHECKS"
+  else die "--checks '$CHECKS' does not exist. The matrix definition is what 'complete' means; guessing past a missing one is how a half-run phase reads as a full one."; fi
+fi
+[ -f "$CHECKS_FILE_FOR_COLLECTOR" ] || die "no matrix definition at $CHECKS_FILE_FOR_COLLECTOR"
+
+node - "$WORKDIR" "$FRAG_PROFILE" "$DIGEST" "$OUT" "$PHASE" "$CHECKS_FILE_FOR_COLLECTOR" <<'NODE'
 const fs = require('node:fs'), path = require('node:path')
-const [dir, profile, digest, out] = process.argv.slice(2)
+const [dir, profile, digest, out, phase, checksYaml] = process.argv.slice(2)
 
 const checks = []
 const unreadable = []
@@ -182,6 +211,35 @@ for (const c of checks) {
   const prev = best.get(c.id)
   if (!prev || rank[c.status] > rank[prev.status]) best.set(c.id, c)
 }
+// ── COMPLETENESS. A check that never reported did not pass. ─────────────────────────────────────
+// checks.yaml is the contract; this reads it and fails any id the phase never reached, rather than
+// letting a truncated run look like a short one. The `restore` section rides with `update`, because
+// run-update.sh records R1 and build.yml merges it into the update fragment.
+const SECTIONS = { static: ['static'], boot: ['boot'], update: ['update', 'restore'] }[phase] ?? []
+const declared = []
+if (SECTIONS.length) {
+  let section = null
+  for (const l of fs.readFileSync(checksYaml, 'utf8').split('\n')) {
+    const top = /^([a-z_]+):\s*$/.exec(l)
+    if (top) { section = top[1]; continue }
+    const m = /^\s+- id:\s*([A-Za-z0-9]+)\s*$/.exec(l)
+    if (m && SECTIONS.includes(section)) declared.push(m[1])
+  }
+  if (!declared.length) {
+    console.error(`matrix/run.sh: parsed ZERO check ids for phase "${phase}" out of ${checksYaml}.`)
+    console.error('  The matrix definition is what "complete" means. A definition we cannot read is not an empty one.')
+    process.exit(1)
+  }
+}
+for (const id of declared) {
+  if (best.has(id)) continue
+  best.set(id, {
+    id,
+    status: 'fail',
+    detail: `the ${phase} phase recorded NO verdict for ${id}. checks.yaml declares it, the harness never reached it, and an absent answer is a failure rather than an unknown. The implementation exited before this point — read the run directory's logs, not this string, for where.`,
+  })
+}
+
 const merged = [...best.values()].sort((a, b) => a.id.localeCompare(b.id))
 
 if (merged.length === 0) {
@@ -204,4 +262,15 @@ console.error(`matrix/run.sh: ${merged.length} checks -> ${out} (${bad.length} n
 NODE
 
 FAILED=$(node -e 'const j=require(process.argv[1]);process.stdout.write(String(j.checks.filter(c=>c.status!=="pass").length))' "$OUT")
-[ "$FAILED" = "0" ] || { echo "matrix/run.sh: phase '$PHASE' had $FAILED non-passing check(s)" >&2; exit 1; }
+if [ "$FAILED" != "0" ]; then
+  echo "matrix/run.sh: phase '$PHASE' had $FAILED non-passing check(s) — see $OUT" >&2
+  exit 1
+fi
+if [ "$PHASE_RC" != 0 ]; then
+  # Every recorded check passed and the implementation still exited non-zero. That is not a check
+  # failure, it is the harness falling over somewhere it does not record — which is worse, because
+  # it is the state that would otherwise be reported as a clean pass.
+  echo "matrix/run.sh: every check in $OUT passed, but the ${PHASE} implementation exited ${PHASE_RC}." >&2
+  echo "  A harness that fails outside the checks is not a passing run. Refusing to report one." >&2
+  exit "$PHASE_RC"
+fi
