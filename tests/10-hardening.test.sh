@@ -491,6 +491,13 @@ $CM_BLOCK"
 }
 cm_repo() { printf '[%s]\nname=%s\nbaseurl=https://example.invalid/%s\nenabled=1\ncountme=%s\ngpgcheck=1\n' "$1" "$1" "$1" "$2"; }
 
+# PORTABILITY NOTE, so a future reader does not add a case that fails on half the machines: the
+# shipping patterns use `\s`, which is GNU. On a BSD sed/grep `\s` is not a whitespace class, so
+# `^\s*countme` degenerates to `^s*countme` — which still matches `countme=1` at column 0 and would
+# NOT match `  countme=1`. Every fixture here therefore writes the key at column 0, where the two
+# interpretations agree, so these cases mean the same thing on the image (GNU) and on the laptop.
+# The leading-whitespace case is deliberately absent rather than silently host-dependent.
+
 # EXACTLY ONE. The common case, and the one an off-by-one guard skips.
 R="$(newroot)"; mkdir -p "$R/etc/yum.repos.d"; cm_repo fedora 1 > "$R/etc/yum.repos.d/fedora.repo"
 run_check hardening.countme green "exactly ONE repository file has countme=1" -- cm_run "$R"
