@@ -60,7 +60,10 @@ mutate() { # <label> <suite> [expect-substring]
     printf '  %s %s\n' "$(c 31 'NOT CAUGHT')" "$label"
     printf '        %s\n' "$(c 31 "$suite stayed GREEN with the bug reintroduced — that test is decoration")"
     FAIL=$((FAIL+1)); FAILED+=("$label")
-  elif [ -n "$expect" ] && ! printf '%s' "$out" | grep -qF -- "$expect"; then
+  # A here-string, not `printf | grep -q`: under pipefail, grep -q exiting on an early match kills
+  # printf mid-write with SIGPIPE (141) and the MATCH reads as a miss. A 42 KB suite output with the
+  # expected text in its first 4 KB made "no image-name check" a WRONG RED in 1-3% of runs on Linux.
+  elif [ -n "$expect" ] && ! grep -qF -- "$expect" <<<"$out"; then
     printf '  %s %s\n' "$(c 31 'WRONG RED')" "$label"
     printf '        %s\n' "the suite failed, but not on [$expect] — it may be failing for an unrelated reason"
     printf '%s\n' "$out" | grep -E 'FAIL|ABORT' | head -5 | sed 's/^/        /'
