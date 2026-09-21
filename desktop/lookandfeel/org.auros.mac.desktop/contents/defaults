@@ -1,0 +1,39 @@
+# Auros look-and-feel defaults — the top-bar-and-dock (Mac-style) layout.  Same format and the same
+# appearance values as org.auros.windows.desktop/contents/defaults, whose header explains why we keep
+# Breeze rather than imitate anybody.  Two things differ: the package id, and the window buttons.
+#
+# NOTE: plasma-apply-lookandfeel reads only the groups libklookandfeel knows (kdeglobals KDE/General/
+# Icons, plasmarc Theme, kcminputrc Mouse, kwinrc decoration and switchers).  SingleClick is kept for
+# parity with the Windows package, but what actually enforces double-click is /etc/xdg/kdeglobals.
+
+[kdeglobals][KDE]
+LookAndFeelPackage=org.auros.mac.desktop
+widgetStyle=Breeze
+SingleClick=false
+
+[kdeglobals][General]
+ColorScheme=BreezeLight
+
+[kdeglobals][Icons]
+Theme=breeze
+
+[plasmarc][Theme]
+name=breeze
+
+[kcminputrc][Mouse]
+cursorTheme=breeze_cursors
+
+# Close, minimise, maximise on the LEFT of the title bar, in that order, which is where someone coming
+# from a Mac reaches for them.  Letters are KWin's (kwin src/decorations/settings.cpp s_buttonNames:
+# X close, I minimise, A maximise, _ spacer).  libklookandfeel applies both keys as the TitlebarLayout
+# content (klookandfeelmanager.cpp, "kwinrc/org.kde.kdecoration2" ButtonsOnLeft/ButtonsOnRight).
+#
+# ButtonsOnRight is a lone spacer, NOT empty.  KConfig falls back to the default when a value is null,
+# and KWin's default right-hand side is HIAX; whether an empty INI value reads as null was not
+# verified, and if it does the window would get a second close button on the right.  "_" is a real
+# value that draws nothing.
+[kwinrc][org.kde.kdecoration2]
+library=org.kde.breeze
+theme=Breeze
+ButtonsOnLeft=XIA
+ButtonsOnRight=_

@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Auros"
+            }
+        ],
+        "Category": "",
+        "Description": "A deliberately small Plasma desktop for young children, older adults and first-time users: one tall bar along the bottom with three large app buttons, a menu, and the clock. Double-click to open.",
+        "Id": "org.auros.simple.desktop",
+        "License": "LicenseRef-Proprietary",
+        "Name": "Auros Simple",
+        "Version": "1.0",
+        "Website": "https://github.com/aarohkandy/auros-base"
+    },
+    "X-KDE-PluginInfo-Category": "",
+    "X-Plasma-MainScript": "defaults",
+    "ServiceTypes": [
+        "Plasma/LookAndFeel"
+    ]
+}

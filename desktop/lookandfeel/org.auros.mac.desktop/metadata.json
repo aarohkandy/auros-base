@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Auros"
+            }
+        ],
+        "Category": "",
+        "Description": "A Plasma desktop in the shape Mac users know: a bar along the top with the menu, the running application's own menus, status and the clock, and a centred dock of pinned and open apps along the bottom. Window buttons on the left. Double-click to open.",
+        "Id": "org.auros.mac.desktop",
+        "License": "LicenseRef-Proprietary",
+        "Name": "Auros Top Bar and Dock",
+        "Version": "1.0",
+        "Website": "https://github.com/aarohkandy/auros-base"
+    },
+    "X-KDE-PluginInfo-Category": "",
+    "X-Plasma-MainScript": "defaults",
+    "ServiceTypes": [
+        "Plasma/LookAndFeel"
+    ]
+}

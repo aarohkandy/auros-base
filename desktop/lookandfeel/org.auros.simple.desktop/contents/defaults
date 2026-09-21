@@ -1,0 +1,31 @@
+# Auros look-and-feel defaults — the simple layout.  Same format and the same appearance values as
+# org.auros.windows.desktop/contents/defaults, whose header explains why we keep Breeze rather than
+# imitate anybody.  Only the package id differs: what makes this layout different is the panel, and
+# the panel lives in contents/layouts/, not here.
+#
+# NOTE: plasma-apply-lookandfeel reads only the groups libklookandfeel knows (kdeglobals KDE/General/
+# Icons, plasmarc Theme, kcminputrc Mouse, kwinrc decoration and switchers).  SingleClick is kept for
+# parity with the Windows package, but what actually enforces double-click is /etc/xdg/kdeglobals.
+
+[kdeglobals][KDE]
+LookAndFeelPackage=org.auros.simple.desktop
+widgetStyle=Breeze
+SingleClick=false
+
+[kdeglobals][General]
+ColorScheme=BreezeLight
+
+[kdeglobals][Icons]
+Theme=breeze
+
+[plasmarc][Theme]
+name=breeze
+
+[kcminputrc][Mouse]
+cursorTheme=breeze_cursors
+
+[kwinrc][org.kde.kdecoration2]
+library=org.kde.breeze
+theme=Breeze
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
