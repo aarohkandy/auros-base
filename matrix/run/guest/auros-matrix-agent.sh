@@ -292,7 +292,8 @@ if [ -z "$WL" ]; then
   SESSION_DIAG="NO GRAPHICAL SESSION for ${TEST_USER} after ${SESSION_WAIT}s (no wayland socket in /run/user/${UID_T}): \
 loginctl sessions [$(loginctl list-sessions --no-legend 2>/dev/null | tr '\n' ';')]; \
 display manager [${DM:-unknown}]; \
-[Autologin] files [$(grep -ls '^\[Autologin\]' /etc/plasmalogin.conf /etc/plasmalogin.conf.d/* /usr/lib/plasmalogin/plasmalogin.conf.d/* /etc/sddm.conf /etc/sddm.conf.d/* 2>/dev/null | tr '\n' ' ')]; \
+[Autologin] files [$(for f in $(grep -ls '^\[Autologin\]' /usr/lib/plasmalogin/plasmalogin.conf.d/* /etc/plasmalogin.conf.d/* /etc/plasmalogin.conf /etc/sddm.conf /etc/sddm.conf.d/* 2>/dev/null); do printf '%s(User=%s) ' "$f" "$(awk -F= '/^\[/{g=$0} g=="[Autologin]" && $1=="User"{print $2}' "$f" | tail -1)"; done)]; \
+plasma-setup [/etc/plasma-setup-done $([ -e /etc/plasma-setup-done ] && echo present || echo ABSENT - the KDE first-boot wizard owns seat0 until it is finished)]; \
 its journal [$(journalctl -b -u "${DM:-display-manager.service}" --no-pager 2>/dev/null | grep -iE 'autolog|session|pam' | tail -3 | tr '\n' ';')]"
   say "#AUROS-NOTE# $SESSION_DIAG"
 fi

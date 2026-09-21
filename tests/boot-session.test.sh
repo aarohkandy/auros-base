@@ -6,7 +6,9 @@
 #              manager — actually reads it. Emulates plasmalogin v6.7.0's lookup
 #              (src/common/MainConfigLoader.cpp): /usr/lib/plasmalogin/plasmalogin.conf.d/*, then
 #              /etc/plasmalogin.conf.d/*, then /etc/plasmalogin.conf, later overriding earlier. The
-#              old wrapper wrote only /etc/sddm.conf.d/, which plasmalogin never opens.
+#              old wrapper wrote only /etc/sddm.conf.d/, which plasmalogin never opens. The next one
+#              did not write /etc/plasma-setup-done, so KDE plasma-setup's 99-plasma-setup.conf
+#              (User=plasma-setup) outranked our 00- file and the wizard took seat0 (run 35616444839).
 #   kcmlist    the agent's `kcmshell6 --list` survives having no display. kcmshell6 builds its
 #              QApplication before it parses --list (kcmutils src/kcmshell/main.cpp), so as root in a
 #              systemd unit it aborted, listed nothing, and B12 reported installed KCMs as absent.
@@ -36,9 +38,20 @@ plasmalogin_user() {
   done
   printf '%s' "$u"
 }
+# boot_like_aurora <root> — what Aurora's first boot does before plasmalogin reads its config.
+#   /etc/plasmalogin.conf: Fedora's sample, every key commented (plasma-login-manager.spec Source13).
+#   plasma-setup.service, ConditionPathExists=!/etc/plasma-setup-done (files/plasma-setup.service.in),
+#   runs bootutil, which writes 99-plasma-setup.conf (src/bootutil/bootutil.cpp:28,84-86).
+boot_like_aurora() {
+  printf '[Autologin]\n#Relogin=false\n#Session=\n#User=\n' > "$1/etc/plasmalogin.conf"
+  [ -e "$1/etc/plasma-setup-done" ] && return 0
+  mkdir -p "$1/etc/plasmalogin.conf.d"
+  printf '[Autologin]\nUser=plasma-setup\nSession=plasma\n' > "$1/etc/plasmalogin.conf.d/99-plasma-setup.conf"
+}
 autologin_case() { # <src> <AUTOLOGIN> -> exit 0 iff plasmalogin would autologin "auros" into plasma
   local R; R="$(newroot)"
   ROOT="$R" TEST_USER=auros AUTOLOGIN="$2" bash -c "$1" || return 2
+  boot_like_aurora "$R"
   [ "$(plasmalogin_user "$R")" = auros ] || { echo "plasmalogin would autologin: [$(plasmalogin_user "$R")]; files: $(cd "$R" && find etc -type f)"; return 1; }
   grep -rqx 'Session=plasma' "$R"/etc/plasmalogin.conf.d || { echo "no Session=plasma"; return 1; }
 }
@@ -47,6 +60,10 @@ run_check autologin red "AUTOLOGIN=0 (--no-autologin): no autologin" -- autologi
 OLD_AL="$(sed 's# \$ROOT/etc/plasmalogin.conf.d##' <<<"$AL_SRC")"
 [ "$OLD_AL" != "$AL_SRC" ] || t_abort "the sddm-only mutation did not apply"
 run_check autologin red "run 35566336512's wrapper — /etc/sddm.conf.d only — autologins nobody on plasmalogin" -- autologin_case "$OLD_AL" 1
+NOFLAG_AL="$(/usr/bin/grep -v 'plasma-setup-done' <<<"$AL_SRC")"
+[ "$NOFLAG_AL" != "$AL_SRC" ] || t_abort "the no-marker mutation did not apply"
+run_check autologin red "run 35616444839's wrapper — no plasma-setup-done — seat0 goes to plasma-setup" -- autologin_case "$NOFLAG_AL" 1
+assert_has "…and it names the wizard's user" "would autologin: [plasma-setup]" "$T_LAST_OUT"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "B12's KCM listing works with no display"
@@ -98,7 +115,8 @@ R2="$(newroot)"; fake_dm "$R2"
 run_check session red "no socket (only its .lock): no session" -- session_case "$R2"
 assert_has "…and it says so" "NO GRAPHICAL SESSION for auros" "$T_LAST_OUT"
 assert_has "…naming the display manager" "display manager [plasmalogin.service]" "$T_LAST_OUT"
-assert_has "…where autologin was actually written" "sddm.conf.d/00-auros-matrix-autologin.conf" "$T_LAST_OUT"
+assert_has "…where autologin was actually written, and for whom" "sddm.conf.d/00-auros-matrix-autologin.conf(User=auros)" "$T_LAST_OUT"
+assert_has "…and whether the first-boot wizard was completed" "/etc/plasma-setup-done ABSENT" "$T_LAST_OUT"
 assert_has "…what logind has" "plasmalogin seat0" "$T_LAST_OUT"
 assert_has "…and what the display manager logged" "Unable to find autologin session entry" "$T_LAST_OUT"
 

@@ -969,6 +969,15 @@ assert old in s
 open(p, 'w').write(s.replace(old, 'for d in /etc/sddm.conf.d; do'))
 MUT
 
+mutate "the test wrapper leaves plasma-setup unfinished, so its 99- autologin takes seat0" \
+       tests/boot-session.test.sh "[autologin] the shipping wrapper" <<'MUT'
+p = 'matrix/run/guest/Containerfile.testwrap'
+s = open(p).read()
+old = "      printf 'Plasma Setup completed by the auros-matrix test wrapper\\n' > /etc/plasma-setup-done; \\\n"
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
 mutate "the agent lists KCMs with a bare kcmshell6 --list, which aborts with no display" \
        tests/boot-session.test.sh "[kcmlist] root, no display" <<'MUT'
 p = 'matrix/run/guest/auros-matrix-agent.sh'

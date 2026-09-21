@@ -7,8 +7,9 @@
 # What this layer adds, and nothing else:
 #   1. /usr/local/lib/auros-matrix/  — the agent and its config. Nothing in the image reads this path.
 #   2. auros-matrix-agent.service    — one oneshot unit, enabled.
-#   3. A test user, and (optionally) display-manager autologin for it, because B7/B8/B12 need a live
-#      desktop session and there is nobody in the room to type a password.
+#   3. A test user, and (optionally) display-manager autologin for it plus the plasma-setup-done
+#      marker that skips KDE's first-boot wizard, because B7/B8/B12 need a live desktop session and
+#      there is nobody in the room to type a password or click through a wizard.
 #   4. (update runs only) an /etc/hosts entry and a registries.conf.d snippet pointing ghcr.io at the
 #      harness's local registry, and a drop-in that compresses the bootc update timer's interval.
 #
@@ -31,6 +32,19 @@ COPY overlay/ /
 # wayland-sessions/plasma.desktop (src/common/Session.cpp). Writing only /etc/sddm.conf.d/ — what this
 # did until run 35566336512 — left the VM at the greeter with no user session, and B7/B8/B12 failed on
 # that. The sddm copy stays for a base that ships sddm; each manager ignores the other's directory.
+#
+# FIRST-BOOT SETUP. Aurora ships KDE plasma-setup (6.7.5), and until /etc/plasma-setup-done exists its
+# unit (files/plasma-setup.service.in: Before=display-manager.service,
+# ConditionPathExists=!/etc/plasma-setup-done) runs plasma-setup-bootutil, which writes
+# /etc/plasmalogin.conf.d/99-plasma-setup.conf = [Autologin] User=plasma-setup
+# (src/bootutil/bootutil.cpp:28,84-86). plasmalogin reads that directory in locale order and KConfig
+# lets a later source override an earlier one, so 99-plasma-setup beats our 00- file and seat0 went
+# to the wizard (run 35616444839: "1 968 plasma-setup seat0"). The wizard then deletes its 99 file as
+# it starts (src/initialstartutil.cpp:22), which is why the diagnostic never listed it.
+# /etc/plasmalogin.conf is Fedora's sample with every key commented (plasma-login-manager.spec
+# Source13) — an empty [Autologin] header, overriding nothing. The marker below is exactly what the
+# wizard's own Finish button writes (src/auth/authhelper.cpp createflagfile). The shipping image
+# does NOT get it: a real machine shows plasma-setup on first boot.
 ARG TEST_USER=auros
 ARG AUTOLOGIN=1
 RUN set -euo pipefail; \
@@ -42,6 +56,7 @@ RUN set -euo pipefail; \
         mkdir -p "$d"; \
         printf '[Autologin]\nUser=%s\nSession=plasma\nRelogin=false\n' "${TEST_USER}" > "$d/00-auros-matrix-autologin.conf"; \
       done; \
+      printf 'Plasma Setup completed by the auros-matrix test wrapper\n' > /etc/plasma-setup-done; \
     fi; \
     mkdir -p /var/lib/auros-matrix; \
     echo "auros-matrix test wrapper — NOT A SHIPPING IMAGE" > /etc/auros-matrix-wrapper
