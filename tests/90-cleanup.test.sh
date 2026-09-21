@@ -273,6 +273,32 @@ t_exempt cleanup.logs \
        red direction. It is asserted on the resulting filesystem and on the two DIFFERENT sentences it
        prints for a dirty and a clean image, which is where a silent no-op would show up."
 _t_record cleanup.logs green
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "determinism — dnf5's history journal does not ship (the S7 cause in run 35564325340)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+DNF5_BLOCK="$(extract_between "$C" '^sqlite_sidecars="' '^did "dnf5 history journal checked"' | rootify /usr/lib/sysimage)"
+dnf5_root() {
+  local r; r="$(newroot)"; mkdir -p "$r/usr/lib/sysimage/libdnf5"
+  printf 'main db\n' > "$r/usr/lib/sysimage/libdnf5/transaction_history.sqlite"
+  printf 'wal\n'     > "$r/usr/lib/sysimage/libdnf5/transaction_history.sqlite-wal"
+  printf 'shm\n'     > "$r/usr/lib/sysimage/libdnf5/transaction_history.sqlite-shm"
+  printf '%s' "$r"
+}
+dnf5_run() { ROOT="$1" PATH="${2:-$PATH}" bash -c "$PRE
+$DNF5_BLOCK"; }
+R="$(dnf5_root)"
+run_check cleanup.dnf5 green "the journal files are removed and the check is satisfied" -- dnf5_run "$R"
+assert_nofile "transaction_history.sqlite-wal is gone" "$R/usr/lib/sysimage/libdnf5/transaction_history.sqlite-wal"
+assert_nofile "transaction_history.sqlite-shm is gone" "$R/usr/lib/sysimage/libdnf5/transaction_history.sqlite-shm"
+assert_file   "the history database itself is kept"   "$R/usr/lib/sysimage/libdnf5/transaction_history.sqlite"
+# RED: an rm that does nothing (a read-only layer, a changed path) must fail the build, not ship.
+NORM="$(stubdir)"; printf '#!/bin/sh\nexit 0\n' > "$NORM/rm"; chmod +x "$NORM/rm"
+R="$(dnf5_root)"
+run_check cleanup.dnf5 red "a journal that survives removal fails the build" -- dnf5_run "$R" "$NORM:$PATH"
+assert_has "…and says why" "would differ (S7)" "$T_LAST_OUT"
+R="$(newroot)"; mkdir -p "$R/usr/lib/sysimage/libdnf5"
+assert_has "a clean image says there was nothing, not that it removed something" "no dnf5 history journal" "$(dnf5_run "$R" 2>&1)"
+
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "determinism — nothing the cleanup writes carries a timestamp"

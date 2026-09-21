@@ -76,6 +76,22 @@ done
 # /var/lib/dnf held the transaction history database, whose rows are timestamped — it is both a cache
 # and a determinism problem. It is recreated empty on first use.
 
+# dnf5 keeps that history under /usr/lib/sysimage/libdnf5, not /var/lib/dnf, and the loop above never
+# looked there. Run 35564325340 (two uncached builds, 169,977 files hashed) found exactly two files
+# differing: transaction_history.sqlite-wal and -shm. The WAL holds OUR build's transactions, with
+# timestamps; the main .sqlite was identical. Deleting the WAL without checkpointing leaves the
+# database at its last checkpoint — consistent, and byte-identical across builds. The cost is that
+# `dnf history` does not list build-time installs; the rpmdb (kept, above) is the record of what is.
+sqlite_sidecars="$(find /usr/lib/sysimage/libdnf5 -maxdepth 1 -type f \( -name '*.sqlite-wal' -o -name '*.sqlite-shm' \) 2>/dev/null || true)"
+if [ -n "$sqlite_sidecars" ]; then
+  while IFS= read -r f; do rm -f "$f"; did "removed $f (SQLite journal of this build's dnf transactions — timestamped, S7)"; done <<<"$sqlite_sidecars"
+else
+  did "no dnf5 history journal left behind"
+fi
+[ -z "$(find /usr/lib/sysimage/libdnf5 -maxdepth 1 \( -name '*.sqlite-wal' -o -name '*.sqlite-shm' \) 2>/dev/null || true)" ] \
+  || die "a dnf5 SQLite journal survived its removal; two builds of this tree would differ (S7)"
+did "dnf5 history journal checked"
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 step "secrets and per-machine identity that must not be baked into an image"
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
