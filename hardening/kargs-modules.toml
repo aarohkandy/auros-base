@@ -1,0 +1,12 @@
+# AUROS — /usr/lib/bootc/kargs.d/20-auros-modules.toml   (D43)
+#
+# Upstream's initramfs carries usr/lib/modules-load.d/{zfs,v4l2loopback}.conf and both modules, so
+# systemd-modules-load inserts them in the initrd, before /etc/modules-load.d exists; the /etc masks in
+# build/10-hardening.sh cannot reach that. libkmod reads modprobe.blacklist= from /proc/cmdline in the
+# initrd and in the real root alike, and systemd-modules-load probes with KMOD_PROBE_APPLY_BLACKLIST,
+# logging "Module '<m>' is deny-listed (by kmod)" as a success, so the unit does not fail.
+#
+# NOT module_blacklist= (the kernel's own): that refuses the insert with EPERM, which fails
+# systemd-modules-load.service and degrades the boot — the thing this file exists to stop.
+# ONE ARGUMENT PER MODULE: libkmod accepts repeats, and the build's karg reader splits on commas.
+kargs = ["modprobe.blacklist=zfs", "modprobe.blacklist=v4l2loopback"]

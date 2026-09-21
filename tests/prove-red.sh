@@ -935,6 +935,51 @@ assert old in s
 open(p, 'w').write(s.replace(old, '[ "$f" = zfs.conf ] || ' + old))
 MUT
 
+mutate "10-hardening accepts an initramfs that forces a module no karg blocks (run 35616444839)" \
+       tests/10-hardening.test.sh "initrd-block" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = '*" $m "*) ;;'
+assert old in s
+open(p, 'w').write(s.replace(old, '*) ;;', 1))
+MUT
+
+mutate "kargs-modules.toml stops blocking zfs" \
+       tests/10-hardening.test.sh "initrd-block" <<'MUT'
+p = 'hardening/kargs-modules.toml'
+s = open(p).read()
+old = '"modprobe.blacklist=zfs", '
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "10-hardening reads an empty initramfs listing as 'forces nothing'" \
+       tests/10-hardening.test.sh "initrd-block" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = "grep -q 'usr/lib/modules/' <<<"
+assert old in s
+open(p, 'w').write(s.replace(old, "true || grep -q 'usr/lib/modules/' <<<"))
+MUT
+
+mutate "the mcelog drop-in is installed without checking mcelog has --is-cpu-supported" \
+       tests/10-hardening.test.sh "mcelog" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = "grep -aq -- '--is-cpu-supported' /usr/sbin/mcelog \\\n"
+assert old in s
+open(p, 'w').write(s.replace(old, "true || grep -aq -- '--is-cpu-supported' /usr/sbin/mcelog \\\n"))
+MUT
+
+mutate "the mcelog drop-in loses its ExecCondition" \
+       tests/10-hardening.test.sh "mcelog" <<'MUT'
+p = 'hardening/mcelog-cpu-supported.conf'
+s = open(p).read()
+old = 'ExecCondition=/usr/sbin/mcelog --is-cpu-supported'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
 printf '\n%s\n' "$(c 1 'the harness itself')"
 
 mutate "an extraction stops matching — the suite must ABORT, not quietly test an empty program" \
