@@ -72,12 +72,26 @@ for b in /usr/bin/plasmashell /usr/bin/gnome-shell /usr/bin/startplasma-wayland 
   [ -e "$b" ] && SHELLS="$SHELLS $b"
 done
 emit DESKTOP_SHELL_BINARIES "${SHELLS# }"
+# NEVER GUESS A PATH. This list is a guess, and on the pinned Aurora base it MATCHED NOTHING while
+# /etc/systemd/system/display-manager.service existed — measured, run 35548005729. A hardcoded list
+# that misses the display manager the image actually ships would make S9's kiosk branch assert
+# "no display-manager binary" about a path nobody uses. So the list is the fast path, and the three
+# lines under it are the ones that answer the question from the image instead of from memory:
+# what display-manager.service points at, and what its ExecStart actually runs.
 DMS=''
-for b in /usr/bin/sddm /usr/bin/gdm /usr/sbin/gdm /usr/bin/lightdm /usr/bin/greetd /usr/libexec/gdm-binary; do
+for b in /usr/bin/sddm /usr/bin/gdm /usr/sbin/gdm /usr/bin/lightdm /usr/bin/greetd /usr/libexec/gdm-binary \
+         /usr/libexec/sddm /usr/bin/sddm-greeter /usr/bin/lxdm /usr/bin/xdm /usr/bin/ly; do
   [ -e "$b" ] && DMS="$DMS $b"
 done
 emit DISPLAY_MANAGER_BINARIES "${DMS# }"
 emit DISPLAY_MANAGER_UNIT "$(exists /etc/systemd/system/display-manager.service)"
+DM_UNIT=/etc/systemd/system/display-manager.service
+emit DISPLAY_MANAGER_UNIT_TARGET "$(readlink -f "$DM_UNIT" 2>/dev/null || echo '')"
+emit DISPLAY_MANAGER_EXECSTART "$(sed -n 's/^ExecStart=//p' "$DM_UNIT" 2>/dev/null | head -1)"
+# The binary the unit would actually run, resolved from its own ExecStart rather than from a list.
+DM_EXEC=$(sed -n 's/^ExecStart=//p' "$DM_UNIT" 2>/dev/null | head -1 | awk '{print $1}' | sed 's/^[-@+!]*//')
+emit DISPLAY_MANAGER_EXEC_PRESENT "$( [ -n "$DM_EXEC" ] && [ -e "$DM_EXEC" ] && echo 1 || echo 0 )"
+emit DISPLAY_MANAGER_EXEC_PATH "$DM_EXEC"
 emit AUROS_POLICY_DIRS "$(ls -1 /usr/share/auros/policy 2>/dev/null | tr '\n' ',')"
 emit AUROS_POLICY_UNITS "$(ls -1 /usr/lib/systemd/system/ 2>/dev/null | grep -c '^auros-policy-' || true)"
 for m in open managed locked kiosk; do

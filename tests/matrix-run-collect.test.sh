@@ -34,8 +34,8 @@ command -v node >/dev/null 2>&1 || t_abort "node is not on PATH; the collector i
 # The heredoc body only: drop the `node - ... <<'NODE'` line and the closing `NODE`.
 COLLECTOR="$(extract_raw "$RUNSH" '^node - "\$WORKDIR"' '^NODE$' | sed '1d;$d')"
 case "$COLLECTOR" in
-  *"walk(dir)"*) ;;
-  *) t_abort "the block extracted from matrix/run.sh does not contain walk(dir) — the collector was rewritten and this test no longer knows what it is testing" ;;
+  *"walk(checksDir)"*) ;;
+  *) t_abort "the block extracted from matrix/run.sh does not contain walk(checksDir) — the collector was rewritten and this test no longer knows what it is testing" ;;
 esac
 COLLECT_JS="$(newroot)/collect.cjs"   # .cjs, not .mjs: the collector is CommonJS (it uses require)
 printf '%s\n' "$COLLECTOR" > "$COLLECT_JS"
@@ -169,6 +169,19 @@ run_snippet verdict red "one failing check is enough to fail the phase" "OUT='$F
 F_SKIP="$(newroot)/one-skip.json"
 echo '{"profile":"static","checks":[{"id":"S1","status":"pass"},{"id":"S2","status":"skip"}]}' > "$F_SKIP"
 run_snippet verdict red "a SKIP is not a pass either — a check that did not run did not pass" "OUT='$F_SKIP'; $VERDICT_SRC"
+
+# ── work/ is inputs, not verdicts ────────────────────────────────────────────────────────────────
+# The run directory also holds bib's config, the flatpak probe result and the image manifest. The
+# strictness above fired on them the first time it ran in CI (run 35548492085 died with
+# "manifest.json: parsed as JSON but carries no .id"), which turned a diagnostic improvement into a
+# harness error of exactly the kind this probe exists to find.
+R_W="$(mkrun)"
+printf '%s\n' '{"id":"S1","status":"pass","detail":"x"}' > "$R_W/checks/static.jsonl"
+echo '{"status":"pass","detail":"no flatpak refs declared"}' > "$R_W/work/flatpak-result.json"
+echo '{"schemaVersion":2,"layers":[{"size":1}]}'             > "$R_W/work/manifest.json"
+run_check collect.jsonl green "JSON under work/ is ignored, not mistaken for a corrupt record" -- collect "$R_W" static '' "$R_W/frag.json"
+assert_eq "only the real record came through" "1" \
+  "$(node -e 'process.stdout.write(String(require(process.argv[1]).checks.length))' "$R_W/frag.json" 2>/dev/null || echo '?')"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "completeness — a check that never reported is recorded as a fail, not omitted"

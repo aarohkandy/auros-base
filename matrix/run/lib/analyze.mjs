@@ -170,9 +170,14 @@ const declaredRemove = lines(args['declared-remove']);
     rec('S9', 'fail', `unknown policy mode "${mode}"`);
   } else if (mode === 'kiosk') {
     const found = [...shells, ...dms];
-    if (kv.DISPLAY_MANAGER_UNIT === '1') found.push('/etc/systemd/system/display-manager.service');
+    if (kv.DISPLAY_MANAGER_UNIT === '1') found.push(`/etc/systemd/system/display-manager.service -> ${kv.DISPLAY_MANAGER_UNIT_TARGET || 'unresolved'}`);
+    // The binary the unit's own ExecStart names, which is the answer that does not depend on
+    // image-probe.sh's hardcoded list being right. On the pinned Aurora base that list matched
+    // nothing at all while a display manager was plainly installed (run 35548005729), so a kiosk
+    // image could have kept its display manager and this branch would have said it had none.
+    if (kv.DISPLAY_MANAGER_EXEC_PRESENT === '1' && kv.DISPLAY_MANAGER_EXEC_PATH) found.push(`${kv.DISPLAY_MANAGER_EXEC_PATH} (named by display-manager.service ExecStart)`);
     if (found.length) rec('S9', 'fail', `policy=kiosk but the image still contains a way to reach a desktop: ${found.join(' ')}. Spec defines kiosk as "no desktop shell exists in the image at all" (D12: the shell and the display manager, not the whole stack).`);
-    else rec('S9', 'pass', 'policy=kiosk: no plasmashell, no gnome-shell, no display-manager binary and no display-manager.service in the image');
+    else rec('S9', 'pass', `policy=kiosk: no plasmashell, no gnome-shell, no display-manager.service and no display-manager binary. Searched shells and the display-manager list, AND resolved display-manager.service's own ExecStart (${kv.DISPLAY_MANAGER_EXEC_PATH || 'no unit, so nothing to resolve'}), so this does not rest on a hardcoded path list being complete.`);
   } else if (mode === 'open') {
     const units = ['managed', 'locked', 'kiosk'].filter((m) => kv[`POLICY_UNIT_${m}`] === '1');
     if (units.length) rec('S9', 'fail', `policy=open but restrictive policy units are present: ${units.join(' ')}`);

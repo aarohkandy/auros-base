@@ -195,7 +195,13 @@ const walk = d => {
     parseRecords(text, p).forEach(push)
   }
 }
-walk(dir)
+// ONLY checks/. The run directory also holds work/ — bib's config, the flatpak probe result, the
+// image manifest — and those are inputs, not verdicts. Walking the whole tree made the strictness
+// above fire on them: run 35548492085 died with "manifest.json: parsed as JSON but carries no .id".
+// common.sh, run-static.sh, run-boot.sh, run-update.sh and emit-results.mjs all agree that a check
+// record lives in <rundir>/checks/, so that is the only directory read.
+const checksDir = path.join(dir, 'checks')
+walk(checksDir)
 
 if (unreadable.length) {
   console.error('matrix/run.sh: result files the collector could not read:')
@@ -248,7 +254,7 @@ if (merged.length === 0) {
   console.error('  fragment that never appears would be just as dangerous, so we fail here instead.')
   // Rule 2: print what IS there. The .jsonl bug above presented as exactly this message, and the
   // message said nothing about the two perfectly good result files sitting in the directory.
-  console.error(`  result files considered (*.json, *.jsonl): ${seenFiles.length ? seenFiles.join(', ') : 'NONE'}`)
+  console.error(`  result files considered under ${checksDir} (*.json, *.jsonl): ${seenFiles.length ? seenFiles.join(', ') : 'NONE'}`)
   const all = []
   const list = d => { try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); e.isDirectory() ? list(p) : all.push(p) } } catch {} }
   list(dir)
