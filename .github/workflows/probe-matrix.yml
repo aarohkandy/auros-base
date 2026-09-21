@@ -51,10 +51,16 @@ on:
         description: hardware profile for the boot phase
         type: string
         default: uefi-modern
-  # So the harness can be iterated on a branch without pushing to main, where a push would also
-  # start a 25-minute build. build.yml does not trigger on these refs.
+  # So the harness can be iterated on a branch without pushing to main. build.yml does not trigger
+  # on these refs, and main runs are deliberately not cancellable, so an extra push here would put
+  # the image build everyone is waiting on an hour further away.
+  #
+  # workflow_dispatch only works from the DEFAULT branch, and this file is not on it yet, so the
+  # branch NAME selects the phases while it is being iterated:
+  #   probe/**          static + boot   (minutes, then ~90 minutes)
+  #   probe-update/**   update only     (four boots; hours — do not make it share a run)
   push:
-    branches: ['probe/**']
+    branches: ['probe/**', 'probe-update/**']
 
 permissions:
   contents: read
@@ -70,14 +76,14 @@ env:
   # ran a different set of phases than you asked for is its own kind of lie.
   DO_STATIC: ${{ github.event_name != 'workflow_dispatch' && 'true' || inputs.static }}
   DO_BOOT:   ${{ github.event_name != 'workflow_dispatch' && 'true' || inputs.boot }}
-  DO_UPDATE: ${{ github.event_name != 'workflow_dispatch' && 'false' || inputs.update }}
+  DO_UPDATE: ${{ github.event_name != 'workflow_dispatch' && startsWith(github.ref_name, 'probe-update/') || inputs.update }}
   PROFILE:   ${{ github.event_name != 'workflow_dispatch' && 'uefi-modern' || inputs.profile }}
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   static:
     name: probe · static S1-S10
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.static }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.static) || (github.event_name == 'push' && !startsWith(github.ref_name, 'probe-update/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -170,7 +176,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   boot:
     name: probe · boot ${{ github.event_name != 'workflow_dispatch' && 'uefi-modern' || inputs.profile }}
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.boot }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.boot) || (github.event_name == 'push' && !startsWith(github.ref_name, 'probe-update/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -253,7 +259,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
   update:
     name: probe · update U1-U5 R1
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.update }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.update) || (github.event_name == 'push' && startsWith(github.ref_name, 'probe-update/')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
