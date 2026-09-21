@@ -320,7 +320,7 @@ group "enable_user_unit — 'enabled for every future user' is a symlink, not a 
 #
 # Two deletions are each invisible without this: the `[ -e "$dir/$u" ] || die` after the ln, and the
 # `[ -f /usr/lib/systemd/user/$u ] || die` before it.
-EUU_FN="$(extract_fn "$W" enable_user_unit | rootify /usr/lib/systemd/user)"
+EUU_FN="$(extract_fn "$REPO/build/00-common.sh" enable_user_unit | rootify /usr/lib/systemd/user)"
 
 euu_run() { # <root> <unit> <create-unit: yes|no> [noln]
   local root="$1" path="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" sdir

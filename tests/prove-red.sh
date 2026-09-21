@@ -546,7 +546,7 @@ MUT
 
 mutate "W06: enable_user_unit stops verifying the link, so the first-run wizard never runs for anyone" \
        tests/40-windows-feel.test.sh "ln exits 0 and creates no link" <<'MUT'
-p = 'build/40-windows-feel.sh'
+p = 'build/00-common.sh'
 s = open(p).read()
 old = '  [ -e "$dir/$u" ] || die "could not enable $u for $t"'
 assert old in s
@@ -557,13 +557,51 @@ MUT
 
 mutate "W06b: enable_user_unit stops checking the unit file exists before linking to it" \
        tests/40-windows-feel.test.sh "the user unit was never installed" <<'MUT'
-p = 'build/40-windows-feel.sh'
+p = 'build/00-common.sh'
 s = open(p).read()
 old = '  [ -f "/usr/lib/systemd/user/$u" ] || die "cannot enable $u'
 assert old in s
 i = s.index(old)
 j = s.index('\n', i)
 open(p, 'w').write(s[:i] + '  :' + s[j:])
+MUT
+
+printf '\n%s\n' "$(c 1 'build/45-restore.sh — the Linux-side restore')"
+
+mutate "R01: the sha256 comparison is dropped, so whatever the URL serves is installed" \
+       tests/45-restore.test.sh "the binary changed after it was pinned" <<'MUT'
+p = 'build/45-restore.sh'
+s = open(p).read()
+old = '[ "$got" = "$2" ] || die "sha256 mismatch'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || die "sha256 mismatch'))
+MUT
+
+mutate "R02: the switch goes quiet — OFF installs nothing and no longer says so" \
+       tests/45-restore.test.sh "says RESTORE IS OFF" <<'MUT'
+p = 'build/45-restore.sh'
+s = open(p).read()
+old = '  warn "RESTORE IS OFF'
+assert old in s
+open(p, 'w').write(s.replace(old, '  : "RESTORE IS OFF'))
+MUT
+
+mutate "R03: the post-install binary assertion is deleted" \
+       tests/45-restore.test.sh "restore.assert" <<'MUT'
+p = 'build/45-restore.sh'
+s = open(p).read()
+old = '[ -x "$R$EXEC" ] || die'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || die'))
+MUT
+
+mutate "R04: the WantedBy target is hardcoded instead of read from the unit" \
+       tests/45-restore.test.sh "linked for default.target too" <<'MUT'
+p = 'build/45-restore.sh'
+s = open(p).read()
+old = 'for t in $TARGETS; do enable_user_unit "$UNIT" "$t"; done'
+assert old in s
+open(p, 'w').write(s.replace(old, 'enable_user_unit "$UNIT" graphical-session.target'))
 MUT
 
 printf '\n%s\n' "$(c 1 'build/90-cleanup.sh — the protected set')"

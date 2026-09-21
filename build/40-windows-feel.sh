@@ -31,33 +31,6 @@ SRC="${AUROS_BUILD_DIR}/desktop"
 # Pinned in desktop/flatpak/PROVENANCE.md. See section 3 for why this is a hash and not a download.
 FLATHUB_SHA256=3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a
 
-# ── enable_user_unit <unit> <target> ──────────────────────────────────────────────────────────────
-# 00-common.sh's enable_unit() is system-scope: it looks for the unit in /usr/lib/systemd/system and
-# nowhere else, so it cannot enable a `systemd --user` unit. Rather than edit a file this step does
-# not own, this is the user-scope equivalent, built on the same principle — verify the filesystem
-# state rather than trust an exit code, because the whole point of enable_unit's fallback path is
-# that offline systemctl is the part we are least sure of.
-#
-# The symlink goes in /usr/lib, not /etc: on a bootc host /usr is replaced wholesale by an image
-# update while /etc is machine-local and three-way merged. And it has to be a symlink in the image at
-# all, rather than `systemctl --user enable` per account, because every user of these machines is
-# created long after the image was built.
-enable_user_unit() {
-  # Two statements, not one. Bash expands EVERY word of a `local` line before `local` assigns any of
-  # them, so `local t="$2" dir="...${t}..."` reads the OUTER, unset `t` — and `set -u` kills the build.
-  # It did: "line 46: t: unbound variable", after every other step in this file had succeeded.
-  local u="$1" t="$2"
-  local dir="/usr/lib/systemd/user/${t}.wants"
-  [ -f "/usr/lib/systemd/user/$u" ] || die "cannot enable $u — /usr/lib/systemd/user/$u does not exist"
-  mkdir -p "$dir"
-  ln -sfn "../$u" "$dir/$u"
-  [ -e "$dir/$u" ] || die "could not enable $u for $t"
-  auros_stamp "$dir/$u"
-  printf '%s\n' "$dir/$u" >> "$AUROS_WRITTEN_LIST"
-  did "enabled user unit $u for $t"
-  record enabled-user-unit "$u"
-}
-
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 step "the GUI paths check B12 audits"
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
