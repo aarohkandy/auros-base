@@ -581,9 +581,9 @@ mutate "auros-accounts keeps the enrolment secret on disk after using it" \
        tests/accounts.test.sh "the enrolment file is deleted" <<'MUT'
 p = 'desktop/accounts/auros-accounts'
 s = open(p).read()
-old = 'forget_bundle() { rm -f "$BUNDLE"; '
+old = '  rm -f "$BUNDLE"; rmdir'
 assert old in s
-open(p, 'w').write(s.replace(old, 'forget_bundle() { : "$BUNDLE"; '))
+open(p, 'w').write(s.replace(old, '  : "$BUNDLE"; rmdir'))
 MUT
 
 mutate "auros-accounts finishes with nobody able to sign in, so the laptop shows an empty sign-in screen" \
