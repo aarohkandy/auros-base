@@ -577,12 +577,16 @@ group "with no wizard, who is at seat0 on first boot — the account gap detecto
 # Nothing creates an account today (no recipe field, no provisioning step). The detector must say
 # NONE for that image — it is the shipping state — and must see the paths that would close the gap.
 ACCT_BLOCK="$(extract_between "$W" '^FIRST_BOOT_ACCOUNT=none' '^fi$' \
-  | rootify /etc/systemd/system/display-manager.service /etc/passwd /usr/lib/passwd)"
+  | rootify /etc/systemd/system/display-manager.service /etc/passwd /usr/lib/passwd \
+            /etc/systemd/system/multi-user.target.wants /usr/lib/systemd/system/multi-user.target.wants)"
 
 acct_case() { # <passwd lines> [kiosk] -> exit 0 iff some account path was found
   local root; root="$(newroot)"; mkdir -p "$root/etc/systemd/system"
   printf '%s\n' "$1" > "$root/etc/passwd"
   printf 'root:x:0:0:root:/root:/bin/bash\n' > "$root/usr/lib/passwd"
+  if [ "${2:-}" = recipe ]; then mkdir -p "$root/usr/lib/systemd/system/multi-user.target.wants"
+    ln -s ../auros-accounts.service "$root/usr/lib/systemd/system/multi-user.target.wants/auros-accounts.service"
+    : > "$root/usr/lib/systemd/system/auros-accounts.service"; fi
   if [ "${2:-}" = kiosk ]; then ln -s /dev/null "$root/etc/systemd/system/display-manager.service"
   else ln -s /usr/lib/systemd/system/plasmalogin.service "$root/etc/systemd/system/display-manager.service"; fi
   ROOT="$root" bash -c "$PRE
@@ -601,7 +605,39 @@ assert_has "and says so" "seat0=kiosk" "$T_LAST_OUT"
 run_check first-boot.account green "a provisioned human account" -- acct_case "$SYSTEM_ONLY
 teacher:x:1000:1000:Teacher:/var/home/teacher:/bin/bash"
 assert_has "and names it" "seat0=users:teacher" "$T_LAST_OUT"
+run_check first-boot.account green "the recipe path: auros-accounts is enabled and creates the accounts at first boot" \
+  -- acct_case "$SYSTEM_ONLY" recipe
+assert_has "and says so" "seat0=recipe" "$T_LAST_OUT"
 run_check first-boot.account red "a uid-1000 account with no shell is not a person" -- acct_case "$SYSTEM_ONLY
 svc:x:1001:1001::/:/sbin/nologin"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "the accounts unit — installed with its ordering, and never with a secret"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+ACC_BUILD="$(extract_between "$W" '^ENROL_DIR=/etc/auros/enrolment' '^enable_unit auros-accounts.service$' \
+  | rootify /etc/auros/enrolment /usr/lib/systemd/system)"
+# <mode>: ok | secret-in-image | no-chpasswd | unit-after-login
+accb_case() {
+  local root tools; root="$(newroot)"; tools="$(stubdir)"
+  local t; for t in python3 getent useradd usermod chpasswd stat grep mkdir cp dirname; do
+    [ "$1" = no-chpasswd ] && [ "$t" = chpasswd ] && continue
+    printf '#!/bin/sh\nexec %s "$@"\n' "$(command -v "$t" 2>/dev/null || echo true)" | stub "$tools" "$t"
+  done
+  [ "$1" = secret-in-image ] && mkdir -p "$root/etc/auros/enrolment"
+  mkdir -p "$root/usr/lib/systemd/system" "$root/usr/libexec/auros"
+  ROOT="$root" AUROS_LIBEXEC="$root/usr/libexec/auros" SRC="$D" bash -c "$PRE
+PATH='$tools'
+install_file() { mkdir -p \"\$(dirname \"\$2\")\"; cp \"\$1\" \"\$2\"; }
+enable_unit() { :; }
+$( [ "$1" = unit-after-login ] && echo 'install_file() { mkdir -p "$(dirname "$2")"; grep -v "^Before=" "$1" > "$2"; }' )
+$ACC_BUILD"
+}
+run_check accounts.build green "the shipped script, unit and drop-in" -- accb_case ok
+run_check accounts.build red "an enrolment directory baked into the image" -- accb_case secret-in-image
+assert_has "says a secret would be published" "published with it" "$T_LAST_OUT"
+run_check accounts.build red "an image with no chpasswd" -- accb_case no-chpasswd
+assert_has "names the missing tool" "needs chpasswd" "$T_LAST_OUT"
+run_check accounts.build red "a unit that no longer runs before sign-in opens" -- accb_case unit-after-login
+assert_has "names the lost ordering" "lost 'Before=display-manager.service" "$T_LAST_OUT"
 
 t_finish "40-windows-feel.sh"

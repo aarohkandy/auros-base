@@ -577,6 +577,42 @@ assert old in s
 open(p, 'w').write(s.replace(old, "$3>=900 && $3<60000"))
 MUT
 
+mutate "auros-accounts keeps the enrolment secret on disk after using it" \
+       tests/accounts.test.sh "the enrolment file is deleted" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = 'forget_bundle() { rm -f "$BUNDLE"; '
+assert old in s
+open(p, 'w').write(s.replace(old, 'forget_bundle() { : "$BUNDLE"; '))
+MUT
+
+mutate "auros-accounts finishes with nobody able to sign in, so the laptop shows an empty sign-in screen" \
+       tests/accounts.test.sh "no enrolment file on the install media" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = '[ "$capable" -gt 0 ] || fail'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ "$capable" -ge 0 ] || fail'))
+MUT
+
+mutate "auros-accounts passes a plain-text password to chpasswd -e" \
+       tests/accounts.test.sh "a plain password in the enrolment file is never used" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = "      '$'*) pairs+="
+assert old in s
+open(p, 'w').write(s.replace(old, "      *) pairs+="))
+MUT
+
+mutate "the build stops failing on an enrolment directory baked into the image" \
+       tests/40-windows-feel.test.sh "an enrolment directory baked into the image" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '[ ! -e "$ENROL_DIR" ] || die'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || die'))
+MUT
+
 mutate "W06: enable_user_unit stops verifying the link, so the first-run wizard never runs for anyone" \
        tests/40-windows-feel.test.sh "ln exits 0 and creates no link" <<'MUT'
 p = 'build/00-common.sh'
