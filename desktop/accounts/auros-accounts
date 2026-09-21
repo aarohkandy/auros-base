@@ -16,6 +16,18 @@
 #      screen, instead of leaving it in a log nobody at the machine can read
 #   5. writes /var/lib/auros/accounts.done, which the unit's ConditionPathExists=! keys on
 #
+# Owner decision A6 (force a password change at first sign-in, every account) is built and OFF:
+# AUROS_EXPIRE_FIRST_PASSWORD=1 in the unit's environment runs `chage -d 0` on each account created
+# here (man chage: "If the LAST_DAY is set to 0 the user is forced to change his password on the next
+# log on"), after chpasswd, which sets the last-change day to today. It is off because Plasma Login
+# (plasmalogin) cannot finish a sign-in for an expired password: its PamHandle::acctMgmt() calls
+# pam_chauthtok(PAM_CHANGE_EXPIRED_AUTHTOK), but Display::slotRequestChanged() only answers requests of
+# one or two prompts, and the change request has three. Every laptop would be locked out at once.
+# Control repo docs/ACCOUNTS.md §5.
+#
+# Anaconda keeps copies of the kickstart (/root/anaconda-ks.cfg, /root/original-ks.cfg), and the
+# install media's kickstart carries the enrolment hashes, so those copies are deleted with the file.
+#
 # Idempotent: an account that already exists is left alone, and a failed run leaves no marker, so the
 # next boot tries again from the top.
 #
@@ -33,7 +45,13 @@ FAILED=/run/auros/accounts-failed
 
 log() { printf 'auros-accounts: %s\n' "$*"; }
 
-forget_bundle() { rm -f "$BUNDLE"; rmdir "$(dirname "$BUNDLE")" 2>/dev/null || true; }
+forget_bundle() {
+  local k
+  rm -f "$BUNDLE"; rmdir "$(dirname "$BUNDLE")" 2>/dev/null || true
+  for k in /root/anaconda-ks.cfg /root/original-ks.cfg; do
+    if grep -qs 'auros/enrolment' "$k"; then rm -f "$k"; fi
+  done
+}
 
 fail() {
   log "FAILED: $1"
@@ -88,7 +106,7 @@ PY
 )" || { forget_bundle; fail "This image's list of accounts could not be read."; }
 [ -n "$rows" ] || { forget_bundle; fail "This image's list of accounts is empty."; }
 
-names=()
+names=(); created=()
 while IFS=$'\t' read -r name role display; do
   names+=("$name")
   if entry="$(getent passwd "$name")"; then
@@ -97,6 +115,7 @@ while IFS=$'\t' read -r name role display; do
     log "$name exists (uid $uid); left as it is"
   else
     useradd -m -c "$display" "$name" || { forget_bundle; fail "The account '$name' could not be created."; }
+    created+=("$name")
     log "created $name ($role)"
   fi
   if [ "$role" = admin ]; then
@@ -131,6 +150,13 @@ if [ -e "$BUNDLE" ]; then
   pairs=""
   forget_bundle
   log "enrolment file deleted"
+fi
+
+if [ "${AUROS_EXPIRE_FIRST_PASSWORD:-0}" = 1 ]; then
+  for n in ${created[@]+"${created[@]}"}; do
+    chage -d 0 "$n" || fail "The account '$n' could not be set to ask for a new password at first sign-in."
+    log "$n will be asked for a new password at first sign-in"
+  done
 fi
 
 capable=0

@@ -100,6 +100,7 @@ AUROS_MODE_B12_WIFI=
 AUROS_MODE_B12_PRINTER=
 AUROS_MODE_B12_LANGUAGE=
 AUROS_MODE_B12_DESKTOP=
+AUROS_MODE_B12_USERS=
 if [[ -r $CLAIMS_FILE ]]; then
     # shellcheck disable=SC1090
     . "$CLAIMS_FILE"
@@ -141,9 +142,13 @@ for v in AUROS_MODE_B12_INSTALL_APP AUROS_MODE_B12_WIFI AUROS_MODE_B12_PRINTER A
         *) echo "INCONCLUSIVE: $v='${!v}' is not one of seat|admin|none|n/a" >&2; exit 2 ;;
     esac
 done
+case $AUROS_MODE_B12_USERS in
+    seat|aurosadmin|n/a) ;;
+    *) echo "INCONCLUSIVE: AUROS_MODE_B12_USERS='$AUROS_MODE_B12_USERS' is not one of seat|aurosadmin|n/a (who may open the Users page)" >&2; exit 2 ;;
+esac
 
 echo "mode: $AUROS_MODE   B1=$AUROS_MODE_B1   desktop=$AUROS_MODE_B12_DESKTOP"
-echo "B12 claims: install-app=$AUROS_MODE_B12_INSTALL_APP wifi=$AUROS_MODE_B12_WIFI printer=$AUROS_MODE_B12_PRINTER language=$AUROS_MODE_B12_LANGUAGE"
+echo "B12 claims: install-app=$AUROS_MODE_B12_INSTALL_APP wifi=$AUROS_MODE_B12_WIFI printer=$AUROS_MODE_B12_PRINTER language=$AUROS_MODE_B12_LANGUAGE users=$AUROS_MODE_B12_USERS"
 echo
 
 # ── is this actually a session? ───────────────────────────────────────────────────────────────────
@@ -243,6 +248,15 @@ pk_answerable() {  # pk_answerable <label> <action> — for `seat`/`admin`: anyt
         3) pass "$label" "$action — offered, and asks for the administrator password (pkcheck 3). A password is not a terminal." ;;
         1) fail "$label" "$action — refused outright (pkcheck 1), but mode '$AUROS_MODE' claims this task is reachable. The GUI would offer a door it then slams." ;;
         *) fail "$label" "$action — pkcheck returned $rc (error)." ;;
+    esac
+}
+
+pk_not_granted() {  # pk_not_granted <label> <action> — a pupil: refused, or only with an administrator's password
+    local label=$1 action=$2 rc; rc=$(pk "$action")
+    case $rc in
+        1|2|3) pass "$label" "$action — not granted to this user (pkcheck $rc)" ;;
+        0) fail "$label" "$action — AUTHORISED (pkcheck 0) for a user outside aurosadmin. Mode '$AUROS_MODE' promises only the IT account manages accounts." ;;
+        *) fail "$label" "$action — pkcheck returned $rc (error). An error is not a refusal." ;;
     esac
 }
 
@@ -399,6 +413,24 @@ else
         fail "language/settings-page" "no region/language KCM in kcmshell6 --list"
     fi
     [[ $C == admin ]] && pk_answerable "language/polkit" org.freedesktop.locale1.set-locale
+fi
+
+# ── 4b. MANAGE USER ACCOUNTS (owner decision A4, control repo docs/ACCOUNTS.md §3) ────────────────
+# Not one of checks.yaml's four tasks. `aurosadmin` means: the Users page opens for an aurosadmin
+# member and for nobody else, and polkit refuses everyone else. The matrix session's user is one or the
+# other, so one run proves one half; desktop/tests/b12-modes.test.sh drives both.
+C=$AUROS_MODE_B12_USERS
+UA=org.freedesktop.accounts.user-administration
+if [[ $C == aurosadmin ]] && [[ " $(id -nG 2>/dev/null) " != *" aurosadmin "* ]]; then
+    if kcm_exists kcm_users; then reach none "users/settings-page" kcm_users -- kcmshell6 kcm_users
+    else pass "users/settings-page" "no Users page is offered to $(id -un), who is not in aurosadmin"; fi
+    pk_not_granted "users/polkit" "$UA"
+elif [[ $C == seat || $C == aurosadmin ]]; then
+    if kcm_exists kcm_users; then reach admin "users/settings-page" kcm_users -- kcmshell6 kcm_users
+    else fail "users/settings-page" "no kcm_users in kcmshell6 --list: the account that should manage passwords has no page to do it"; fi
+    pk_answerable "users/polkit" "$UA"
+else
+    info "users" "no desktop on this machine (mode $AUROS_MODE)"
 fi
 
 # ── THE KIOSK CRITERION — what B12 means on a machine with no desktop ─────────────────────────────

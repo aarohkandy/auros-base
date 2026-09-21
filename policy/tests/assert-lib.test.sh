@@ -204,6 +204,20 @@ else
     ok "B5 runs assert-policy as root, so assert-policy itself drops to aurosprobe"
 fi
 
+echo "── a_suite_accounts: A4 shows the Users page to aurosadmin, so polkit must stop the pupil ───"
+export PK_EXTRA=org.freedesktop.accounts.user-administration
+reset; PK_RC=1 a_suite_accounts hard >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "locked: user-administration refused outright => pass" || no "locked: refused outright => pass" "$(last)"
+reset; PK_RC=2 a_suite_accounts hard >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "locked: user-administration answerable with a password => FAIL" || no "locked: answerable => FAIL" "$(last)"
+reset; PK_RC=2 a_suite_accounts admin >/dev/null 2>&1
+[ "$A_FAIL" = 0 ] && ok "managed: user-administration needs the IT password => pass" || no "managed: needs the IT password => pass" "$(last)"
+reset; PK_RC=0 a_suite_accounts admin >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "managed: a pupil AUTHORISED to manage accounts => FAIL" || no "managed: pupil authorised => FAIL" "$(last)"
+reset; PK_RC=1 a_suite_accounts control >/dev/null 2>&1
+[ "$A_FAIL" = 1 ] && ok "open: refused outright on the control => FAIL (a locked refusal would not be ours)" || no "open control: refused => FAIL" "$(last)"
+unset PK_EXTRA
+
 echo "── a_deny refuses to guess ─────────────────────────────────────────────────────────────────"
 reset; a_deny nonsense x org.example.action >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "an unknown level is a FAIL, not a silent default" || no "an unknown level is a FAIL" "$(last)"

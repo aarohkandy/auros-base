@@ -425,4 +425,31 @@ set -e
 LIBEXEC='$R/libexec'
 $MODE_BLOCK"
 
+group "A4 — the Users page: hidden by default in /etc/kde5rc, shown to an aurosadmin session"
+# The hide must be a per-KEY immutable in kde5rc: KConfig reads kde5rc first, so a group-level [$i]
+# there would lock [KDE Control Module Restrictions] before /etc/xdg/kdeglobals adds its pages.
+a4_hide() { # <kde5rc> <kdeglobals ini>
+  grep -qxF '[KDE Control Module Restrictions]' "$1" && grep -qxF 'kcm_users[$i]=false' "$1" \
+    && ! grep -q '^kcm_users' "$2"
+}
+A4BIN="$(stubdir)"
+printf '#!/bin/sh\n[ "$1" = -nG ] && echo "$A4_GROUPS"\n' > "$A4BIN/id"; chmod +x "$A4BIN/id"
+a4_env() { # <groups> <script> — sourced as startplasma would; 0 iff the session skips kde5rc
+  A4_GROUPS="$1" PATH="$A4BIN:$PATH" sh -c ". '$2'; [ \"\${KDE_SKIP_KDERC:-}\" = 1 ]"
+}
+for m in managed locked; do
+  run_check policy.a4-hide green "$m: kcm_users hidden in kde5rc (per key), not in the kdeglobals group" \
+    -- a4_hide "$POL/$m/root/etc/kde5rc" "$POL/$m/kdeglobals/20-control-module-restrictions.ini"
+  ENV="$POL/$m/root/etc/xdg/plasma-workspace/env/50-auros-admin-users-page.sh"
+  run_check policy.a4-env green "$m: an aurosadmin member's session skips kde5rc" -- a4_env "school-it aurosadmin" "$ENV"
+  run_check policy.a4-env red   "$m: a pupil's session does not"                 -- a4_env "pupil" "$ENV"
+  run_check policy.a4-env red   "$m: nor a member of a group merely NAMED like it" -- a4_env "pupil aurosadmins" "$ENV"
+done
+B="$(newroot)"; sed 's/^\[KDE Control Module Restrictions\]$/[KDE Control Module Restrictions][$i]/' "$POL/managed/root/etc/kde5rc" > "$B/kde5rc"
+run_check policy.a4-hide red "a group-level [\$i] in kde5rc (would lock out kdeglobals' pages)" \
+  -- a4_hide "$B/kde5rc" "$POL/managed/kdeglobals/20-control-module-restrictions.ini"
+printf '[KDE Control Module Restrictions][$i]\nkcm_users=false\n' > "$B/ini"
+run_check policy.a4-hide red "kcm_users still in the immutable kdeglobals group (no session could show it)" \
+  -- a4_hide "$POL/managed/root/etc/kde5rc" "$B/ini"
+
 t_finish "20-policy.sh"

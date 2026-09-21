@@ -462,6 +462,18 @@ a_suite_update_timer() {
     [ "$found" = 1 ] || a_bad "update.timer-active" "no update timer is active (looked for ${A_UPDATE_TIMERS[*]})"
 }
 
+# a_suite_accounts <level> -- owner decision A4 (control repo docs/ACCOUNTS.md §3): on managed and
+# locked the Users page is SHOWN to aurosadmin members (policy/<mode>/root/etc/kde5rc), so what stops
+# a pupil managing accounts is polkit alone, and this is where that is attempted. The probe is never
+# in aurosadmin (a_controls aborts if it is), so it is the pupil case. accountsservice's own default
+# for user-administration is auth_admin for every subject, so this is primary evidence: `open`
+# answers 2 (open/assert.sh, level control), managed must not answer 0, locked must answer 1.
+a_suite_accounts() {
+    local level="$1"
+    printf '\n-- try to manage accounts (A4: the Users page is for aurosadmin only) --------------------\n'
+    a_deny "$level" "accounts.user-admin" org.freedesktop.accounts.user-administration
+}
+
 # a_suite_policy_immutable -- WHAT THIS ACTUALLY PROVES, stated plainly because the name oversells it.
 #
 # All four writes below fail for any unprivileged account on any bootc host in any mode: /etc is

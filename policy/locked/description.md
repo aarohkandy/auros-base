@@ -26,7 +26,9 @@ look. It does not feel like a locked machine to somebody who is using it to do t
 
 In `managed` these things ask for a password. In `locked` the answer is no, and there is no password
 that changes it. The IT account can still authenticate for a few specific things, but the ordinary
-user's answer is refusal rather than a prompt.
+user's answer is refusal rather than a prompt. One of those things is passwords: signed in as the IT
+account, System Settings shows a **Users** page that nobody else sees, and it changes any account's
+password after the IT account types its own.
 
 ## How you change a locked machine, then
 

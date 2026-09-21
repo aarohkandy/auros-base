@@ -18,6 +18,10 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/auros/auros-accounts
 UMask=0077
+# Owner decision A6, built and OFF: plasmalogin cannot complete a sign-in with an expired password
+# (see the script's header; control repo docs/ACCOUNTS.md §5). Uncomment only after a VM shows a
+# first sign-in through the graphical login screen asking for, and accepting, a new password.
+#Environment=AUROS_EXPIRE_FIRST_PASSWORD=1
 
 [Install]
 WantedBy=multi-user.target

@@ -18,7 +18,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 S="$REPO/desktop/accounts/auros-accounts"
 [ -s "$S" ] || t_abort "no $S"
-SCRIPT="$(rootify /usr/lib/auros /etc/auros /var/lib/auros /etc/issue.d /run/auros < "$S")"
+SCRIPT="$(rootify /usr/lib/auros /etc/auros /var/lib/auros /etc/issue.d /run/auros /root < "$S")"
 printf 'auros-accounts — first-boot accounts from the recipe\n'
 
 FAKE_HASH='$6$fakesalt$FAKEHASHFORTESTSONLY'
@@ -47,10 +47,16 @@ stub "$STUBS" chpasswd <<'EOF'
 #!/usr/bin/env bash
 [ "${1:-}" = -e ] || { echo "chpasswd stub: called without -e" >&2; exit 2; }
 while IFS=: read -r n h; do
+  echo "chpasswd $n" >> "$ROOT/calls"
   echo "$n:$h" >> "$ROOT/chpasswd.in"
   awk -F: -v OFS=: -v n="$n" -v h="$h" '$1==n {$2=h} {print}' "$ROOT/etc/shadow" > "$ROOT/shadow.new"
   mv "$ROOT/shadow.new" "$ROOT/etc/shadow"
 done
+EOF
+stub "$STUBS" chage <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -d ] && [ "$2" = 0 ] && [ $# -eq 3 ] || { echo "chage stub: unexpected args $*" >&2; exit 2; }
+echo "chage $3" >> "$ROOT/calls"
 EOF
 stub "$STUBS" stat <<'EOF'
 #!/usr/bin/env bash
@@ -64,7 +70,7 @@ EOF
 # machine <mode> <accounts.json body or 'none'> <enrolment file body or 'none'>
 machine() {
   local root; root="$(newroot)"
-  mkdir -p "$root/usr/lib/auros" "$root/etc/auros/enrolment"
+  mkdir -p "$root/usr/lib/auros" "$root/etc/auros/enrolment" "$root/root"
   printf 'root:x:0:0:root:/root:/bin/bash\nadm:x:3:4:adm:/var/adm:/sbin/nologin\n' > "$root/etc/passwd"
   printf 'root:!:20000::::::\nadm:*:20000::::::\n' > "$root/etc/shadow"
   printf '%s\n' "$1" > "$root/usr/lib/auros/policy-mode"
@@ -73,6 +79,8 @@ machine() {
   printf '%s' "$root"
 }
 run() { ROOT="$1" FAKE_STAT="${2:-0:600}" PATH="$STUBS:$PATH" bash -c "$SCRIPT"; }
+# run_expiring — as the unit would run it with A6 switched on (auros-accounts.service, commented out)
+run_expiring() { AUROS_EXPIRE_FIRST_PASSWORD=1 run "$@"; }
 
 TWO='{"schema":1,"accounts":[{"display_name":"Pupil","name":"pupil","role":"user"},{"display_name":"School IT","name":"school-it","role":"admin"}]}'
 
@@ -93,6 +101,7 @@ assert_file   "the done-marker is written"         "$M/var/lib/auros/accounts.do
 assert_nofile "no failure notice on screen"        "$M/etc/issue.d/50-auros-accounts.issue"
 assert_not "the hash is never printed"             'FAKEHASH'            "$OUT"
 assert_has "pupil without a password is said, not hidden" "pupil has no password yet" "$OUT"
+assert_not "A6 is off by default: nobody's password is expired" "chage" "$(cat "$M/calls")"
 
 run_check accounts green "the second boot: accounts exist, nothing re-created" -- run "$M"
 assert_eq "useradd ran once per account, ever" "2" "$(grep -c '^useradd' "$M/calls")"
@@ -100,6 +109,43 @@ assert_eq "useradd ran once per account, ever" "2" "$(grep -c '^useradd' "$M/cal
 O="$(machine open "$TWO" "school-it:$FAKE_HASH")"
 run_check accounts green "an open laptop" -- run "$O"
 assert_eq "the admin joins wheel there" "wheel:school-it" "$(cat "$O/etc/group.members")"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "A6: a new password at first sign-in, every account — built, and OFF in the shipped unit"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+E="$(machine managed "$TWO" "school-it:$FAKE_HASH"$'\n'"pupil:$FAKE_HASH")"
+run_check expire green "switched on: every account created here is expired" -- run_expiring "$E"
+assert_eq "chage -d 0 ran for both accounts" "chage pupil chage school-it" "$(grep '^chage' "$E/calls" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "…after chpasswd, which would otherwise reset the last-change day" "chpasswd" \
+          "$(grep -E '^(chpasswd|chage)' "$E/calls" | head -1 | cut -d' ' -f1)"
+run_check expire green "second boot: an existing account is not expired again" -- run_expiring "$E"
+assert_eq "still two chage calls, ever" "2" "$(grep -c '^chage' "$E/calls")"
+stub "$STUBS" chage <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+F="$(machine managed "$TWO" "school-it:$FAKE_HASH")"
+run_check expire red "switched on and chage fails: not done, said on screen" -- run_expiring "$F"
+assert_nofile "no done-marker" "$F/var/lib/auros/accounts.done"
+assert_nofile "the enrolment file is still deleted" "$F/etc/auros/enrolment/accounts.secret"
+UNIT="$REPO/desktop/accounts/auros-accounts.service"
+assert_has "the shipped unit carries the switch, commented out" "#Environment=AUROS_EXPIRE_FIRST_PASSWORD=1" "$(cat "$UNIT")"
+assert_not "…and does not turn it on (plasmalogin cannot finish an expired-password sign-in)" \
+           $'\nEnvironment=AUROS_EXPIRE_FIRST_PASSWORD=1' $'\n'"$(cat "$UNIT")"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "anaconda's copies of the kickstart (which carried the hashes) go with the enrolment file"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+A="$(machine managed "$TWO" "school-it:$FAKE_HASH")"
+printf '%%post\nmkdir -p /etc/auros/enrolment\n' > "$A/root/anaconda-ks.cfg"
+printf '%%post\nmkdir -p /etc/auros/enrolment\n' > "$A/root/original-ks.cfg"
+run_check accounts green "first boot from enrolled install media" -- run "$A"
+assert_nofile "/root/anaconda-ks.cfg deleted" "$A/root/anaconda-ks.cfg"
+assert_nofile "/root/original-ks.cfg deleted" "$A/root/original-ks.cfg"
+K2="$(machine managed "$TWO" "school-it:$FAKE_HASH")"
+printf 'text\n' > "$K2/root/anaconda-ks.cfg"
+run_check accounts green "a kickstart copy with no enrolment in it" -- run "$K2"
+assert_file "…is left alone" "$K2/root/anaconda-ks.cfg"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "nobody can sign in — refused, on screen"

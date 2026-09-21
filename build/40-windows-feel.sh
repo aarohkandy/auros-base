@@ -372,7 +372,7 @@ fi
 # registry copy, so its presence fails the build.
 ENROL_DIR=/etc/auros/enrolment
 [ ! -e "$ENROL_DIR" ] || die "$ENROL_DIR exists in the image. First passwords come from the install media, one school at a time; a secret baked into the image is published with it"
-for tool in python3 getent useradd usermod chpasswd stat; do
+for tool in python3 getent useradd usermod chpasswd chage stat; do
   command -v "$tool" >/dev/null 2>&1 || die "auros-accounts needs $tool at first boot and this image has none — every machine would start with nobody able to sign in"
 done
 install_file "$SRC/accounts/auros-accounts"          "${AUROS_LIBEXEC}/auros-accounts"                          0755

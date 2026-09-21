@@ -1142,6 +1142,80 @@ assert old in s
 open(p, 'w').write(s.replace(old, """FAILS=$(grep -c '"status":"fail"' "$CHECKS_FILE" || true)"""))
 MUT
 
+printf '\n%s\n' "$(c 1 'accounts — enrolment media, the generator, A4 and A6 (control repo docs/ACCOUNTS.md)')"
+
+mutate "ACCT: make-install-media builds an ISO for an image with accounts and no enrolment file" \
+       tests/make-install-media.test.sh "the image declares accounts and no --enrolment is given" <<'MUT'
+p = 'tools/make-install-media.sh'
+s = open(p).read()
+old = '  [ -n "$ENROL" ] || refuse "$REF declares accounts'
+assert old in s
+open(p, 'w').write(s.replace(old, '  true || refuse "$REF declares accounts'))
+MUT
+
+mutate "ACCT: make-install-media puts a plain-text password on the install media" \
+       tests/make-install-media.test.sh "a plain-text password in the file" <<'MUT'
+p = 'tools/make-install-media.sh'
+s = open(p).read()
+old = '[[ "$h" =~ ^\\$[^:[:space:]]+$ ]]'
+assert old in s
+open(p, 'w').write(s.replace(old, '[[ "$h" =~ ^[^:[:space:]]+$ ]]'))
+MUT
+
+mutate "ACCT: make-enrolment prints the passwords into a pipe or a file" \
+       tests/make-enrolment.test.sh "stdout is a file, not a terminal" <<'MUT'
+p = 'tools/make-enrolment.sh'
+s = open(p).read()
+old = '[ -t 1 ] || refuse'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || refuse'))
+MUT
+
+mutate "ACCT: auros-accounts expires every password even with A6 switched off (plasmalogin lock-out)" \
+       tests/accounts.test.sh "A6 is off by default" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = 'if [ "${AUROS_EXPIRE_FIRST_PASSWORD:-0}" = 1 ]; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if true; then'))
+MUT
+
+mutate "ACCT: auros-accounts leaves anaconda's kickstart copy, with the hashes, in /root" \
+       tests/accounts.test.sh "/root/anaconda-ks.cfg deleted" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = "if grep -qs 'auros/enrolment' \"$k\"; then rm -f \"$k\"; fi"
+assert old in s
+open(p, 'w').write(s.replace(old, ': "$k"'))
+MUT
+
+mutate "ACCT: the admin env script un-hides the Users page for any group NAMED like aurosadmin" \
+       tests/20-policy.test.sh "nor a member of a group merely NAMED like it" <<'MUT'
+p = 'policy/managed/root/etc/xdg/plasma-workspace/env/50-auros-admin-users-page.sh'
+s = open(p).read()
+old = '*" aurosadmin "*)'
+assert old in s
+open(p, 'w').write(s.replace(old, '*aurosadmin*)'))
+MUT
+
+mutate "ACCT: B12 audits a pupil as if they were the IT account" \
+       desktop/tests/b12-modes.test.sh "locked, a pupil: the Users page refuses to open" <<'MUT'
+p = 'desktop/assert-zero-terminal.sh'
+s = open(p).read()
+old = '[[ " $(id -nG 2>/dev/null) " != *" aurosadmin "* ]]'
+assert old in s
+open(p, 'w').write(s.replace(old, 'false'))
+MUT
+
+mutate "ACCT: B5 accepts a password prompt for account management on a locked machine" \
+       policy/tests/assert-lib.test.sh "locked: answerable => FAIL" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = 'a_deny "$level" "accounts.user-admin"'
+assert old in s
+open(p, 'w').write(s.replace(old, 'a_deny admin "accounts.user-admin"'))
+MUT
+
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
   printf '%s\n' "$(c 32 "$PASS/$((PASS+FAIL)) reintroduced bugs were caught by the suite that owns them.")"

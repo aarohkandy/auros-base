@@ -91,6 +91,7 @@ a_suite_no_software        control
 a_suite_no_network_change  control
 a_suite_update_timer       control
 a_suite_policy_immutable   control
+a_suite_accounts           control
 a_suite_kde_kiosk          control
 
 a_finish open

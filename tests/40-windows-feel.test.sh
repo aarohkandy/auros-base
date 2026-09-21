@@ -619,7 +619,7 @@ ACC_BUILD="$(extract_between "$W" '^ENROL_DIR=/etc/auros/enrolment' '^enable_uni
 # <mode>: ok | secret-in-image | no-chpasswd | unit-after-login
 accb_case() {
   local root tools; root="$(newroot)"; tools="$(stubdir)"
-  local t; for t in python3 getent useradd usermod chpasswd stat grep mkdir cp dirname; do
+  local t; for t in python3 getent useradd usermod chpasswd chage stat grep mkdir cp dirname; do
     [ "$1" = no-chpasswd ] && [ "$t" = chpasswd ] && continue
     printf '#!/bin/sh\nexec %s "$@"\n' "$(command -v "$t" 2>/dev/null || echo true)" | stub "$tools" "$t"
   done
