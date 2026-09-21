@@ -255,4 +255,26 @@ assert_has "and says so" "parsed ZERO check ids" "$T_LAST_OUT"
 run_snippet completeness red "the fragment from a half-finished phase is then refused by the verdict line" \
   "OUT='$R9/frag.json'; $VERDICT_SRC"
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "deferred checks (--defer S7/S8) are owned by another job, not filled in as fails"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# Batch 6 (run 35665629960): 9/9 static passes, and the job failed "2 non-passing" because
+# completeness filled in the deferred S7/S8 as fails.
+collect_deferred() { # collect_deferred <deferred ids> <rundir> <profile> <out> <phase>
+  local d="$1"; shift; AUROS_DEFERRED="$d" node "$COLLECT_JS" "$1" "$2" '' "$3" "$4" "$CHECKS_YAML"
+}
+nonpass() { node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String(j.checks.filter(c=>c.status!=="pass").length))' "$1" 2>/dev/null || printf '?'; }
+RD="$(mkrun)"
+for id in $STATIC_IDS; do
+  case "$id" in S7|S8) ;; *) printf '{"id":"%s","status":"pass","detail":"synthetic"}\n' "$id" >> "$RD/checks/static.jsonl" ;; esac
+done
+run_check collect.defer green "S7 and S8 deferred, every other static check passes" -- collect_deferred " S7 S8" "$RD" static "$RD/frag.json" static
+assert_eq "…the fragment has no non-passing checks" "0" "$(nonpass "$RD/frag.json")"
+assert_eq "…and S7 is absent, not synthesised" "MISSING" "$(status_of "$RD/frag.json" S7)"
+RN="$(mkrun)"; cp "$RD/checks/static.jsonl" "$RN/checks/static.jsonl"
+collect_deferred "" "$RN" static "$RN/frag.json" static >/dev/null 2>&1
+assert_eq "WITHOUT --defer, the missing S7 is still a synthesised fail" "fail" "$(status_of "$RN/frag.json" S7)"
+RX="$(mkrun)"; cp "$RD/checks/static.jsonl" "$RX/checks/static.jsonl"
+run_check collect.defer red "deferring a check another job does NOT own (S3) is refused" -- collect_deferred " S3" "$RX" static "$RX/frag.json" static
+
 t_finish "matrix/run.sh collector"

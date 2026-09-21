@@ -137,6 +137,19 @@ if [ -n "$CHECKS" ]; then
 fi
 [ -f "$CHECKS_FILE_FOR_COLLECTOR" ] || die "no matrix definition at $CHECKS_FILE_FOR_COLLECTOR"
 
+# `--defer ID` (passed through to run-static.sh) means ANOTHER job records that check. Without telling
+# the collector, completeness filled the deferred ids in as fails: batch 6 (run 35665629960) recorded
+# 9/9 static passes and the job still failed "2 non-passing" — S7 and S8, which the build and sign jobs
+# own. The deferred ids are left out of THIS fragment; record-pass.mjs and gate.mjs still refuse a
+# digest whose merged fragments lack any required check, so deferral cannot turn a missing check green.
+DEFERRED=""
+_prev=""
+for _a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
+  [ "$_prev" = "--defer" ] && DEFERRED="$DEFERRED $_a"
+  _prev="$_a"
+done
+export AUROS_DEFERRED="$DEFERRED"
+
 node - "$WORKDIR" "$FRAG_PROFILE" "$DIGEST" "$OUT" "$PHASE" "$CHECKS_FILE_FOR_COLLECTOR" <<'NODE'
 const fs = require('node:fs'), path = require('node:path')
 const [dir, profile, digest, out, phase, checksYaml] = process.argv.slice(2)
@@ -237,8 +250,15 @@ if (SECTIONS.length) {
     process.exit(1)
   }
 }
+const deferred = new Set((process.env.AUROS_DEFERRED || '').split(/\s+/).filter(Boolean))
+for (const id of deferred) {
+  if (!['S7', 'S8'].includes(id)) {
+    console.error(`matrix/run.sh: --defer ${id} is not deferrable; only S7 and S8 are owned by another job.`)
+    process.exit(1)
+  }
+}
 for (const id of declared) {
-  if (best.has(id)) continue
+  if (best.has(id) || deferred.has(id)) continue
   best.set(id, {
     id,
     status: 'fail',
