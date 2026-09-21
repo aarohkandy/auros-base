@@ -140,7 +140,12 @@ DEST_OPTS=(--dest-tls-verify=false)
 # reason is written to $W/push-err because the caller invokes this in a command substitution, so a
 # shell variable set in here would die with the subshell.
 push_as() {  # push_as <local image> <tag> ; echoes the pushed digest
-  local img=$1 tag=$2 dest="docker://127.0.0.1:${REG_PORT}/${REPO_PATH}:${tag}" out d
+  # SPLIT, and the repo's own tests/shell-idioms.test.sh is why. bash expands every word of a `local`
+  # line before assigning any of them, so `dest` on a single line would read the OUTER, unset `tag`
+  # and die under set -u. mk_variant below carries the same note; I wrote the bug it warns about
+  # anyway, and the idiom scan caught it before it cost a run.
+  local img=$1 tag=$2
+  local dest="docker://127.0.0.1:${REG_PORT}/${REPO_PATH}:${tag}" out d
   : > "$W/push-err"
   if ! skopeo copy "${DEST_OPTS[@]}" "containers-storage:$img" "$dest" >>"$L/registry.log" 2>&1; then
     printf 'skopeo copy containers-storage:%s -> %s FAILED. Last of registry.log: %s' \
