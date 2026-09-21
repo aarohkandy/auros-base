@@ -358,6 +358,33 @@ t_exempt telemetry.unknown-kind \
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "upstream modules-load.d — zfs and v4l2loopback masked to /dev/null (D43, proposed)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# The claim is the /etc symlink to /dev/null that modules-load.d(5) documents as the vendor-file
+# override. The red cases are an ln that does nothing (the assertion must notice, not trust the
+# loop) and a real directory already sitting at the override path (ln puts the link INSIDE it).
+MLD_BLOCK="$(extract_between "$H" '^for f in zfs.conf v4l2loopback.conf; do' 'forced loads of zfs and v4l2loopback masked' \
+  | rootify /etc/modules-load.d /usr/lib/modules-load.d)"
+mld_run() { # <root> [extra shell run before the block]
+  ROOT="$1" bash -c "$PRE
+${2-}
+$MLD_BLOCK"
+}
+R="$(newroot)"; mkdir -p "$R/usr/lib/modules-load.d"
+printf 'zfs\n' > "$R/usr/lib/modules-load.d/zfs.conf"; printf 'v4l2loopback\n' > "$R/usr/lib/modules-load.d/v4l2loopback.conf"
+run_check hardening.mld-mask green "the base ships both upstream files" -- mld_run "$R"
+assert_symlink_to "zfs.conf is masked"          "$R/etc/modules-load.d/zfs.conf" /dev/null
+assert_symlink_to "v4l2loopback.conf is masked" "$R/etc/modules-load.d/v4l2loopback.conf" /dev/null
+R="$(newroot)"
+run_check hardening.mld-mask green "a base without the files is still masked" -- mld_run "$R"
+assert_symlink_to "zfs.conf is masked even so" "$R/etc/modules-load.d/zfs.conf" /dev/null
+R="$(newroot)"
+run_check hardening.mld-mask red "ln silently does nothing" -- mld_run "$R" 'ln() { :; }'
+assert_has "names the file still live" "zfs.conf is not a symlink to /dev/null" "$T_LAST_OUT"
+R="$(newroot)"; mkdir -p "$R/etc/modules-load.d/v4l2loopback.conf"
+run_check hardening.mld-mask red "a directory already occupies the override path" -- mld_run "$R"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "sshd — BOTH units, because sshd.socket starts sshd on an incoming connection"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # The file's own header says "masked, not disabled ... sshd.socket would start on connection even

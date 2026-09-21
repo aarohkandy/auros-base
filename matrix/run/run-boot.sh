@@ -197,6 +197,10 @@ fi
 
 # ── boot 2 (cold) — B3 ───────────────────────────────────────────────────────────────────────────
 B2_AFTER_1=$(grep -a '"id":"B2"' "$CHECKS_FILE" | tail -1 | grep -c '"status":"pass"' || true)
+# The B2 detail of each boot (failed units and why), because B3 is the only record that sees both:
+# the fragment keeps one B2, and run 35566336512's bios-legacy B3 said "boot1=0 boot2=0" and nothing else.
+b2_detail() { grep -a '"id":"B2"' "$CHECKS_FILE" | tail -1 | node -e 'const l=require("fs").readFileSync(0,"utf8").trim();try{process.stdout.write(JSON.parse(l).detail)}catch{process.stdout.write("<no B2 record>")}'; }
+B2_DETAIL_1=$(b2_detail)
 check_begin
 if [ "$B1_OK_1" != 1 ]; then
   record B3 fail "first boot did not reach a greeter, so there is nothing for a second boot to confirm"
@@ -204,10 +208,11 @@ else
   BOOT_REASON=''
   boot_once 2 || true
   B2_AFTER_2=$(grep -a '"id":"B2"' "$CHECKS_FILE" | tail -1 | grep -c '"status":"pass"' || true)
+  B2_DETAIL_2=$(b2_detail)
   if [ "$BOOT_OK" = 1 ] && [ "${B2_AFTER_1:-0}" = 1 ] && [ "${B2_AFTER_2:-0}" = 1 ]; then
     record B3 pass "two consecutive cold boots both reached a greeter (${B1_SEC_1}s, ${BOOT_SECONDS}s) and both reported is-system-running=running"
   else
-    record B3 fail "boot1 greeter=${B1_OK_1} boot2 greeter=${BOOT_OK}; is-system-running pass on boot1=${B2_AFTER_1:-0} boot2=${B2_AFTER_2:-0}. First-boot provisioning masking a second-boot failure is exactly what B3 is for. ${BOOT_REASON}"
+    record B3 fail "boot1 greeter=${B1_OK_1} boot2 greeter=${BOOT_OK}; is-system-running pass on boot1=${B2_AFTER_1:-0} boot2=${B2_AFTER_2:-0}. First-boot provisioning masking a second-boot failure is exactly what B3 is for. boot1 B2: ${B2_DETAIL_1} | boot2 B2: ${B2_DETAIL_2:-<no second boot>} ${BOOT_REASON}"
   fi
 fi
 

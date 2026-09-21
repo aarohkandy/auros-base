@@ -888,6 +888,53 @@ assert old in s
 open(p, 'w').write(s.replace(old, '[ -n "$v" ] || continue'))
 MUT
 
+printf '\n%s\n' "$(c 1 'B2/B11 diagnostics name what they count')"
+
+mutate "taint_flags reads the kernel's letter table off by one" \
+       tests/b11-diag.test.sh "b11taint" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = 'L=PFSRMBUDAWCIOELKXTNJ'
+assert old in s
+open(p, 'w').write(s.replace(old, 'L=GPFSRMBUDAWCIOELKXTNJ'))
+MUT
+
+mutate "tainted_modules names every module, tainting or not" \
+       tests/b11-diag.test.sh "b11module" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = '[ -n "$t" ] && { f=${f%/taint}; out="$out ${f##*/}($t)"; }'
+assert old in s
+open(p, 'w').write(s.replace(old, '{ f=${f%/taint}; out="$out ${f##*/}($t)"; }'))
+MUT
+
+mutate "avc_summary stops folding identical denials" \
+       tests/b11-diag.test.sh "b11avc" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = '| sort | uniq -c | sort -rn | head -15'
+assert old in s
+open(p, 'w').write(s.replace(old, '| sed "s/^/1 /" | head -15'))
+MUT
+
+mutate "masked_modules_state reports not-loaded whatever /sys/module says" \
+       tests/b11-diag.test.sh "b11masked" <<'MUT'
+p = 'matrix/run/guest/auros-matrix-agent.sh'
+s = open(p).read()
+old = 'if [ -d "${1:-/sys/module}/$m" ]; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if false; then'))
+MUT
+
+mutate "10-hardening stops masking upstream's zfs modules-load.d file" \
+       tests/10-hardening.test.sh "mld-mask" <<'MUT'
+p = 'build/10-hardening.sh'
+s = open(p).read()
+old = 'ln -sfn /dev/null "/etc/modules-load.d/$f"'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ "$f" = zfs.conf ] || ' + old))
+MUT
+
 printf '\n%s\n' "$(c 1 'the harness itself')"
 
 mutate "an extraction stops matching — the suite must ABORT, not quietly test an empty program" \
