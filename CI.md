@@ -416,6 +416,9 @@ Before the first run, the harness could not have produced a single verdict for a
 | S6 measured `containers-storage:`, whose layers are `application/vnd.oci.image.layer.v1.tar` | 8,439,590,767 B reported as a "compressed pull size"; base.lock records the same upstream at 3,758,096,384 B |
 | `sudo -E` alone: sudo replaces PATH with its secure_path | U1–U5 and R1 all failed "cosign is not installed" while the job printed `/home/runner/.cosign/cosign` |
 | `base.lock`'s `UPSTREAM_PULL_SIZE_BYTES` was `3758096384` — exactly 3.5 GiB | not a measurement. The real figure, read off ghcr.io against the pinned digest with the resolver's own definition, is **3,706,306,117 B across 256 `…tar+zstd` layers**. 1.4% out, and S6 budgets against it |
+| `push_as()` sent skopeo's stderr to `/dev/null` | sixteen minutes of qcow2, then U1–U5 and R1 all failed with one sentence — "could not push image A to the harness registry" — while `registry.log` ended with "Writing manifest to image destination". The push had *succeeded*; the read-back on the next line was what failed, and its message had been discarded |
+| `image-probe.sh` looked for a display manager in a list of six hardcoded paths | the list matched **nothing**. This base's display manager is `/usr/bin/plasmalogin` (`display-manager.service` → `plasmalogin.service`). S9's kiosk branch would have certified "no display-manager binary" on an image that still shipped one, and `vm.sh`'s greeter regex carried a dead `sddm` alternative |
+| the profile was resolved by `eval` **after** `build_qcow2` | an unknown profile id surfaced ten minutes later as `P_DISK_GB: unbound variable`, with `profile.mjs`'s own "Known: …" list swallowed |
 
 **What the run also confirmed working**, since a probe that only finds bugs is not reporting honestly:
 S1, S2, S3 and S4 pass on the derivative; the in-image probe returns 2,168 rpms and a readable
