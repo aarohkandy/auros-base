@@ -267,7 +267,14 @@ const bad = merged.filter(c => c.status !== 'pass')
 console.error(`matrix/run.sh: ${merged.length} checks -> ${out} (${bad.length} not passing)`)
 NODE
 
-FAILED=$(node -e 'const j=require(process.argv[1]);process.stdout.write(String(j.checks.filter(c=>c.status!=="pass").length))' "$OUT")
+# `require(process.argv[1])` was the bug here, and it is why this line had never been seen to work:
+# node treats a relative specifier that does not begin with ./ as a MODULE NAME, and build.yml
+# passes exactly that — `--out fragments/static.json`. The fragment was written correctly and then:
+#     Error: Cannot find module 'fragments/static.json'
+# Under `set -e` that killed run.sh with node's exit 1, so the phase reported failure whatever the
+# checks said, INCLUDING a phase in which every check passed. Measured: run 35548759944.
+# Read the file; do not import it.
+FAILED=$(node -e 'const fs=require("node:fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(j.checks.filter(c=>c.status!=="pass").length))' "$OUT")
 if [ "$FAILED" != "0" ]; then
   echo "matrix/run.sh: phase '$PHASE' had $FAILED non-passing check(s) — see $OUT" >&2
   exit 1

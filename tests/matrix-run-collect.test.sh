@@ -170,6 +170,20 @@ F_SKIP="$(newroot)/one-skip.json"
 echo '{"profile":"static","checks":[{"id":"S1","status":"pass"},{"id":"S2","status":"skip"}]}' > "$F_SKIP"
 run_snippet verdict red "a SKIP is not a pass either — a check that did not run did not pass" "OUT='$F_SKIP'; $VERDICT_SRC"
 
+# THE SHAPE CI ACTUALLY PASSES, and the one this line had never been given. build.yml calls
+# `--out fragments/static.json` — a bare relative path. `require()` reads that as a MODULE NAME, so
+# the verdict line died with "Cannot find module 'fragments/static.json'" on a fragment that had
+# just been written correctly, and `set -e` turned that into a failed phase no matter what the
+# checks said. Every case above used an absolute path and sailed straight past it.
+# Measured: run 35548759944.
+REL_DIR="$(newroot)/relcase"; mkdir -p "$REL_DIR/fragments"
+echo '{"profile":"static","checks":[{"id":"S1","status":"pass"},{"id":"S2","status":"pass"}]}' > "$REL_DIR/fragments/static.json"
+run_snippet verdict green "a RELATIVE --out path, as build.yml passes, is read rather than imported" \
+  "cd '$REL_DIR'; OUT=fragments/static.json; $VERDICT_SRC"
+echo '{"profile":"static","checks":[{"id":"S1","status":"fail"}]}' > "$REL_DIR/fragments/static.json"
+run_snippet verdict red "and a relative path with a failing check still goes red for the RIGHT reason" \
+  "cd '$REL_DIR'; OUT=fragments/static.json; $VERDICT_SRC"
+
 # ── work/ is inputs, not verdicts ────────────────────────────────────────────────────────────────
 # The run directory also holds bib's config, the flatpak probe result and the image manifest. The
 # strictness above fired on them the first time it ran in CI (run 35548492085 died with
