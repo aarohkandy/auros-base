@@ -411,6 +411,35 @@ jobs:
           export AUROS_DEADLINE_DIVISOR="${AUROS_DEADLINE_DIVISOR:-6}"
           printf '%s' "${AUROS_DEV_SIGNING_KEY:-}" > /tmp/probe-signing.key
           chmod 600 /tmp/probe-signing.key
+
+          # THE KEY IS IN THE WRONG FORMAT FOR COSIGN, and this is what U1-U5 and R1 died on:
+          #
+          #   reading key: unsupported pem type: EC PRIVATE KEY
+          #
+          # signing/keys/DEVELOPMENT-KEY.md says the pair was generated with
+          # `openssl ecparam -name prime256v1`, which emits a SEC1 "EC PRIVATE KEY" PEM. cosign's
+          # --key reads its OWN format ("ENCRYPTED SIGSTORE PRIVATE KEY"), and converting is what
+          # `cosign import-key-pair` is for. The import derives the same public key, so the image's
+          # /usr/lib/pki/containers/ half still matches.
+          #
+          # COSIGN_PASSWORD must also be set, or cosign prompts on a runner with no tty and fails
+          # with "inappropriate ioctl for device" before it ever looks at the PEM.
+          export COSIGN_PASSWORD="${COSIGN_PASSWORD:-}"
+          if grep -q 'SIGSTORE PRIVATE KEY' /tmp/probe-signing.key; then
+            echo "the secret is already in cosign's own format; using it as is"
+          else
+            echo "the secret is a raw PEM ($(head -1 /tmp/probe-signing.key)); converting with cosign import-key-pair"
+            cosign import-key-pair --help >/dev/null 2>&1               || { echo "::error::this cosign has no 'import-key-pair' subcommand, so the raw PEM cannot be converted. Regenerate the development key with 'cosign generate-key-pair' instead."; }
+            if cosign import-key-pair --key /tmp/probe-signing.key --output-key-prefix /tmp/auros-dev; then
+              mv -f /tmp/auros-dev.key /tmp/probe-signing.key
+              chmod 600 /tmp/probe-signing.key
+              echo "converted; the key now starts: $(head -1 /tmp/probe-signing.key)"
+              echo "public half derived by the import:"; cat /tmp/auros-dev.pub || true
+              echo "public half the repo ships:"; cat signing/keys/auros-development.pub || true
+            else
+              echo "::warning::cosign import-key-pair failed; U1-U5 and R1 will fail on the signer, honestly"
+            fi
+          fi
           mkdir -p fragments matrix-run/logs
           export AUROS_RUN_DIR="$PWD/matrix-run"
           # Fail fast while debugging the HARNESS. run-boot.sh's default agent deadline is 2400s per
