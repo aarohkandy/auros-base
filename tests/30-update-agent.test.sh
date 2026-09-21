@@ -811,4 +811,41 @@ R="$(newroot)"
 run_check signing.sigpolicy red "the value is a quoted string rather than the boolean" -- toml_run "$R" '[install]
 enforce-container-sigpolicy = "true"'
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "A6. the SELinux module -- present, narrow, and installed-or-the-build-fails"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+CIL="$REPO/update-agent/selinux/auros_bootc.cil"
+assert_file "the policy module ships in the repo" "$CIL"
+# Narrow = a domain transition into install_t and nothing else. A rule that hands mac_admin (or any
+# capability) to unconfined_service_t is the widening the owner decision ruled out.
+cil_narrow() { # <file>
+  local rules; rules="$(grep -v '^[[:space:]]*;' "$1" | grep -v '^[[:space:]]*$')"
+  [ "$rules" = "(typetransition unconfined_service_t install_exec_t process install_t)
+(allow unconfined_service_t install_t (process (transition)))" ]
+}
+run_check selinux.narrow green "the shipped module is exactly the install_t transition" -- cil_narrow "$CIL"
+W="$(newroot)/wide.cil"; { cat "$CIL"; echo '(allow unconfined_service_t self (capability2 (mac_admin)))'; } > "$W"
+run_check selinux.narrow red "a module that also grants unconfined_service_t mac_admin" -- cil_narrow "$W"
+
+assert_has "the build installs that exact file" 'install_selinux_module "$UA/selinux/auros_bootc.cil"' \
+  "$(extract_lines "$U" '^install_selinux_module ')"
+
+SEL_FN="$(extract_fn "$U" install_selinux_module)"
+sel_run() { # <cil> <matchpathcon-output> <semodule -l output>
+  local b; b="$(stubdir)"
+  printf '#!/bin/sh\necho "%s"\n' "$2" > "$b/matchpathcon"
+  printf '#!/bin/sh\n[ "$1" = -l ] && printf "%%s\\n" base %s\nexit 0\n' "$3" > "$b/semodule"
+  chmod 0755 "$b/matchpathcon" "$b/semodule"
+  PATH="$b:$PATH" bash -c "$PRE
+set -euo pipefail
+$SEL_FN
+install_selinux_module '$1'"
+}
+GOOD=system_u:object_r:install_exec_t:s0
+run_check selinux.installed green "module present, bootc install_exec_t, semodule -l lists it" -- sel_run "$CIL" "$GOOD" auros_bootc
+run_check selinux.installed red "semodule -i exits 0 but semodule -l does not list the module" -- sel_run "$CIL" "$GOOD" other_module
+run_check selinux.installed red "a module whose name only CONTAINS ours is not ours" -- sel_run "$CIL" "$GOOD" auros_bootc_old
+run_check selinux.installed red "the .cil is missing from the build context" -- sel_run "$(newroot)/auros_bootc.cil" "$GOOD" auros_bootc
+run_check selinux.installed red "bootc relabelled away from install_exec_t -- the module would do nothing" -- sel_run "$CIL" system_u:object_r:bin_t:s0 auros_bootc
+
 t_finish "30-update-agent.sh"

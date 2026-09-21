@@ -1,0 +1,18 @@
+; auros_bootc -- run bootc from a systemd service in the domain Fedora wrote for it.
+;
+; bootc's test_install_t() (crates/lib/src/lsm.rs) chcon's a tmpfile on every root call; that needs
+; capability2 mac_admin. Fedora grants it to install_t (anaconda.te: allow install_t self:capability2
+; mac_admin), labels /usr/bin/bootc (and ostree, rpm-ostree) install_exec_t (anaconda.fc), and makes
+; the transition only from init_t (init.te: anaconda_domtrans_install(init_t)). Our auros-update and
+; greenboot checks run as unconfined_service_t, so bootc stays in that domain and is denied.
+;
+; This is anaconda_domtrans_install(unconfined_service_t) (anaconda.if -> domtrans_pattern) minus the
+; rules unconfined_domain_type already holds (exec, fd, sigchld, noatsecure/siginh/rlimitinh -- read
+; with sesearch on selinux-policy-targeted 43.10). It grants unconfined_service_t no capability: it
+; only moves bootc/ostree/rpm-ostree into install_t, exactly as when init_t starts them.
+; CIL, not .te: semodule (policycoreutils) compiles CIL itself; checkmodule and the refpolicy macros
+; (checkpolicy, selinux-policy-devel) are not installed.
+; Scope ceiling: every unconfined_service_t caller transitions, not only ours -- greenboot-rs runs .sh
+; checks as `bash -C file`, so a private exec type on our scripts would never transition.
+(typetransition unconfined_service_t install_exec_t process install_t)
+(allow unconfined_service_t install_t (process (transition)))

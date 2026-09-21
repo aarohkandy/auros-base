@@ -514,6 +514,25 @@ assert_unit_enabled greenboot-set-rollback-trigger.service "nothing would arm th
 did "every enablement link verified on disk, derived from the units themselves"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A6. SELinux: bootc started by our units runs in install_t (auros_bootc.cil)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# B11 saw chcon {mac_admin} denied for unconfined_service_t whenever auros-update or a greenboot
+# check ran bootc. Why, and why this is the narrowest fix, is in the .cil's own header.
+# The module only helps while Fedora labels bootc install_exec_t, so that is asserted first.
+install_selinux_module() { # <file.cil>
+  local cil="$1" mod
+  mod="$(basename "$cil" .cil)"
+  [ -f "$cil" ] || die "$cil is missing -- bootc run by auros-update and the greenboot checks would be denied mac_admin again (B11)"
+  [ "$(matchpathcon -n /usr/bin/bootc 2>/dev/null)" = "system_u:object_r:install_exec_t:s0" ] || die \
+    "/usr/bin/bootc is not labelled install_exec_t (got: $(matchpathcon -n /usr/bin/bootc 2>&1)). $mod transitions on that type, so it would load and do nothing."
+  semodule -i "$cil" || die "semodule -i $cil failed"
+  # grep without -q: under pipefail, -q exiting early can SIGPIPE semodule and fail a found match.
+  semodule -l | grep -x "$mod" >/dev/null || die "semodule -i exited 0 but '$mod' is not in semodule -l -- it is not in the policy this image boots"
+  did "SELinux module $mod installed and listed by semodule -l"
+}
+install_selinux_module "$UA/selinux/auros_bootc.cil"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 step "summary"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 found "update path   bootc-fetch-apply-updates.timer (bootc's own unit, enabled by us; Aurora"
