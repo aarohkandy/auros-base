@@ -68,3 +68,26 @@ test('a base build (run-static.sh passes --recipe "") declares no floor and pass
   assert.equal(r.status, 'pass', r.detail);
   assert.match(r.detail, /base build/);
 });
+
+// S5 (D44, owner 2026-09-21): a base build declares no removal set, so S5 does not apply to it —
+// but a RECIPE with no removal report must still fail. Both directions, from the real analyzer.
+function s5(recipe) {
+  const dir = mkdtempSync(join(tmpdir(), 'auros-s5-'));
+  writeFileSync(join(dir, 'probe.txt'), `PROBE_OK=1\n---RPM-NAMES---\npkg0\t100\n---END---\n`);
+  const out = join(dir, 'out.jsonl');
+  const r = spawnSync(process.execPath, [ANALYZE, '--probe', join(dir, 'probe.txt'), '--out', out, '--recipe', recipe, '--policy', 'open'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const row = readFileSync(out, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((x) => x.id === 'S5');
+  assert.ok(row, 'S5 was not recorded at all');
+  return row;
+}
+
+test('S5: a base build with no removal report passes as not applicable (D44)', () => {
+  const r = s5('');
+  assert.equal(r.status, 'pass', r.detail);
+  assert.match(r.detail, /not applicable to a base build/);
+});
+
+test('S5: a recipe with no removal report still FAILS', () => {
+  assert.equal(s5('example-kiosk').status, 'fail');
+});

@@ -120,7 +120,10 @@ const declaredRemove = lines(args['declared-remove']);
 
 // ── S5 — the removal report is a measurement, not a claim ───────────────────────────────────────
 {
-  if (reportErr) rec('S5', 'fail', reportErr);
+  // OWNER, 2026-09-21 (D44): S5 is a recipe property. A base build records its removals in its build
+  // manifest; it declares no removal set for S5 to compare, so S5 does not apply to it.
+  if (isBase && !kv.REMOVAL_REPORT_PATH) rec('S5', 'pass', 'not applicable to a base build: removal reports are a recipe property (D44); the base records its removals in its build manifest');
+  else if (reportErr) rec('S5', 'fail', reportErr);
   else if (!kv.REMOVAL_REPORT_PATH) {
     rec('S5', 'fail', `no removal report found. Searched: ${SEARCHED}. The harness assumes the prune engine writes one there — if it lands somewhere else, this check is the thing to update, not to silence. A base build must still emit one declaring an empty set, so that "we removed nothing" is a recorded measurement rather than a missing file.`);
   } else if (!entries) {
