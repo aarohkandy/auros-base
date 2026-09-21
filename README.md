@@ -233,4 +233,8 @@ asserts it at build time and check **S10** refuses to publish without it.
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE).
+**Proprietary. All rights reserved.** See [LICENSE](LICENSE) and [../LICENSING.md](https://github.com/aarohkandy/auros/blob/main/LICENSING.md).
+
+This repository is *readable*; no licence is granted to copy, modify or redistribute it. The image it
+builds is a derivative of Fedora and Universal Blue and carries **their** licences per package —
+several of them copyleft — and nothing here limits any right a recipient holds under those.
