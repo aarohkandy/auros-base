@@ -829,6 +829,17 @@ assert old in s
 open(p, 'w').write(s.replace(old, '! cosign sign --help 2>&1 ' + chr(124) + ' grep -q -- "${FLAG%%=*}"'))
 MUT
 
+printf '\n%s\n' "$(c 1 'D21 — the mirror gate in build.yml plan')"
+
+mutate "H6: D21 goes back to a ::warning:: when the mirror is populated and FROM still points upstream" \
+       tests/d21-gate.test.sh "the build FAILS" <<'MUT'
+p = '.github/workflows/build.yml'
+s = open(p).read()
+old = "resolve-upstream.sh assert already accepts it.\"\n            exit 1\n"
+assert old in s
+open(p, 'w').write(s.replace(old, "resolve-upstream.sh assert already accepts it.\"\n"))
+MUT
+
 printf '\n%s\n' "$(c 1 'the harness itself')"
 
 mutate "an extraction stops matching — the suite must ABORT, not quietly test an empty program" \

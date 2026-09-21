@@ -168,15 +168,32 @@ jobs:
         run: ./tools/resolve-upstream.sh assert --mirror '${{ steps.cfg.outputs.mirror }}'
 
       - name: Is D21 actually in force?
+        env:
+          BASE_VIA: ${{ steps.s1.outputs.base_via }}
+          MIRROR: ${{ steps.cfg.outputs.mirror }}
         run: |
-          # Not a gate — A1 owns the Containerfile and may not have flipped FROM to the mirror yet.
-          # But it must be visible, because the day it matters is the day upstream garbage-collects
-          # our pin and every build fails on an image nobody touched.
-          if [ '${{ steps.s1.outputs.base_via }}' = 'upstream' ]; then
-            echo "::warning::FROM still resolves against upstream, not the mirror. D21 says the pin is deleted by upstream's weekly GHCR cleanup after ~90 days or 7 newer stable tags. The mirror is populated by this run regardless, so flipping FROM to '${{ steps.cfg.outputs.mirror }}' is a one-line change in the Containerfile."
-          else
-            echo "D21 in force: FROM resolves via the mirror."
+          # D21 calls the mirror "not optional": upstream's weekly GHCR cleanup deletes our pin after
+          # ~90 days or 7 newer stable tags. This used to be only a ::warning::, lost in a fifty-minute
+          # build's log (SYSTEM-REVIEW §2.18, H6). Now it GATES, from the moment flipping is possible:
+          # if the mirror verifiably holds base.lock's digest and FROM still points upstream, the build
+          # stops. If the mirror is not (yet, or not visibly) populated, flipping would break the
+          # build, so that case stays a warning. Tested by tests/d21-gate.test.sh.
+          #
+          # Inspected by DIGEST, which is how the Containerfile would pin it, and anonymously: a mirror
+          # only an authenticated runner can pull does not keep a customer's fork buildable, which is
+          # the whole of D21's point.
+          if [ "$BASE_VIA" != 'upstream' ]; then
+            echo "D21 in force: FROM resolves via the mirror (${BASE_VIA})."
+            exit 0
           fi
+          DIGEST=$(grep -m1 -E '^UPSTREAM_DIGEST=sha256:[0-9a-f]{64}$' base.lock | cut -d= -f2) \
+            || { echo "::error::base.lock has no well-formed UPSTREAM_DIGEST, so whether D21 can be enforced is unknown"; exit 1; }
+          if skopeo inspect --raw "docker://${MIRROR}@${DIGEST}" >/dev/null 2>/tmp/mirror.err; then
+            echo "::error::D21 not in force: the mirror holds ${MIRROR}@${DIGEST} (skopeo inspect succeeded), but the Containerfile's FROM still resolves against upstream, which deletes that digest after ~90 days or 7 newer stable tags. Flip the FROM line to '${MIRROR}@${DIGEST}' — one line; resolve-upstream.sh assert already accepts it."
+            exit 1
+          fi
+          echo "::warning::FROM still resolves against upstream, and ${MIRROR}@${DIGEST} could not be inspected anonymously, so D21 cannot be enforced yet. A publishable run on main populates the mirror; from then on this step fails the build until FROM is flipped."
+          sed -n '1,5p' /tmp/mirror.err
 
       - name: Upstream drift (information, not a gate)
         run: |
