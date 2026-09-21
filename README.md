@@ -123,13 +123,10 @@ TAG=hardened
 DIGEST=$(skopeo inspect --format '{{.Digest}}' "docker://$IMAGE:$TAG")
 echo "$DIGEST"
 
-# 2 ── Verify the signature. Keyless: there is no Auros private key to steal, because there is no
-#      Auros private key. The signature is bound to a short-lived certificate issued to a GitHub
-#      Actions workflow in THIS repository, and the identity below is what you are actually trusting.
-cosign verify \
-  --certificate-oidc-issuer='https://token.actions.githubusercontent.com' \
-  --certificate-identity-regexp='^https://github\.com/aarohkandy/auros-base/\.github/workflows/.+@refs/heads/main$' \
-  "$IMAGE@$DIGEST"
+# 2 ── Verify the signature against the Auros public key. Signing is keyed, not keyless (D8/D17):
+#      the key below is the one every Auros machine's /etc/containers/policy.json trusts, and this
+#      repository ships it. No production key exists yet (BLOCKED.md B10), so today this refuses.
+cosign verify --key signing/keys/auros.pub "$IMAGE@$DIGEST"
 
 # 3 ── Verify the signature is DISCOVERABLE, which is a different question and not an academic one.
 #      cosign 3.x defaults to new-format OCI 1.1 referrer bundles that containers/image cannot see.
