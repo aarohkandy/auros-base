@@ -377,19 +377,29 @@ group "C. 70-update-freshness.sh -- quiet on a first boot, loud on a machine tha
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 FR="$UA/greenboot/check/wanted.d/70-update-freshness.sh"
 
+# booted_image <root> <seconds-ago|none> -- what `bootc status --json` says about the running image.
+# .status.booted.image.timestamp is bootc's ImageStatus.timestamp (v1.16.10 spec.rs:206-217).
+booted_image() {
+  local ts='null'; [ "$2" = none ] || ts="\"$(epoch_iso "$2")\""
+  printf '{"status":{"booted":{"image":{"imageDigest":"sha256:c0ffee","timestamp":%s}}}}\n' "$ts" \
+    > "$1/.stub/bootc-status.json"
+}
+# fr_root -- a fresh root running a two-day-old image, so C1-C7 exercise the fetch half alone.
+fr_root() { local r; r="$(new_root)"; booted_image "$r" 172800; printf '%s' "$r"; }
+
 # C1 -- first boot: no stamp yet, and none is due. Must be GREEN.
-r="$(new_root)"; printf '60.00 100.00\n' > "$r/proc/uptime"
+r="$(fr_root)"; printf '60.00 100.00\n' > "$r/proc/uptime"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C1 first boot exits 0" 0 "$RC"
 assert_has "C1 explains that none is due yet" "none is due yet" "$out"
 
 # C2 -- up for five days with no successful fetch: that machine is not being patched.
-r="$(new_root)"; printf '432000.00 100.00\n' > "$r/proc/uptime"
+r="$(fr_root)"; printf '432000.00 100.00\n' > "$r/proc/uptime"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C2 five days up with no fetch exits 1" 1 "$RC"
 
 # C3 -- short uptime but the agent has known this machine for three days across reboots.
-r="$(new_root)"; printf '60.00 100.00\n' > "$r/proc/uptime"
+r="$(fr_root)"; printf '60.00 100.00\n' > "$r/proc/uptime"
 python3 -c 'import time,sys;open(sys.argv[1],"w").write(str(int(time.time())-259200)+"\n")' \
   "$r/var/lib/auros/update-agent/agent-first-seen"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
@@ -397,7 +407,7 @@ assert_eq  "C3 known for 3 days with no fetch exits 1 despite a 60s uptime" 1 "$
 assert_has "C3 points at the timer" "bootc-fetch-apply-updates.timer" "$out"
 
 # C4 -- it has tried and always failed: a different, worse sentence than "never tried".
-r="$(new_root)"; printf '432000.00 100.00\n' > "$r/proc/uptime"
+r="$(fr_root)"; printf '432000.00 100.00\n' > "$r/proc/uptime"
 epoch_iso 300 > "$r/var/lib/auros/update-agent/last-fetch-attempt"
 printf 'rc=125\noutput<<EOF\nSource image rejected\nEOF\n' > "$r/var/lib/auros/update-agent/last-error"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
@@ -406,23 +416,57 @@ assert_has "C4 distinguishes it from 'never tried'" "has never once succeeded" "
 assert_has "C4 quotes the last error" "Source image rejected" "$out"
 
 # C5 -- a fetch yesterday is fine.
-r="$(new_root)"; epoch_iso 86400 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+r="$(fr_root)"; epoch_iso 86400 > "$r/var/lib/auros/update-agent/last-successful-fetch"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C5 a one-day-old stamp exits 0" 0 "$RC"
 assert_has "C5 reports the age" "1 day(s) ago" "$out"
 
 # C6 -- twenty days is the condition this check exists for.
-r="$(new_root)"; epoch_iso 1728000 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+r="$(fr_root)"; epoch_iso 1728000 > "$r/var/lib/auros/update-agent/last-successful-fetch"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C6 a twenty-day-old stamp exits 1" 1 "$RC"
 assert_has "C6 says it may be drifting out of support" "drifting out of support" "$out"
 
 # C7 -- succeeded recently but failing right now: still green, but the failures are shown.
-r="$(new_root)"; epoch_iso 86400 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+r="$(fr_root)"; epoch_iso 86400 > "$r/var/lib/auros/update-agent/last-successful-fetch"
 printf 'rc=125\n' > "$r/var/lib/auros/update-agent/last-error"
 run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
 assert_eq  "C7 recent success with a current failure exits 0" 0 "$RC"
 assert_has "C7 but surfaces the current failure" "most recent fetch attempt FAILED" "$out"
+
+# C8 -- SYSTEM-REVIEW §2.4, THE SCENARIO: we stopped publishing. Every fetch succeeds ("already
+# up to date"), so the stamp is minutes old -- and the image the machine runs is 40 days old.
+# Before the fix this was "OK: last successful update fetch was 0 day(s) ago", forever.
+r="$(fr_root)"; booted_image "$r" 3456000; epoch_iso 300 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
+assert_eq  "C8 stale image + fresh fetch stamp exits 1" 1 "$RC"
+assert_has "C8 says the RUNNING image is old" "running image (sha256:c0ffee) was built 40 days ago" "$out"
+assert_has "C8 still reports the fetch half" "last successful update fetch was 0 day(s) ago" "$out"
+
+# C9 -- the same fresh stamp with a current image is GREEN, and says how old the image is.
+r="$(fr_root)"; epoch_iso 300 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
+assert_eq  "C9 current image + fresh stamp exits 0" 0 "$RC"
+assert_has "C9 reports the image age" "was built 2 day(s) ago" "$out"
+
+# C10 -- bootc's timestamp is optional. Absent is not fresh: the canary must say it cannot see.
+r="$(fr_root)"; booted_image "$r" none; epoch_iso 300 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
+assert_eq  "C10 no image timestamp exits 1" 1 "$RC"
+assert_has "C10 names the field" ".status.booted.image.timestamp" "$out"
+
+# C11 -- chrono can emit nanoseconds and Z; that must parse, not read as "no timestamp".
+r="$(fr_root)"; epoch_iso 300 > "$r/var/lib/auros/update-agent/last-successful-fetch"
+printf '{"status":{"booted":{"image":{"imageDigest":"sha256:c0ffee","timestamp":"%s.123456789Z"}}}}\n' \
+  "$(epoch_iso 86400 | sed 's/+00:00$//')" > "$r/.stub/bootc-status.json"
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
+assert_eq  "C11 a nanosecond Z timestamp parses and is green" 0 "$RC"
+assert_has "C11 reports one day" "was built 1 day(s) ago" "$out"
+
+# C12 -- a stale image is red even on the first-boot path where the fetch half is quiet.
+r="$(fr_root)"; booted_image "$r" 3456000
+run_script "$FR" "$r" >/dev/null; out="$RUN_OUT"
+assert_eq  "C12 stale image on a first boot exits 1" 1 "$RC"
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 group "D. 40-no-new-failed-units + green.d -- both sides sampled at the same point"

@@ -32,6 +32,21 @@
 #      * agent-first-seen, written by this check the first time it runs, which catches "has
 #        existed across many short boots and still nothing".
 #    Below both thresholds: OK, and it says why. Above either: PROBLEM.
+#
+# ── AND IT WAS BLIND TO THE FAILURE WE ARE MOST LIKELY TO HAVE (SYSTEM-REVIEW §2.4, H4) ─────────
+#
+# 3. last-successful-fetch is stamped whenever `bootc upgrade` exits 0, and that includes
+#    "already up to date; nothing staged". So if WE stop publishing, every laptop reaches the
+#    registry every six hours, finds nothing, and reports "0 day(s) ago" -- green, forever. The
+#    stamp measures registry reachability, not whether the running image is current.
+#
+#    So this check now ALSO reads the booted image's build time from `bootc status --json` and
+#    goes red when it is older than IMAGE_WARN_AFTER_DAYS, whatever the fetch stamp says. The
+#    field is .status.booted.image.timestamp: ImageStatus.timestamp, Option<DateTime<Utc>>,
+#    serde camelCase, in bootc v1.16.10 crates/lib/src/spec.rs:206-217 (D25 pins bootc 1.16.10).
+#    bootc fills it from the image's org.opencontainers.image.created LABEL, falling back to the
+#    config's `created` (crates/lib/src/status.rs:203-209). It is optional, so an absent value is
+#    reported, not assumed fresh: a canary that cannot see is not allowed to say green.
 
 set -uo pipefail
 
@@ -48,6 +63,14 @@ ATTEMPT="${STATE_DIR}/last-fetch-attempt"
 FIRST_SEEN="${STATE_DIR}/agent-first-seen"
 WARN_AFTER_DAYS=14
 
+# OWNER-TUNABLE JUDGMENT, not a measured constant. How old may the image a machine is RUNNING be
+# before we call it drifting? Upstream Aurora stable rebuilds weekly (D25: cron Tuesday) and our
+# nightly relocks when it moves, so a healthy machine's image is ~7 days old plus however long a
+# staged update waits for a reboot. 21 days = roughly two missed upstream releases plus a reboot
+# that slipped a week. Lower it and machines left on over a holiday go red; raise it and a stalled
+# publish pipeline stays green for longer before the fleet says so.
+IMAGE_WARN_AFTER_DAYS=21
+
 # OnBootSec=3min + RandomizedDelaySec up to 10min = 13 min before the first run is even due, and
 # then it has to pull over whatever the school's uplink is. 45 minutes is that with room, and it
 # is far below the 14-day threshold this check exists for, so nothing real hides inside it.
@@ -55,6 +78,45 @@ GRACE_SECONDS=2700
 
 now_s="$(date +%s)"
 
+# ── HALF 1: is the image this machine is RUNNING current? ───────────────────────────────────────
+# Runs first and never exits: its verdict is carried in image_rc and folded into every exit below,
+# so a stale image cannot be masked by a fresh fetch stamp (the exact §2.4 scenario) and a fetch
+# failure cannot be masked by a fresh image.
+image_rc=0
+# python3, not jq: libexec/auros-update does the same, jq is not guaranteed in the image.
+booted="$(bootc status --json 2>/dev/null | python3 -c '
+import json, re, sys, datetime
+try:
+    img = json.load(sys.stdin)["status"]["booted"]["image"]
+except Exception:
+    sys.exit(0)
+ts = img.get("timestamp") or ""
+digest = img.get("imageDigest") or "unknown-digest"
+try:
+    # chrono may emit nanoseconds; fromisoformat takes at most microseconds.
+    t = datetime.datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", ts).replace("Z", "+00:00"))
+    print(int(t.timestamp()), digest)
+except Exception:
+    print("none", digest)
+' 2>/dev/null || true)"
+read -r image_s image_digest <<<"${booted}"
+if [[ -z "${booted}" ]]; then
+    echo "PROBLEM: cannot tell how old the running image is: \`bootc status --json\` gave no booted image." >&2
+    image_rc=1
+elif [[ ! "${image_s}" =~ ^[0-9]+$ ]]; then
+    echo "PROBLEM: the booted image (${image_digest}) carries no build timestamp in \`bootc status --json\` (.status.booted.image.timestamp), so this machine cannot tell whether it is current." >&2
+    image_rc=1
+else
+    image_age_days=$(( (now_s - image_s) / 86400 ))
+    if (( image_age_days >= IMAGE_WARN_AFTER_DAYS )); then
+        echo "PROBLEM: the running image (${image_digest}) was built ${image_age_days} days ago (threshold ${IMAGE_WARN_AFTER_DAYS}). Whatever the fetch stamp below says, no newer image has reached this machine -- if fetches are succeeding, nothing newer is being published." >&2
+        image_rc=1
+    else
+        echo "OK: the running image (${image_digest}) was built ${image_age_days} day(s) ago."
+    fi
+fi
+
+# ── HALF 2: can this machine still fetch? ────────────────────────────────────────────────────────
 show_last_error() {
     [[ -r "${STATE_DIR}/last-error" ]] && sed 's/^/  /' "${STATE_DIR}/last-error" >&2
     return 0
@@ -78,7 +140,7 @@ if [[ ! -r "${STAMP}" ]]; then
         echo "OK: no update fetch has completed yet, and none is due yet -- this machine has been"
         echo "up ${uptime_s}s and known to the update agent for ${known_for}s, against a first-run"
         echo "window of ${GRACE_SECONDS}s (OnBootSec=3min + up to 10min jitter + the pull)."
-        exit 0
+        exit "${image_rc}"
     fi
 
     if [[ -r "${ATTEMPT}" ]]; then
@@ -110,4 +172,4 @@ if [[ -r "${STATE_DIR}/last-error" ]]; then
     echo "NOTE: the most recent fetch attempt FAILED; the stamp above is from an earlier run."
     sed 's/^/  /' "${STATE_DIR}/last-error"
 fi
-exit 0
+exit "${image_rc}"
