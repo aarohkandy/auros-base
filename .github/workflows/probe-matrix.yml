@@ -218,8 +218,31 @@ jobs:
       - name: Boot checks B1-B12
         id: phase
         run: |
-          mkdir -p fragments
+          mkdir -p fragments matrix-run/logs
           export AUROS_RUN_DIR="$PWD/matrix-run"
+          # A HEARTBEAT, because this phase runs for over an hour and GitHub serves no job log until
+          # the job ends. Without it, debugging is: push, wait ninety minutes, read a post-mortem.
+          # run-boot.sh polls for markers with deadlines of 600s (greeter) and 2400s (the guest
+          # agent's #AUROS-DONE#), so "nothing has happened for forty minutes" and "it is thirty
+          # seconds from succeeding" look identical from outside — and the serial console is the one
+          # place that can tell them apart while it still matters.
+          heartbeat() {
+            local hpid=$1 t=0 f
+            while kill -0 "$hpid" 2>/dev/null; do
+              sleep 60; t=$((t+60))
+              echo "──────── ${t}s elapsed ($(date -u +%H:%M:%S)) ────────"
+              tail -4 harness.log 2>/dev/null | sed 's/^/  harness | /' || true
+              for f in matrix-run/logs/*serial.log matrix-run/logs/*agent.log; do
+                [ -e "$f" ] || continue
+                printf '  %-32s %10s bytes | %s\n' "${f##*/}" \
+                  "$(sudo wc -c < "$f" 2>/dev/null || echo '?')" \
+                  "$(sudo tail -2 "$f" 2>/dev/null | tr '\n\r' '  ' | tr -cd '[:print:] ' | tail -c 160)"
+              done
+            done
+          }
+          # `sudo -E` alone is not enough and build.yml does exactly that: sudo replaces PATH with its
+          # secure_path, so a tool the workflow installed into the runner tool cache is invisible to
+          # root (run 35548903285). `env "PATH=$PATH"` hands root the runner's real PATH.
           set +e
           sudo -E env "PATH=$PATH" ./matrix/run.sh \
             --phase boot \
@@ -227,9 +250,13 @@ jobs:
             --image  "$PROBE_IMAGE" \
             --checks matrix/checks.yaml \
             --profiles matrix/profiles.yaml \
-            --out "fragments/boot-${PROFILE}.json"
-          rc=$?
+            --out "fragments/boot-${PROFILE}.json" > harness.log 2>&1 &
+          HPID=$!
+          heartbeat "$HPID"
+          wait "$HPID"; rc=$?
           set -e
+          echo "════════ the harness's own output ════════"
+          cat harness.log
           echo "harness exit status: $rc"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
@@ -324,8 +351,28 @@ jobs:
           fi
           printf '%s' "${AUROS_DEV_SIGNING_KEY:-}" > /tmp/probe-signing.key
           chmod 600 /tmp/probe-signing.key
-          mkdir -p fragments
+          mkdir -p fragments matrix-run/logs
           export AUROS_RUN_DIR="$PWD/matrix-run"
+          # A HEARTBEAT, because this phase runs for over an hour and GitHub serves no job log until
+          # the job ends. Without it, debugging is: push, wait ninety minutes, read a post-mortem.
+          # run-boot.sh polls for markers with deadlines of 600s (greeter) and 2400s (the guest
+          # agent's #AUROS-DONE#), so "nothing has happened for forty minutes" and "it is thirty
+          # seconds from succeeding" look identical from outside — and the serial console is the one
+          # place that can tell them apart while it still matters.
+          heartbeat() {
+            local hpid=$1 t=0 f
+            while kill -0 "$hpid" 2>/dev/null; do
+              sleep 60; t=$((t+60))
+              echo "──────── ${t}s elapsed ($(date -u +%H:%M:%S)) ────────"
+              tail -4 harness.log 2>/dev/null | sed 's/^/  harness | /' || true
+              for f in matrix-run/logs/*serial.log matrix-run/logs/*agent.log; do
+                [ -e "$f" ] || continue
+                printf '  %-32s %10s bytes | %s\n' "${f##*/}" \
+                  "$(sudo wc -c < "$f" 2>/dev/null || echo '?')" \
+                  "$(sudo tail -2 "$f" 2>/dev/null | tr '\n\r' '  ' | tr -cd '[:print:] ' | tail -c 160)"
+              done
+            done
+          }
           set +e
           sudo -E env "PATH=$PATH" ./matrix/run.sh \
             --phase update \
@@ -334,9 +381,13 @@ jobs:
             --checks matrix/checks.yaml \
             --profiles matrix/profiles.yaml \
             --out fragments/update.json \
-            -- --signing-key /tmp/probe-signing.key
-          rc=$?
+            -- --signing-key /tmp/probe-signing.key > harness.log 2>&1 &
+          HPID=$!
+          heartbeat "$HPID"
+          wait "$HPID"; rc=$?
           set -e
+          echo "════════ the harness's own output ════════"
+          cat harness.log
           shred -u /tmp/probe-signing.key 2>/dev/null || rm -f /tmp/probe-signing.key
           echo "harness exit status: $rc"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
