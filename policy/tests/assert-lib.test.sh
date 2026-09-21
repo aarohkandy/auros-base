@@ -71,7 +71,10 @@ cat > "$BIN/timeout" <<'EOS'
 secs=$1; shift
 "$@" &
 pid=$!
-( sleep "$secs"; kill -9 "$pid" 2>/dev/null; exit 0 ) & watchdog=$!
+# The watchdog must not hold the caller's stdout: `kill "$watchdog"` stops the subshell but not the
+# sleep inside it, and an orphaned sleep keeping a $( ) pipe open made every call wait the full
+# timeout — 1407 s for this suite on macOS.
+( sleep "$secs"; kill -9 "$pid" 2>/dev/null; exit 0 ) >/dev/null 2>&1 </dev/null & watchdog=$!
 wait "$pid"; rc=$?
 kill "$watchdog" 2>/dev/null
 [ "$rc" -ge 128 ] && rc=124
