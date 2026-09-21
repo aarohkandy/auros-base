@@ -12,7 +12,7 @@
 #     under this one. Bump it whenever you add a check or tighten a criterion.
 #   - Adding a check is cheap. Removing one requires an entry in DECISIONS.md saying who decided and why.
 
-matrix_version: 1
+matrix_version: 2
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
 # STATIC — run against the OCI image. No VM. Fast, and catches most regressions.
@@ -100,6 +100,24 @@ static:
       A recipe that prunes its own update path produces a machine we can never patch again — which is
       precisely the abandoned laptop we sell against. This check makes that outcome impossible to ship
       even if validation is bypassed.
+
+  - id: S11
+    name: Removal floor met, counted on the images
+    criterion: >
+      (package names in the image this one was built FROM) minus (package names in this image) >=
+      the recipe's prune.must_remove_at_least, read off the image's auros.prune.floor label. A base
+      build declares no floor and passes vacuously; a recipe with no floor, or whose built-from image
+      could not be measured, fails.
+    fails_on: a measured count below the floor, or no measurement at all
+    why: >
+      The floor is the alarm for upstream quietly putting back what we took out, and the order PR tells
+      the customer a build that removes fewer does not publish. Until this check existed nothing read
+      it, and the only count anywhere was the plan's — the packages a recipe NAMED (57 for the kiosk
+      against a floor of 1100), which excludes the dependency closure that is most of the removal.
+    note: >
+      The floors in customers/*/recipe.yaml were chosen, not measured (SYSTEM-REVIEW §6.3). The first
+      real build will tell us the closure; if S11 is red on that build, recalibrating the number is the
+      owner's decision, made through floor-ratchet.mjs, not a retry.
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
 # BOOT — QEMU, once per hardware profile bound to the recipe.

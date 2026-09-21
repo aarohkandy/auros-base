@@ -78,7 +78,7 @@ profile. The reading this harness uses lives in one function, `requiredFor()` in
 
 | group | required on | recorded |
 |---|---|---|
-| `S1`–`S10` | every profile | evaluated **once** against the image, copied into each profile with `detail` saying so |
+| `S1`–`S11` | every profile | evaluated **once** against the image, copied into each profile with `detail` saying so |
 | `B1`–`B12` | every profile | genuinely re-run per profile |
 | `U1`–`U5`, `R1` | the update profile only (default `uefi-modern`) | only there — *absent* elsewhere, which is not the same as `skip` |
 
