@@ -107,10 +107,13 @@ sigpipe_scan() { # <dir> — prints file:line for every pipe into an early-exiti
 
 # Prove the race is real, deterministically: the producer writes far more than a pipe holds, so after
 # grep -q has matched line 1 and gone, the producer's next write MUST hit SIGPIPE.
-rc=$(bash -c 'set -o pipefail; { echo BAD; seq 1 200000; } | grep -q BAD; echo $?')
-[ "$rc" = 141 ] && ok "confirmed: a MATCHING producer | grep -q returns 141 under pipefail (the bug is real)" \
-                || no "expected 141 from a matching pipe, got [$rc] — re-check this hazard"
-v=$(bash -c 'set -o pipefail; if { echo BAD; seq 1 200000; } | grep -q BAD; then echo RED; else echo GREEN; fi')
+# The exit code is the producer's, and producers differ: one killed by SIGPIPE gives 141 (macOS
+# seq), one that catches EPIPE and reports it gives 1 (GNU seq on the runner: "write error: Broken
+# pipe"). Either way the MATCH is lost, and that — not a specific number — is the hazard.
+rc=$(bash -c 'set -o pipefail; { echo BAD; seq 1 200000; } | grep -q BAD; echo $?' 2>/dev/null)
+[ "$rc" != 0 ] && ok "confirmed: a MATCHING producer | grep -q returns non-zero [$rc] under pipefail (the bug is real)" \
+               || no "a matching pipe returned 0 — the hazard did not reproduce; re-check this test"
+v=$(bash -c 'set -o pipefail; if { echo BAD; seq 1 200000; } | grep -q BAD; then echo RED; else echo GREEN; fi' 2>/dev/null)
 [ "$v" = GREEN ] && ok "  ...so 'if x | grep -q BAD; then fail' reads GREEN with BAD in the output (the false pass)" \
                  || no "  ...expected the false GREEN, got [$v]"
 rc=$(bash -c 'set -o pipefail; grep -q BAD <<<"$({ echo BAD; seq 1 200000; })"; echo $?')
