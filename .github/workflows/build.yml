@@ -328,9 +328,15 @@ jobs:
           build_one () {
             local n="$1" raw="localhost/auros-base:raw-$1" out="localhost/auros-base:chunked-$1"
             echo "::group::build $n — derive"
-            sudo podman build \
+            # --no-cache, and then PROVE it: run 35557609009 served all 29 of build b's steps from
+            # build a's layer cache, so S7 compared an image with itself and reported PASS.
+            sudo podman build --no-cache \
               --timestamp "$SOURCE_DATE_EPOCH" \
-              -t "$raw" -f Containerfile .
+              -t "$raw" -f Containerfile . 2>&1 | tee "/tmp/build-$n.log"
+            if grep -q 'Using cache' "/tmp/build-$n.log"; then
+              echo "::error::build $n reused cached layers — S7 would compare an image with itself. Refusing."
+              exit 1
+            fi
             # Record the pre-flatten identity too. When S7 goes red at 2am, the first question is
             # whether the nondeterminism is in our build or in the chunker, and this answers it
             # without a second CI run.

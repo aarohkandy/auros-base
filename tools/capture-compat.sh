@@ -365,8 +365,9 @@ secureboot_state() {  # prints enabled|disabled|unknown AND records secureboot +
     fact secureboot unknown "$f exists but byte 4 read as [$last], expected 0 or 1"
     printf 'unknown'; return 0
   fi
-  # mokutil is the other honest source. Probed, not assumed present.
-  if command -v mokutil >/dev/null 2>&1; then
+  # mokutil is the other honest source. Probed, not assumed present. Never under a test root: mokutil
+  # reads the machine it runs on, not $R, so it would record the CI runner's Secure Boot as the test's.
+  if [ -z "$R" ] && command -v mokutil >/dev/null 2>&1; then
     local out; out="$(mokutil --sb-state 2>&1)"
     case "$(lc "$out")" in
       *"secureboot enabled"*)  fact secureboot enabled  "mokutil --sb-state: $out"; printf 'enabled';  return 0 ;;
