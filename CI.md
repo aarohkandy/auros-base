@@ -351,8 +351,11 @@ red build and not a bad publish.
 
 ### `matrix/run.sh` — the check-matrix harness (TASKS A8)
 
-**Verified against the landed harness**, not assumed — `matrix/run.sh` was adapted to this interface in
-commit `b1806cc`, and the update phase's real contract turned out to differ from what I first guessed.
+**Verified by READING the landed harness, and — until 2026-09-21 — never by running it.** `matrix/run.sh`
+was adapted to this interface in commit `b1806cc`. The sentence that used to stand here said "verified
+against the landed harness, not assumed", which was a claim about evidence that did not exist: the two
+programs agreed on paper and disagreed in every way that mattered. See **"What the first execution
+found"** below before trusting anything in this section.
 
 ```
 matrix/run.sh --phase static|boot|update
@@ -393,6 +396,38 @@ opposite of proving anything.
 
 It also refuses to run without a writable `/dev/kvm` unless `AUROS_ALLOW_TCG=1`. **CI does not set that.**
 The update group is four boots; under emulation it would exceed the 6-hour job limit and prove nothing.
+
+#### What the first execution found — 2026-09-21
+
+`.github/workflows/probe-matrix.yml` runs all three phases against a trivial derivative of the pinned
+base, with build.yml's exact command lines, so harness bugs cost a five-minute probe instead of a
+fifty-minute build. Checks that fail on that image are expected; what the probe asserts is that every id
+`matrix/checks.yaml` declares reaches a **verdict**.
+
+Before the first run, the harness could not have produced a single verdict for any check, on any image:
+
+| found | consequence |
+|---|---|
+| the collector matched `/\.json$/` and `JSON.parse`d whole files; every run-\*.sh writes JSON **Lines** to `checks/*.jsonl` | every phase reported "ZERO checks", wrote no fragment, exited 1 |
+| `set -e` aborted `run.sh` at the phase invocation, because each run-\*.sh exits non-zero when a check fails | **no fragment on any failing run.** build.yml's `jq -e … fragments/static.json` failed with "no such file", naming no check |
+| the verdict line used `require(process.argv[1])` on `--out fragments/static.json` | `Cannot find module` → the phase failed even when every check passed |
+| `analyze.mjs` read `--recipe ""` as the literal string `true` | S3 failed on **every base build** with `recipe "true" resolved an EMPTY removal set` |
+| the run directory was `mktemp -d` + `trap rm -rf EXIT` | every serial console, bib and QEMU log was deleted before the upload step ran |
+| S6 measured `containers-storage:`, whose layers are `application/vnd.oci.image.layer.v1.tar` | 8,439,590,767 B reported as a "compressed pull size"; base.lock records the same upstream at 3,758,096,384 B |
+| `sudo -E` alone: sudo replaces PATH with its secure_path | U1–U5 and R1 all failed "cosign is not installed" while the job printed `/home/runner/.cosign/cosign` |
+
+**`build.yml` still needs three changes of its own**, and they are not harness bugs:
+
+1. The `static` job passes no `--budget-bytes`, no `--second-digest` and no `--registry-ref`, so **S6, S7
+   and S8 fail by construction** — on a perfect image, forever. S6 additionally cannot be answered at all
+   from local storage, since its unit is the compressed download.
+2. The `update` job must invoke the harness as `sudo -E env "PATH=$PATH" …` or cosign stays invisible to
+   root, and must install `libguestfs-tools` or `virt-make-fs` is missing and R1 fails closed before
+   looking at anything.
+3. `run-static.sh` records its own S1/S7/S8 verdicts while the `build` and `sign` jobs write separate
+   fragments for the same three ids. The merge in `publish` concatenates without deduplicating and the
+   verdict is `all(.status == "pass")`, so **the duplicate fails poison the result regardless of the
+   image**. This is the S8 ordering problem in `matrix/run/README.md`, now with a measured consequence.
 
 ### `tools/gate.mjs` — the publish gate (TASKS 0.5, meta repo)
 
