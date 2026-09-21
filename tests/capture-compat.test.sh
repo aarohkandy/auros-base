@@ -21,6 +21,14 @@
 #
 # The harness's direction audit (t_finish) fails this suite for any check id observed in only one
 # direction. See tests/lib/harness.sh.
+#
+# RUNTIME, measured rather than guessed: ~47 s of CPU, but **3m47s of wall clock on macOS** — it is
+# roughly 2,500 short-lived processes and a Mac spends most of that in process creation (20% CPU
+# utilisation across the whole run). On a Linux runner, where spawning is two orders of magnitude
+# cheaper, it is seconds. It is the slowest suite in tests/ by a wide margin, and that is a property
+# of the laptop rather than of the suite. Stated here so a slow local `run-all.sh` is read as what it
+# is; if it ever needs to be cheap on macOS, the lever is fewer `capture` invocations, not fewer
+# assertions.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -311,6 +319,92 @@ PROPOSAL="$(AUROS_TEST_ROOT="$(mkmachine pci-full)" bash "$TOOL" --tester t --wi
 assert_has "but it is PROPOSED to the human, with the reason" "PROPOSAL for the human" "$PROPOSAL"
 assert_has "and the proposal says why it is not the tool's call" "business decision" "$PROPOSAL"
 
+group "--ask, because the person has a laptop open and not a shell open"
+# The flag form is eight arguments to compose while holding a screwdriver, and a tool that is
+# annoying AT the machine gets filled in afterwards from memory — which is precisely the row this
+# whole file exists to prevent. So there is an interactive mode, and it has to enforce the same
+# rules in the same place rather than growing a parallel copy of them.
+ask() { # <answers on stdin> <root> [args...] -> the row on stdout, prompts on stderr
+  local input="$1" root="$2"; shift 2
+  printf '%s' "$input" | env AUROS_TEST_ROOT="$root" bash "$TOOL" --ask --row-only --tester t --date 2026-09-21 "$@" 2>/dev/null
+}
+run_ask() { # <id> <green|red> <label> <input> <root>
+  local id="$1" want="$2" label="$3" input="$4" root="$5"
+  run_check "$id" "$want" "$label" -- bash -c \
+    'printf "%s" "$1" | AUROS_TEST_ROOT="$2" bash "$3" --ask --row-only --tester t' _ "$input" "$root" "$TOOL"
+}
+
+ALL_OK="ok
+ok
+ok
+ok
+ok
+ok
+ok
+"
+run_ask ask-mode green "seven straight answers" "$ALL_OK" "$(mkmachine pci-full)"
+ROW_ASK="$(ask "$ALL_OK" "$(mkmachine pci-full)")"
+assert_eq "…fills every human column" "ok" "$(field "$ROW_ASK" webcam)"
+assert_eq "…and computes the verdict" "supported" "$(field "$ROW_ASK" verdict)"
+assert_eq "--row-only --ask puts NOTHING but the row on stdout" "1" \
+  "$(printf '%s\n' "$ROW_ASK" | grep -c .)"
+
+# SKIP has to be easy to say, or somebody gives a wrong answer instead of an empty one.
+ROW_SKIP="$(ask "ok
+skip
+ok
+ok
+ok
+ok
+ok
+" "$(mkmachine pci-full)")"
+assert_eq "skip leaves the column EMPTY" "" "$(field "$ROW_SKIP" trackpad)"
+assert_eq "…and one skip holds the verdict at untested" "untested" "$(field "$ROW_SKIP" verdict)"
+
+# An invented answer is re-asked rather than accepted or silently dropped.
+ROW_RETRY="$(ask "WOBBLE
+ok
+ok
+ok
+ok
+ok
+ok
+ok
+" "$(mkmachine pci-full)")"
+assert_eq "an invented answer is re-asked, and the NEXT answer lands in that column" "ok" \
+  "$(field "$ROW_RETRY" wifi)"
+RETRY_ERR="$(printf 'yes\nok\nok\nok\nok\nok\nok\nok\n' | env AUROS_TEST_ROOT="$(mkmachine)" bash "$TOOL" --ask --row-only --tester t 2>&1 >/dev/null)"
+assert_has "and the person is told what IS allowed" "Answer ok, partial, fail, or skip" "$RETRY_ERR"
+assert_has "quoting back what they typed" "Got [yes]" "$RETRY_ERR"
+
+# partial without a note is refused HERE too, interactively, and re-asks rather than proceeding.
+ROW_PARTIAL="$(ask "partial
+
+partial
+associates on 2.4 GHz only
+ok
+ok
+ok
+ok
+ok
+ok
+" "$(mkmachine pci-full)")"
+assert_eq "an empty note sends it back round, and the second attempt sticks" "partial" \
+  "$(field "$ROW_PARTIAL" wifi)"
+assert_has "the note lands in notes" "associates on 2.4 GHz only" "$(field "$ROW_PARTIAL" notes)"
+
+# The red half: stdin ending mid-question must refuse and write nothing, not emit a half-row.
+run_ask ask-mode red "stdin ends before the seventh question" "ok
+ok
+ok
+" "$(mkmachine pci-full)"
+EOF_ERR="$(printf 'ok\n' | env AUROS_TEST_ROOT="$(mkmachine)" bash "$TOOL" --ask --row-only --tester t 2>&1 >/dev/null)"
+assert_has "the refusal names the column it was asking about" "while asking about 'trackpad'" "$EOF_ERR"
+assert_has "…says nothing was written" "Nothing was written" "$EOF_ERR"
+assert_has "…and gives the flag form as the way out" "--trackpad ok|partial|fail" "$EOF_ERR"
+run_ask ask-mode red "stdin ends while asking for a partial's note" "partial
+" "$(mkmachine pci-full)"
+
 group "the prompts are printed, in cost order, as words a person can act on"
 PROMPTS="$(bash "$TOOL" --print-prompts)"
 for c in $HUMAN_COLUMNS; do assert_has "the prompt for $c is printed" "$c" "$PROMPTS"; done
@@ -352,6 +446,14 @@ assert_has "the refusal says what a usable note looks like" "associates on 2.4 G
 run_capture unknown-flag green "a known human column"  "$(mkmachine)" --trackpad ok
 run_capture unknown-flag red   "--wobble, which is no column" "$(mkmachine)" --wobble ok
 run_capture unknown-flag red   "--note-wobble, which is no column's note" "$(mkmachine)" --note-wobble x
+# --help was reached by the generic `--*` arm and answered "unknown option --help", because `case`
+# takes the FIRST matching pattern and `-h|--help` was written last. Nothing about reading the file
+# showed that; running it did. Both of these run BEFORE any probe, so they need no machine.
+run_check unknown-flag green "--help prints the header comment" -- bash "$TOOL" --help
+run_check unknown-flag green "--header prints the schema"       -- bash "$TOOL" --header
+assert_eq "--header is exactly the shipping COLUMNS list" \
+  "$(printf '%s' "$COLUMNS" | tr ' ' '\t')" "$(bash "$TOOL" --header)"
+assert_has "--help says where the line between probe and person is drawn" "HUMAN-ONLY" "$(bash "$TOOL" --help)"
 
 group "the answers file"
 AD="$(newroot)"

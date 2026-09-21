@@ -47,6 +47,7 @@
 #   capture-compat.sh                         probe, print the partial row, print the prompts
 #   capture-compat.sh --answers FILE          probe, then fill the human columns from FILE
 #   capture-compat.sh --wifi ok --gpu partial --note-gpu "tearing on external display"
+#   capture-compat.sh --ask                   probe, then ASK the seven questions one at a time
 #   capture-compat.sh --print-prompts         just the questions, for printing out
 #   capture-compat.sh --facts-out P --row-out Q
 #   overrides: --model NAME --year YYYY --tester NAME --date YYYY-MM-DD
@@ -479,6 +480,53 @@ P
   esac
 }
 
+# ── --ask: the interactive version, because the person has a laptop open, not a shell open ───────
+#
+# The flag form (--wifi partial --note-wifi "…" --trackpad ok …) is eight arguments to compose while
+# holding a screwdriver, and a tool that is annoying at the machine gets filled in afterwards from
+# memory. That is the failure mode this whole file exists to prevent, so there is a mode that asks.
+#
+# It enforces the same rules the flags do, in the same place: ok/partial/fail only, `partial` will
+# not be accepted without a note, and SKIP is offered explicitly — because "nobody tried this" has
+# to be an easy answer to give, or people give a wrong one instead.
+ask_answers() {
+  local col a n
+  printf '\n\033[1m── the seven, in cost order ───────────────────────────────────────────────────\033[0m\n'
+  printf 'Answer ok / partial / fail, or SKIP to leave it empty. Empty is a true answer and it is\n'
+  printf 'always available: it means nobody tried this, which is better than a guess.\n'
+  for col in $HUMAN_COLUMNS; do
+    # A column already answered by a flag is NOT asked again. --ask and the flags are meant to be
+    # mixed: you fill in what you already know, then walk the rest at the machine. Re-asking would
+    # invite an absent-minded second answer that silently overwrites a deliberate first one.
+    if [ -n "$(get_answer "$col")" ]; then
+      printf '\n\033[1m%s\033[0m  already answered on the command line: %s — not asking again.\n' \
+        "$col" "$(get_answer "$col")"
+      continue
+    fi
+    printf '\n\033[1m%s\033[0m\n' "$col"
+    prompt_for "$col" | sed 's/^/  /'
+    while :; do
+      printf '  %s [ok/partial/fail/skip] > ' "$col"
+      if ! read -r a; then
+        printf '\n'
+        die "stdin ended while asking about '$col'. Nothing was written. Re-run, or use the flags:
+    --$col ok|partial|fail  (and --note-$col for partial)"
+      fi
+      case "$(lc "$a")" in
+        ok|fail) set_answer "$col" "$(lc "$a")"; break ;;
+        partial)
+          printf '  which half works? (this is the note, and partial is not accepted without it) > '
+          if ! read -r n; then printf '\n'; die "stdin ended while asking for the note on '$col'."; fi
+          if [ -n "$n" ]; then set_answer "$col" partial; set_note "$col" "$n"; break; fi
+          printf '  \033[33mA partial with no note is not a finding.\033[0m "associates on 2.4 GHz only" is one;\n'
+          printf '  "mostly works" is a feeling, and a feeling here is what makes the next quote wrong.\n' ;;
+        skip|s|"") printf '  leaving %s EMPTY.\n' "$col"; break ;;
+        *) printf '  \033[33mAnswer ok, partial, fail, or skip.\033[0m Got [%s].\n' "$a" ;;
+      esac
+    done
+  done
+}
+
 print_prompts() {
   printf '\n── The seven a person has to answer ─────────────────────────────────────────────\n'
   printf 'In cost order. Wi-Fi failing makes the machine useless; a webcam failing makes it\n'
@@ -597,7 +645,7 @@ compute_verdict() {
 # ═══ MAIN ═══════════════════════════════════════════════════════════════════════════════════════
 
 MODEL=""; YEAR=""; TESTER=""; DATE=""; NOTES=""
-FACTS_OUT=""; ROW_OUT=""; ROW_ONLY=0; WANT_PROMPTS=""; SHOW_HEADER=0
+FACTS_OUT=""; ROW_OUT=""; ROW_ONLY=0; WANT_PROMPTS=""; SHOW_HEADER=0; ASK=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -612,6 +660,11 @@ while [ $# -gt 0 ]; do
     --row-only)  ROW_ONLY=1; shift ;;
     --header)    SHOW_HEADER=1; shift ;;
     --print-prompts) WANT_PROMPTS=1; shift ;;
+    --ask)       ASK=1; shift ;;
+    # BEFORE the generic --* arm, which would otherwise swallow it: `case` takes the FIRST match,
+    # so with `-h|--help` written last, `--help` printed "unknown option --help". Found by running
+    # it rather than by reading it, which is the only way that kind of ordering bug is ever found.
+    -h|--help)   sed -n '1,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --note-*)    col="${1#--note-}"
                  is_human_column "$col" || die "$1 names no column. The columns are: $HUMAN_COLUMNS"
                  set_note "$col" "${2:-}"; shift 2 ;;
@@ -622,13 +675,17 @@ while [ $# -gt 0 ]; do
                  else
                    die "unknown option $1. Human-answered columns are: $HUMAN_COLUMNS"
                  fi ;;
-    -h|--help)   sed -n '1,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)           die "unexpected argument [$1]" ;;
   esac
 done
 
 if [ "$SHOW_HEADER" = 1 ]; then printf '%s\n' "$(printf '%s' "$COLUMNS" | tr ' ' '\t')"; exit 0; fi
 if [ -n "$WANT_PROMPTS" ]; then TESTER="${TESTER:-${SUDO_USER:-${USER:-unknown}}}"; print_prompts; exit 0; fi
+
+# `>&2` on the call, not inside the function: a redirection on a function call does NOT create a
+# subshell, so the answers it records survive — while the questions go to stderr, which keeps
+# `--row-only --ask` emitting exactly one line of stdout. The prompts are UI; the row is data.
+[ "$ASK" = 1 ] && ask_answers >&2
 
 # `partial` without a note is not a finding. The runbook and the skill both say so; this enforces it,
 # because the note is what makes the row quotable four years from now.
