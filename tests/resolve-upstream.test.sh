@@ -67,6 +67,7 @@ assert_not "no trace of the old digest in base.lock" "$OLD" "$(cat "$D/base.lock
 assert_not "no trace of the old digest in the Containerfile" "$OLD" "$(cat "$D/Containerfile")"
 assert_eq "FROM and ARG UPSTREAM_DIGEST both rewritten" 2 "$(grep -c "$NEW" "$D/Containerfile")"
 assert_has "SOURCE_DATE_EPOCH default follows the new creation time" "ARG SOURCE_DATE_EPOCH=1790816523" "$(cat "$D/Containerfile")"
+assert_has "…and so does its ISO twin, the image.created label default" "ARG IMAGE_CREATED=2026-10-01T01:02:03Z" "$(cat "$D/Containerfile")"
 run_check s1 green "S1 (assert, offline) accepts the rewritten tree" -- rup "$D" assert
 cp "$D/base.lock" "$D/lock.after"
 rup "$D" update >/dev/null 2>&1

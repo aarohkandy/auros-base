@@ -313,6 +313,10 @@ cmd_update() {
       epoch="$(python3 -c 'import sys,datetime,re; s=re.sub(r"\.\d+","",sys.argv[1]).replace("Z","+00:00"); print(int(datetime.datetime.fromisoformat(s).timestamp()))' "$RESOLVED_CREATED")" \
         || die "cannot convert UPSTREAM_CREATED '${RESOLVED_CREATED}' to an epoch"
       sed -E "s/^(ARG SOURCE_DATE_EPOCH=)[0-9]+$/\1${epoch}/" "$CONTAINERFILE" > "$tmp" && cat "$tmp" > "$CONTAINERFILE"
+      # ...and its ISO-8601 twin, the default of the org.opencontainers.image.created label.
+      local iso
+      iso="$(python3 -c 'import sys,time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(sys.argv[1]))))' "$epoch")"
+      sed -E "s/^(ARG IMAGE_CREATED=).*$/\1${iso}/" "$CONTAINERFILE" > "$tmp" && cat "$tmp" > "$CONTAINERFILE"
     fi
     rm -f "$tmp"
     if grep -qF "$OLD_DIGEST" "$CONTAINERFILE"; then

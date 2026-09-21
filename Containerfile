@@ -43,6 +43,17 @@ ARG UPSTREAM_DIGEST=sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a4
 # than 0, because a 1970 mtime on a system file confuses enough tooling to be its own problem.
 ARG SOURCE_DATE_EPOCH=1789504430
 
+# When this image was built, as bootc reports it. `bootc status` takes an image's age from the
+# org.opencontainers.image.created LABEL (falling back to the config's `created`), and a LABEL is
+# INHERITED: without this line the build carries Aurora's own (2026-09-15T20:28:34Z on the pinned
+# digest), so every laptop would report Aurora's date, not ours, and the image-age canary in
+# update-agent/greenboot/check/wanted.d/70-update-freshness.sh would be timing someone else's build.
+# A LABEL cannot run date(1), so the ISO-8601 form of SOURCE_DATE_EPOCH arrives as its own build
+# argument: build.yml passes the COMMIT's timestamp (the same SOURCE_DATE_EPOCH it gives
+# --timestamp), so two builds of one commit carry the same label and S7 is untouched. The default
+# is the ISO form of the SOURCE_DATE_EPOCH default above; `resolve-upstream.sh update` rewrites both.
+ARG IMAGE_CREATED=2026-09-15T20:33:50Z
+
 # No ENV for any of the above, deliberately. Build arguments are already exposed to RUN as
 # environment variables, which is how build/00-common.sh reads UPSTREAM_DIGEST and SOURCE_DATE_EPOCH;
 # an ENV would additionally bake them into the published image's environment, where SOURCE_DATE_EPOCH
@@ -123,6 +134,7 @@ RUN bootc container lint
 # FROM line. It travels with the published image, so anyone — customer, auditor, us in four years —
 # can ask a registry what upstream a given Auros image was built from without access to this repo.
 LABEL org.opencontainers.image.title="auros-base"
+LABEL org.opencontainers.image.created="${IMAGE_CREATED}"
 LABEL org.opencontainers.image.description="The single Auros base image. Fedora bootc via Universal Blue Aurora, pinned by digest, with signature-verification trust material, SELinux enforcing, sshd masked, a default-deny firewall and automatic rollback. Every Auros customer recipe derives from exactly this image and may only add to it, so a CVE response is one rebuild."
 LABEL org.opencontainers.image.source="https://github.com/aarohkandy/auros-base"
 LABEL org.opencontainers.image.documentation="https://github.com/aarohkandy/auros-base/blob/main/README.md"

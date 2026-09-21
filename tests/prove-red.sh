@@ -840,6 +840,26 @@ assert old in s
 open(p, 'w').write(s.replace(old, "resolve-upstream.sh assert already accepts it.\"\n"))
 MUT
 
+printf '\n%s\n' "$(c 1 'org.opencontainers.image.created — the image age bootc reports')"
+
+mutate "the image.created LABEL is dropped, so laptops report Aurora's build date" \
+       tests/image-created.test.sh "the shipping Containerfile" <<'MUT'
+p = 'Containerfile'
+s = open(p).read()
+old = 'LABEL org.opencontainers.image.created="${IMAGE_CREATED}"\n'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "the flatten stops refusing a declared LABEL the built image lacks" \
+       tests/image-created.test.sh "missing a declared label" <<'MUT'
+p = '.github/workflows/build.yml'
+s = open(p).read()
+old = '[ -n "$v" ] || { echo "::error::the Containerfile declares LABEL $k but the built image has no value for it"; exit 1; }'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ -n "$v" ] || continue'))
+MUT
+
 printf '\n%s\n' "$(c 1 'the harness itself')"
 
 mutate "an extraction stops matching — the suite must ABORT, not quietly test an empty program" \

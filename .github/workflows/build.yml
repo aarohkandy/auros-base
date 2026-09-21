@@ -311,6 +311,9 @@ jobs:
           # in every file mtime, and S7 would be measuring the clock rather than the build.
           SDE=$(git log -1 --pretty=%ct)
           echo "SOURCE_DATE_EPOCH=$SDE" >> "$GITHUB_ENV"
+          # The org.opencontainers.image.created label, which is what `bootc status` reports as the
+          # image's age. Derived from SDE, never from the clock, so both builds carry the same value.
+          echo "IMAGE_CREATED=$(date -u -d @"$SDE" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           echo "source_date_epoch=$SDE" >> "$GITHUB_OUTPUT"
           echo "SOURCE_DATE_EPOCH=$SDE ($(date -u -d @"$SDE" +%FT%TZ))"
 
@@ -324,7 +327,7 @@ jobs:
           # step fails, the build fails. Publishing an unflattened image would leave the product's
           # central claim ("we removed 214 packages") true on disk and false on the wire.
           # BASE_REF USED TO BE PASSED AS `--build-arg BASE_IMAGE=…` AND DID NOTHING.
-          # Containerfile declares only UPSTREAM_IMAGE / UPSTREAM_TAG / UPSTREAM_DIGEST /
+          # Containerfile declares only UPSTREAM_IMAGE / UPSTREAM_TAG / UPSTREAM_DIGEST / IMAGE_CREATED /
           # SOURCE_DATE_EPOCH, and its FROM is a hardcoded literal on purpose (Containerfile lines
           # 30-31: written as a literal so the digest is greppable without evaluating build args).
           # podman warns about an unused build-arg and carries on, so the flag looked like the D21
@@ -351,6 +354,7 @@ jobs:
             # build a's layer cache, so S7 compared an image with itself and reported PASS.
             sudo podman build --no-cache \
               --timestamp "$SOURCE_DATE_EPOCH" \
+              --build-arg IMAGE_CREATED="$IMAGE_CREATED" \
               -t "$raw" -f Containerfile . 2>&1 | tee "/tmp/build-$n.log"
             if grep -q 'Using cache' "/tmp/build-$n.log"; then
               echo "::error::build $n reused cached layers — S7 would compare an image with itself. Refusing."
@@ -376,6 +380,22 @@ jobs:
             # filesystem, chunk it with --rootfs, write an oci-archive, then pull that back into
             # storage. Fewer moving parts than reading and writing the same container store from
             # inside a container that is itself running out of that store.
+            # LABELS DO NOT SURVIVE THIS STEP ON THEIR OWN. With --rootfs, build-chunked-oci writes a
+            # fresh config from the filesystem: stage-35550863705 carried only containers.bootc,
+            # ostree.commit and ostree.final-diffid — none of the Containerfile's LABELs, so not
+            # image.created (what bootc reports as the image's age) and not base.digest either. So
+            # every LABEL the Containerfile declares is read back off the raw image and passed on
+            # with --label, the way ublue-os passes its labels to this same invocation
+            # (docs/evidence/research-dossiers.json). containers.bootc is skipped: --bootc sets it.
+            local -a label_args=()
+            local cfg k v
+            cfg="$(sudo skopeo inspect --config "containers-storage:$raw")"
+            for k in $(sed -nE 's/^LABEL ([^=[:space:]]+)=.*/\1/p' Containerfile); do
+              [ "$k" = containers.bootc ] && continue
+              v="$(jq -r --arg k "$k" '.config.Labels[$k] // empty' <<<"$cfg")"
+              [ -n "$v" ] || { echo "::error::the Containerfile declares LABEL $k but the built image has no value for it"; exit 1; }
+              label_args+=(--label "$k=$v")
+            done
             RECHUNK_DIR="$(mktemp -d "${RUNNER_TEMP}/rechunk-XXXXXX")"
             sudo podman run --rm --pull=never --privileged \
               --mount=type=image,src="$raw",target=/rpm-ostree \
@@ -383,13 +403,21 @@ jobs:
               --entrypoint /usr/bin/rpm-ostree \
               "$raw" \
               compose build-chunked-oci --bootc --max-layers 127 --format-version 2 \
+                "${label_args[@]}" \
                 --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci
             chunked="$(sudo podman pull -q "oci-archive:${RECHUNK_DIR}/chunked.oci")"
             sudo podman tag "$chunked" "$out"
             sudo rm -rf "$RECHUNK_DIR"
             echo "::endgroup::"
 
-            sudo skopeo inspect --config "containers-storage:$out" | jq -c '.rootfs.diff_ids' > "/tmp/chunked-$n.diffids"
+            sudo skopeo inspect --config "containers-storage:$out" > "/tmp/chunked-$n.config"
+            jq -c '.rootfs.diff_ids' "/tmp/chunked-$n.config" > "/tmp/chunked-$n.diffids"
+            # What a laptop will report as this image's age. Not Aurora's, not the chunker's clock.
+            got="$(jq -r '.config.Labels["org.opencontainers.image.created"] // "(absent)"' "/tmp/chunked-$n.config")"
+            if [ "$got" != "$IMAGE_CREATED" ]; then
+              echo "::error::the flattened image's org.opencontainers.image.created is ${got}, not ${IMAGE_CREATED} — bootc would report the wrong image age"
+              exit 1
+            fi
             # The content digest. diff_ids are the sha256 of each UNCOMPRESSED layer, so this is an
             # identity of the filesystem itself — immune to compression settings and to the `created`
             # field, both of which vary for reasons that have nothing to do with what we built.
