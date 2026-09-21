@@ -29,7 +29,8 @@ usage: run-update.sh --image REF --signing-key KEY [options]
   --profile ID         profile to run the update group on (default uefi-modern)
   --policy MODE        open|managed|locked|kiosk
   --recipe NAME
-  --migration-dir DIR  files to stage as a migration archive for R1 (default: synthetic)
+  --migration-dir DIR  source tree to stage as R1's archive; each top-level directory is a copy-engine
+                       Label (Documents, Pictures, ...) (default: synthetic, plus lib/r1-fixture.spec.json)
   --out DIR
 env: COSIGN_PASSWORD must be set for a password-protected key.
 USAGE
@@ -199,19 +200,33 @@ SUSPEND_TEST=0
 FULL_BOOTS=0
 CFG
 
-# R1: the migration archive, on its own disk, exactly as auros-installer is documented to stage it.
-MIG_IMG="$W/migration.qcow2"
+# R1: a migration archive in the format auros-installer's copy engine ACTUALLY writes — payload at
+# its Stored paths, <root>/_auros/manifest.tsv in `auros-manifest/1` — on its own disk. auros-restore
+# finds it by that manifest through /proc/self/mountinfo; there is no volume label in the contract,
+# so the disk deliberately has none. lib/mkarchive.mjs is a second implementation of the format,
+# pinned byte-for-byte to the installer's real writer by tests/r1-archive.test.sh.
+r1_build_archive() { # <src-dir> <archive-dir> — prints the manifest's entry count
+  rm -rf "$2" && mkdir -p "$2" && node "$HARNESS_DIR/lib/mkarchive.mjs" build "$1" "$2"
+}
+r1_make_disk() { # <archive-dir> <raw-image> — ext4, populated without root, no label
+  local mb=$(( $(du -sk "$1" | cut -f1) / 1024 + 64 ))
+  rm -f "$2" && truncate -s "${mb}M" "$2" && mkfs.ext4 -q -F -d "$1" "$2" \
+    && debugfs -w -R 'rmdir lost+found' "$2"
+  # lost+found goes because a Windows-formatted stick has none, and it is root-only 0700: the
+  # restore's destination scan walks the whole volume as the user, and an unreadable directory
+  # there fails the pre-verify. That is a finding about auros-restore, not something R1 should trip
+  # over on a stick that could not exist.
+}
+MIG_IMG="$W/migration.raw"; MIG_ARCHIVE="$W/migration-archive"; MIG_COUNT=0
 if [ -z "$MIGRATION_DIR" ]; then
-  MIGRATION_DIR="$W/migration-src"; rm -rf "$MIGRATION_DIR"; mkdir -p "$MIGRATION_DIR/files/Documents"
-  for i in $(seq 1 200); do printf 'auros synthetic file %s\n' "$i" > "$MIGRATION_DIR/files/Documents/file-$i.txt"; done
+  MIGRATION_DIR="$W/migration-src"; rm -rf "$MIGRATION_DIR"; mkdir -p "$MIGRATION_DIR/Documents/synthetic"
+  for i in $(seq 1 200); do printf 'auros synthetic file %s\n' "$i" > "$MIGRATION_DIR/Documents/synthetic/file-$i.txt"; done
+  # Plus the golden spec's awkward names (%, a reserved device stem, a trailing dot, a tab, non-ASCII,
+  # a second label), so the VM restores every escaping rule and not just file-N.txt.
+  node "$HARNESS_DIR/lib/mkarchive.mjs" materialize "$HARNESS_DIR/lib/r1-fixture.spec.json" "$MIGRATION_DIR" >>"$L/migration.log" 2>&1
 fi
-( cd "$MIGRATION_DIR" && find files -type f -exec sha256sum {} \; | sort -k2 > manifest.sha256 )
-MIG_COUNT=$(wc -l < "$MIGRATION_DIR/manifest.sha256" | tr -d ' ')
-if have virt-make-fs; then
-  rm -f "$MIG_IMG"; virt-make-fs --type=ext4 --label=AUROS_MIGRATION "$MIGRATION_DIR" "$MIG_IMG" >>"$L/migration.log" 2>&1 || MIG_IMG=''
-else
-  MIG_IMG=''
-fi
+if MIG_COUNT=$(r1_build_archive "$MIGRATION_DIR" "$MIG_ARCHIVE" 2>>"$L/migration.log") && have mkfs.ext4 && have debugfs \
+   && r1_make_disk "$MIG_ARCHIVE" "$MIG_IMG" >>"$L/migration.log" 2>&1; then :; else MIG_IMG=''; fi
 
 WRAP="localhost/auros-matrix-update:test"
 build_testwrap "$IMAGE" "$WRAP" "$W/config.env" "$OVL" || fail_all "could not build the update test wrapper"
@@ -228,7 +243,9 @@ export VM_NETDEV_EXTRA
 SERIAL="$L/update-serial.log"; AGENT="$L/update-agent.log"; QMP="$W/update.qmp"
 : > "$SERIAL"; : > "$AGENT"
 EXTRA=()
-[ -n "$MIG_IMG" ] && EXTRA+=( -drive "file=${MIG_IMG},format=qcow2,if=virtio" )
+# A USB stick, removable, which is what a school will actually plug in.
+[ -n "$MIG_IMG" ] && EXTRA+=( -device qemu-xhci,id=r1usb -drive "if=none,id=r1stick,file=${MIG_IMG},format=raw"
+                              -device usb-storage,bus=r1usb.0,drive=r1stick,removable=on )
 
 start_vm "$QCOW" "$PROFILE" "$SERIAL" "$AGENT" "$QMP" "${EXTRA[@]+"${EXTRA[@]}"}" \
   || fail_all "QEMU would not start for the update run"
@@ -361,19 +378,40 @@ else
 fi
 
 # ── R1 — the migration archive restores and re-verifies ──────────────────────────────────────────
+# auros-restore is a user unit run --quiet at graphical login. It reports in exactly one place: a file
+# on the desktop whose NAME is the verdict, holding the counts. The agent relays that file's numbers
+# as #AUROS-RESTORE# on every boot (restore_relay), and the last relay is what R1 judges. The pass
+# criterion is the report's own lines, pinned in auros-installer's internal/restore/r1fixture_test.go.
+r1_verdict() { # <agent-log> <manifest-count> — prints "pass <detail>" or "fail <detail>"
+  local line n=$2 f
+  line=$(grep -a '^#AUROS-RESTORE#' "$1" 2>/dev/null | tail -1)
+  jf() { printf '%s' "$line" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+  if [ -z "$line" ]; then
+    echo "fail the guest agent never relayed a restore report (#AUROS-RESTORE#). Nothing about the restore can be judged."; return
+  fi
+  f=$(jf file)
+  if [ -z "$f" ]; then
+    echo "fail a ${n}-file auros-manifest/1 archive was attached as a USB stick and no restore report appeared on ${TEST_USER}'s desktop. In the guest: auros-restore binary $(jf binary); auros-restore.service globally $(jf unit); archive mounted at: $(jf mounted | sed 's/^$/NOWHERE/'). A restore that never runs loses a school's files as surely as one that fails."; return
+  fi
+  if [ "${f##*/}" != "Your files are here.txt" ]; then
+    echo "fail the restore put '${f##*/}' on the desktop — its own verdict that the run was not clean. Counts: listed=$(jf listed) read back=$(jf readback) matched=$(jf matched) disagreed=$(jf disagreed) accounted=$(jf accounted)/$(jf of), against ${n} in the manifest."; return
+  fi
+  if [ "${f%/*}" != "$(jf desktop)" ]; then
+    echo "fail the report is at ${f}, not on the desktop ($(jf desktop)). The criterion says 'reports the count to the user on the desktop'."; return
+  fi
+  if [ "$(jf listed)" = "$n" ] && [ "$(jf readback)" = "$n" ] && [ "$(jf matched)" = "$n" ] \
+     && [ "$(jf disagreed)" = 0 ] && [ "$(jf accounted)" = "$n" ] && [ "$(jf of)" = "$n" ]; then
+    echo "pass '${f##*/}' on the desktop: ${n} files listed, ${n} read back and matched after writing, 0 disagreed, ${n}/${n} entries accounted for — against a ${n}-entry auros-manifest/1 archive on an unlabelled USB stick"
+  else
+    echo "fail the report says clean but its counts are not the manifest's ${n}: listed=$(jf listed) read back=$(jf readback) matched=$(jf matched) disagreed=$(jf disagreed) accounted=$(jf accounted)/$(jf of). A count that does not add up is a swallowed discrepancy."
+  fi
+}
 check_begin
 if [ -z "$MIG_IMG" ]; then
-  record R1 fail "no migration disk could be built on this host: virt-make-fs (libguestfs-tools) is not installed, so R1 had nothing to restore. A missing tool is a fail — otherwise the one check that stands between a school and losing its files quietly stops running."
+  record R1 fail "no migration disk could be built on this host (needs node, mkfs.ext4 and debugfs from e2fsprogs; see logs/migration.log). A missing tool is a fail — otherwise the one check that stands between a school and losing its files quietly stops running."
 else
-  R1_EVID=$(grep -aoE 'auros-restore[^"]{0,160}' "$SERIAL" 2>/dev/null | head -3 | tr '\n' ' ')
-  RESTORED=$(grep -aoE 'restored ([0-9]+) file' "$SERIAL" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true)
-  if [ -z "$R1_EVID" ]; then
-    record R1 fail "a migration disk labelled AUROS_MIGRATION with ${MIG_COUNT} files and a manifest.sha256 was attached, and the guest said nothing about restoring it. The harness assumes auros-installer's Linux side ships an 'auros-restore' unit that consumes that layout (spec §6C) — if the convention differs, this check is what has to change. As written, R1 is the least-grounded check in this harness."
-  elif [ "${RESTORED:-0}" != "$MIG_COUNT" ]; then
-    record R1 fail "the restore ran but reported ${RESTORED:-no} file(s) against a manifest of ${MIG_COUNT}. Any discrepancy that is swallowed rather than shown is a fail by R1's own wording. Console: ${R1_EVID}"
-  else
-    record R1 pass "restored and re-verified ${RESTORED}/${MIG_COUNT} files against manifest.sha256 and reported the count: ${R1_EVID}"
-  fi
+  R1_OUT=$(r1_verdict "$AGENT" "$MIG_COUNT")
+  record R1 "${R1_OUT%% *}" "${R1_OUT#* }"
 fi
 
 node "$HARNESS_DIR/lib/qmp.mjs" "$QMP" quit 30 >/dev/null 2>&1 || true

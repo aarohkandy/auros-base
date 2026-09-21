@@ -102,6 +102,31 @@ status_line() {
 }
 status_line
 
+# ── R1 relay: auros-restore's desktop report, read, never acted on ───────────────────────────────
+# auros-restore (auros-installer cmd/auros-restore) is a user unit run --quiet at graphical login. Its
+# ONLY report is a file on the user's desktop whose name is the verdict, holding the counts. This
+# copies those numbers to the host every boot; R1 judges the last one (run-update.sh r1_verdict). The
+# line formats are pinned in auros-installer internal/restore/r1fixture_test.go.
+restore_relay() {
+  local home desk f='' n m listed='' rb='' ma='' dis='' acc='' of='' bin unit mnt=''
+  home=$(getent passwd "$TEST_USER" | cut -d: -f6)
+  desk=$(runuser -u "$TEST_USER" -- env HOME="$home" xdg-user-dir DESKTOP 2>/dev/null || true)
+  [ -n "$desk" ] || desk="$home/Desktop"
+  for n in "Your files are here.txt" "PLEASE READ — a problem with your files.txt"; do
+    for m in "$desk" "$home"; do [ -f "$m/$n" ] && { f="$m/$n"; break 2; }; done
+  done
+  if [ -n "$f" ]; then
+    listed=$(sed -n "s/^  in the backup's list  *\([0-9][0-9]*\) files\{0,1\}$/\1/p" "$f" | head -1)
+    read -r rb ma dis <<<"$(sed -n 's/^    \([0-9]*\) read back, \([0-9]*\) matched, \([0-9]*\) disagreed$/\1 \2 \3/p' "$f" | head -1)"
+    read -r acc of <<<"$(sed -n 's/^    \([0-9]*\) of \([0-9]*\) entries accounted for$/\1 \2/p' "$f" | head -1)"
+  fi
+  bin=absent; [ -x /usr/libexec/auros/auros-restore ] && bin=installed
+  unit=$(systemctl --global is-enabled auros-restore.service 2>/dev/null || true)
+  while read -r m; do [ -f "$m/_auros/manifest.tsv" ] && { mnt=$m; break; }; done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null)
+  say "#AUROS-RESTORE#{\"file\":\"${f//\"/}\",\"desktop\":\"${desk//\"/}\",\"listed\":\"$listed\",\"readback\":\"$rb\",\"matched\":\"$ma\",\"disagreed\":\"$dis\",\"accounted\":\"$acc\",\"of\":\"$of\",\"binary\":\"$bin\",\"unit\":\"${unit:-unknown}\",\"mounted\":\"${mnt//\"/}\"}"
+}
+restore_relay
+
 FULL=0
 [ "$N" -le "$FULL_BOOTS" ] && FULL=1
 [ "${FORCE_FULL:-0}" = 1 ] && FULL=1

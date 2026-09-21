@@ -171,12 +171,24 @@ true. For `policy=kiosk` the audited capability set is empty by construction, be
 makes no in-session install/printer/language promise; that is an assumption about what kiosk means and
 it is worth an argument if you disagree.
 
-### R1 is the least grounded check here
-It builds a synthetic archive (`files/` plus a `manifest.sha256`) on a disk labelled
-`AUROS_MIGRATION`, attaches it, and looks for the guest reporting a restore and a matching file count.
-That layout is **an assumed convention** — `auros-installer`'s Linux side (work item C8) is not written
-yet, so there is nothing to conform to. If the real convention differs, this check is what changes. It
-also needs `virt-make-fs` (libguestfs-tools) and fails closed without it.
+### R1 builds the real archive and reads the real report
+It stages a migration archive in the format auros-installer's copy engine writes — payload at its
+Stored paths, `<root>/_auros/manifest.tsv` in `auros-manifest/1` — on an unlabelled ext4 image
+(`mkfs.ext4 -d`, no root, no libguestfs) attached as a removable USB stick. `auros-restore` finds it
+by that manifest through `/proc/self/mountinfo`; there is no label in the contract.
+
+The archive comes from `lib/mkarchive.mjs`, a node re-implementation, because the CI job that runs R1
+has no Go and no installer checkout. It is pinned byte-for-byte to the real writer:
+`lib/r1-fixture.manifest.tsv` is produced by `copyengine.Run` in auros-installer's
+`internal/restore/r1fixture_test.go` from `lib/r1-fixture.spec.json`, and `tests/r1-archive.test.sh`
+requires this generator to reproduce it. Both files are copied verbatim between the repositories.
+
+The pass criterion is what `auros-restore` actually reports, which is only a file on the desktop:
+`Your files are here.txt` (clean) or `PLEASE READ — a problem with your files.txt`. The agent relays its
+counts as `#AUROS-RESTORE#` every boot; R1 passes only on the clean name, on the desktop, with listed,
+read back, matched and accounted all equal to the manifest's count and 0 disagreed. On a miss it says
+whether the binary was installed, the unit globally enabled, and the stick mounted — until the restore
+is installed in the image and something mounts the stick before login, R1 is red, correctly.
 
 ### `small-disk`'s real point is measured but not gated
 `profiles.yaml` says small-disk proves "install plus TWO deployments plus Flatpaks fit with ≥15% free".
