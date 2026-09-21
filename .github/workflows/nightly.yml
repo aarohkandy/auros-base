@@ -57,6 +57,13 @@ defaults:
 
 env:
   META_REPO: aarohkandy/auros
+  # ── HEARTBEAT (SYSTEM-REVIEW §2.3, H1, H3). Both numbers are the OWNER'S judgment call — tune freely. ──
+  # Red when upstream's image (base.lock UPSTREAM_CREATED) is older than this. aurora:stable normally
+  # moves weekly; three weeks without a new image means upstream is stalled and we are unpatched.
+  MAX_UPSTREAM_AGE_DAYS: 21
+  # Rebuild anyway when the last successful base build on main is this old, even if upstream did not
+  # move, so CVE fixes in the packages OUR build scripts dnf-install are picked up.
+  MAX_BUILD_AGE_DAYS: 7
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -66,8 +73,12 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write   # to commit the new base.lock to THIS repo (same-repo write is fine; D18 is about OTHER repos)
+      actions: read     # to find the last successful base build (tools/heartbeat.sh force)
     outputs:
       moved:        ${{ steps.check.outputs.moved }}
+      # moved OR our own layer is overdue. `moved` alone never rebuilds for a CVE in our dnf installs.
+      rebuild:      ${{ steps.check.outputs.moved == 'true' || steps.force.outputs.force_rebuild == 'true' }}
+      upstream_created: ${{ steps.check.outputs.upstream_created }}
       old_digest:   ${{ steps.check.outputs.old_digest }}
       new_digest:   ${{ steps.check.outputs.upstream_digest }}
       pull_bytes:   ${{ steps.check.outputs.upstream_pull_size_bytes }}
@@ -95,6 +106,14 @@ jobs:
           echo "old_digest=$OLD" >> "$GITHUB_OUTPUT"
           # `update` is idempotent: against an unmoved tag it rewrites nothing and emits moved=false.
           ./tools/resolve-upstream.sh update
+
+      - name: Is our own layer overdue for a rebuild?
+        id: force
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # Fails closed: if the last build cannot be determined, it emits force_rebuild=true.
+        run: ./tools/heartbeat.sh force
 
       - name: Commit the new lock
         if: steps.check.outputs.moved == 'true'
@@ -133,6 +152,9 @@ jobs:
               echo ""
               echo "That compressed figure is a pull **per machine** when a low layer changes."
               echo "See BLOCKED.md B6 before repeating it to a customer."
+            elif [ '${{ steps.force.outputs.force_rebuild }}' = 'true' ]; then
+              echo "Upstream unchanged, but the last successful base build is ${MAX_BUILD_AGE_DAYS}+ days old"
+              echo "(or could not be found). **Rebuilding anyway** to re-resolve our own layer's packages."
             else
               echo "No change. \`ghcr.io/ublue-os/aurora:stable\` still resolves to \`${{ steps.check.outputs.old_digest }}\`."
               echo ""
@@ -146,13 +168,17 @@ jobs:
   build:
     name: rebuild and gate
     needs: drift
-    if: needs.drift.outputs.moved == 'true'
+    if: needs.drift.outputs.rebuild == 'true'
     # The same file that runs on every push. One publish path, one gate, one place to audit.
     # No inputs are passed because build.yml accepts none.
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
       packages: write
+      # build.yml's keep-nightly-enabled job requests actions: write. A called job may only DOWNGRADE
+      # the caller's grant, so without this line GitHub rejects nightly.yml as a "workflow file issue"
+      # and no job runs (every nightly run so far: event=push, conclusion=failure, zero jobs).
+      actions: write
     secrets: inherit   # build.yml needs COSIGN_PRIVATE_KEY / COSIGN_PASSWORD; signing is keyed, not keyless
 
   # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -259,3 +285,42 @@ jobs:
             echo "::warning::${DAYS} days since the last push. The nightly will be disabled at 60. Push anything, or click Enable workflow. See CI.md."
             echo "- ⚠️ **Action needed within $((60 - DAYS)) days.** Push any commit, or re-enable from the Actions tab." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  stall:
+    name: is upstream alive?
+    needs: drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    # A separate job, not a step in `drift`, so a stalled upstream still lets `build` refresh our own
+    # layer. It only turns the run red.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if upstream's image is older than MAX_UPSTREAM_AGE_DAYS
+        env:
+          CREATED: ${{ needs.drift.outputs.upstream_created }}
+        run: ./tools/heartbeat.sh stall "$CREATED"
+
+  # ═══════════════════════════════════════════════════════════════════════════════════════════════
+  alert:
+    name: open or close the nightly-red issue
+    needs: [drift, build, propagate, schedule-health, stall]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    # H1: nothing watched this run go red. One deduplicated issue, commented on each red night and
+    # closed by the next green one. No email, no chat — GitHub's own issue notifications only.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERDICT: ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 'red' || 'green' }}
+        run: ./tools/heartbeat.sh alert "$VERDICT"
