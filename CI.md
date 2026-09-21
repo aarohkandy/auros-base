@@ -415,6 +415,13 @@ Before the first run, the harness could not have produced a single verdict for a
 | the run directory was `mktemp -d` + `trap rm -rf EXIT` | every serial console, bib and QEMU log was deleted before the upload step ran |
 | S6 measured `containers-storage:`, whose layers are `application/vnd.oci.image.layer.v1.tar` | 8,439,590,767 B reported as a "compressed pull size"; base.lock records the same upstream at 3,758,096,384 B |
 | `sudo -E` alone: sudo replaces PATH with its secure_path | U1–U5 and R1 all failed "cosign is not installed" while the job printed `/home/runner/.cosign/cosign` |
+| `base.lock`'s `UPSTREAM_PULL_SIZE_BYTES` was `3758096384` — exactly 3.5 GiB | not a measurement. The real figure, read off ghcr.io against the pinned digest with the resolver's own definition, is **3,706,306,117 B across 256 `…tar+zstd` layers**. 1.4% out, and S6 budgets against it |
+
+**What the run also confirmed working**, since a probe that only finds bugs is not reporting honestly:
+S1, S2, S3 and S4 pass on the derivative; the in-image probe returns 2,168 rpms and a readable
+`policy.json`; and S5's measured removal closure against the pinned upstream is **exactly 0 packages in
+both directions**, so the closure arithmetic does not manufacture phantom removals on an unchanged
+package set.
 
 **`build.yml` still needs three changes of its own**, and they are not harness bugs:
 

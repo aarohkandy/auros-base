@@ -204,7 +204,10 @@ printf '%s' "${PULL_BYTES:-0}" > "$W/pull-bytes"
 if [ -z "$PULL_BYTES" ] || [ "$PULL_BYTES" = "0" ]; then
   record S6 fail "could not measure the compressed pull size (skopeo inspect --raw produced nothing usable from ${PULL_SOURCE:-any source}). An unmeasured size is a fail — subtraction is the product, and a product we cannot weigh is a product we cannot sell."
 elif [ "$PULL_COMPRESSED" != "1" ]; then
-  record S6 fail "measured ${PULL_BYTES} B from ${PULL_SOURCE}, but its layers are [${LAYER_TYPES}] — UNCOMPRESSED. That is the on-disk size, not the download. S6's unit is what lands on a school's uplink, and local container storage cannot answer that: on the pinned base the two differ by more than a factor of two (8.44 GB on disk vs base.lock's 3.76 GB compressed). Pass --registry-ref pointing at the pushed image, or run S6 against a registry reference."
+  # The comparison number is READ FROM base.lock, never typed here. A hardcoded byte count in a
+  # failure message is a second copy of a fact, and the copy is the one that goes stale.
+  LOCK_PULL=$(read_lock UPSTREAM_PULL_SIZE_BYTES 2>/dev/null || true)
+  record S6 fail "measured ${PULL_BYTES} B from ${PULL_SOURCE}, but its layers are [${LAYER_TYPES}] — UNCOMPRESSED. That is the on-disk size, not the download, and S6's unit is what lands on a school's uplink. Local container storage cannot answer that: base.lock records the pinned upstream at ${LOCK_PULL:-<unreadable>} B compressed, against ${PULL_BYTES} B on disk here. Pass --registry-ref pointing at the pushed image, or give --image a registry reference."
 elif [ -z "$BUDGET" ]; then
   record S6 fail "measured compressed pull size ${PULL_BYTES} bytes from ${PULL_SOURCE}, but NO BUDGET IS DECLARED. Pass --budget-bytes. An undeclared budget is not an infinite budget; it is an image that can grow forever without anyone noticing."
 else

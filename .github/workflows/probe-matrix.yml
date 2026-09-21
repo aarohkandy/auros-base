@@ -352,6 +352,11 @@ jobs:
           for t in podman skopeo jq node cosign qemu-system-x86_64 curl virt-make-fs; do
             printf '%-22s %s\n' "$t" "$(command -v "$t" || echo 'ABSENT')"
           done
+          skopeo --version || true
+          cosign version 2>&1 | head -3 || true
+          # run-update.sh reads back what it pushed with exactly this invocation; a flag that does
+          # not exist in the installed skopeo is how U1-U5 all failed with one useless sentence.
+          skopeo inspect --help 2>&1 | grep -E 'no-tags|tls-verify' || echo "::warning::skopeo inspect has neither --no-tags nor --tls-verify in its help"
 
       - name: Build the trivial derivative
         run: |
@@ -375,6 +380,10 @@ jobs:
           if [ -z "${AUROS_DEV_SIGNING_KEY:-}" ]; then
             echo "::error::AUROS_DEV_SIGNING_KEY is not set; run-update.sh fails all of U1-U5 closed without a signer."
           fi
+          # Shorten the WAITING so a harness bug costs twenty minutes instead of two hours. Every
+          # check that fails on a shortened deadline says so in its own detail. build.yml must not
+          # set this — U1's criterion really is twenty minutes.
+          export AUROS_DEADLINE_DIVISOR="${AUROS_DEADLINE_DIVISOR:-6}"
           printf '%s' "${AUROS_DEV_SIGNING_KEY:-}" > /tmp/probe-signing.key
           chmod 600 /tmp/probe-signing.key
           mkdir -p fragments matrix-run/logs
