@@ -15,7 +15,10 @@ function parseArgs(a) {
   for (let i = 0; i < a.length; i++) {
     if (!a[i].startsWith('--')) continue;
     const k = a[i].slice(2);
-    const v = a[i + 1] && !a[i + 1].startsWith('--') ? a[++i] : 'true';
+    // `!== undefined`, not truthiness: run-static.sh passes `--recipe ""` for a base build, and an
+    // empty string is falsy — so the old test read it as the bare flag `--recipe` = "true", and S3
+    // failed the BASE as 'recipe "true" resolved an EMPTY removal set' (run 35557609009).
+    const v = a[i + 1] !== undefined && !a[i + 1].startsWith('--') ? a[++i] : 'true';
     o[k] = v;
   }
   return o;
@@ -192,8 +195,14 @@ const declaredRemove = lines(args['declared-remove']);
     if (kv[`${k}_PRESENT`] !== '1') problems.push(`${name} not installed${name.startsWith('greenboot') ? ' (D9: greenboot is NOT preinstalled on Aurora — it is an explicit install step, and U3 auto-rollback depends on it)' : ''}`);
     else if (mustEnable && !['enabled', 'enabled-runtime', 'static', 'indirect', 'alias'].includes(kv[`${k}_ENABLED`])) problems.push(`${name} present but is-enabled=${kv[`${k}_ENABLED`]}`);
   }
-  if (kv.UNIT_GREENBOOT_ROLLBACK_SERVICE_PRESENT !== '1') problems.push('greenboot-rollback.service not installed — without it a failed boot does not roll back, it just keeps failing');
-  if (Number(kv.GREENBOOT_REQUIRED_COUNT || 0) < 1) problems.push('/etc/greenboot/check/required.d/ is empty — greenboot would declare every boot healthy, and U3 could never fire');
+  // greenboot 0.16.4 ships no greenboot-rollback.service; what arms rollback is
+  // greenboot-set-rollback-trigger.service (units.known, from rpm -ql in probe-greenboot.yml run
+  // 35542125710). It is RequiredBy=ostree-finalize-staged.service, so is-enabled reads it via .requires.
+  if (kv.UNIT_GREENBOOT_SET_ROLLBACK_TRIGGER_SERVICE_PRESENT !== '1') problems.push('greenboot-set-rollback-trigger.service not installed — without it nothing arms the rollback trigger, and a failed boot does not roll back, it just keeps failing');
+  else if (!['enabled', 'enabled-runtime', 'static', 'indirect', 'alias'].includes(kv.UNIT_GREENBOOT_SET_ROLLBACK_TRIGGER_SERVICE_ENABLED)) problems.push(`greenboot-set-rollback-trigger.service present but is-enabled=${kv.UNIT_GREENBOOT_SET_ROLLBACK_TRIGGER_SERVICE_ENABLED} — nothing arms rollback (D9)`);
+  // Both directories count: greenboot 0.16 packages /usr/lib/greenboot/check/required.d (image-owned,
+  // where build/30-update-agent.sh installs ours) alongside /etc (site-owned).
+  if (Number(kv.GREENBOOT_REQUIRED_COUNT || 0) < 1) problems.push('no *.sh in /usr/lib/greenboot/check/required.d/ or /etc/greenboot/check/required.d/ — greenboot would declare every boot healthy, and U3 could never fire');
   // Two enabled update timers is not a pass. It is two updaters racing, and the loser's failure is
   // the kind of thing that shows up once a month on one machine in a fleet of 180.
   if (['enabled', 'enabled-runtime'].includes(kv.UNIT_UUPD_TIMER_ENABLED) && ['enabled', 'enabled-runtime'].includes(kv.UNIT_BOOTC_FETCH_APPLY_UPDATES_TIMER_ENABLED)) {

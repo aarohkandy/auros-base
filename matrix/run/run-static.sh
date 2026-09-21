@@ -13,6 +13,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 IMAGE=''; DIGEST=''; REGISTRY_REF=''; SECOND_DIGEST=''; CONTAINERFILE=''; BUDGET=''; POLICY='auto'
 RECIPE=''; COSIGN_KEY=''; SCOPE=''; LEDGER="$META_REPO/attest/passed-digests.tsv"
 declare -a INSTALL_RPMS=() FLATPAK_REFS=() REMOVE_PKGS=()
+DEFER=' '
 
 usage() { sed -n '2,20p' "$0"; cat >&2 <<'USAGE'
 
@@ -30,6 +31,10 @@ usage: run-static.sh --image REF [options]
   --remove-pkg PKG        repeatable (the recipe's declared remove: list)
   --cosign-key PATH       public key for S8; default: the key the IMAGE itself ships
   --ledger PATH           attest ledger, read for S6's previous-digest comparison
+  --defer S7|S8           repeatable. Do not evaluate this check here, because another CI job owns it
+                          and writes its own fragment (build.yml: the build job's S7, the sign job's
+                          S8). Nothing is recorded, so a deferred check that nobody else supplies is
+                          MISSING from results.json and record-pass/the gate refuse it — never a pass.
   --out DIR               run directory (default $PWD/matrix-run)
 USAGE
 exit 2; }
@@ -49,6 +54,7 @@ while [ $# -gt 0 ]; do
     --remove-pkg) REMOVE_PKGS+=("$2"); shift 2;;
     --cosign-key) COSIGN_KEY=$2; shift 2;;
     --ledger) LEDGER=$2; shift 2;;
+    --defer) case "$2" in S7|S8) DEFER="$DEFER$2 ";; *) die "--defer accepts only S7 or S8 (the checks another job can own), not '$2'";; esac; shift 2;;
     --out) AUROS_RUN_DIR=$2; shift 2;;
     -h|--help) usage;;
     *) die "unknown argument: $1";;
@@ -205,7 +211,9 @@ fi
 
 # ── S7 — Determinism ─────────────────────────────────────────────────────────────────────────────
 check_begin
-if [ -z "$SECOND_DIGEST" ]; then
+if [[ "$DEFER" == *" S7 "* ]]; then
+  log "  [DEFER] S7 — evaluated by the job that built twice; not recorded here"
+elif [ -z "$SECOND_DIGEST" ]; then
   record S7 fail "no second build supplied. S7's criterion is 'built twice in one CI run from identical inputs, the two builds produce the same CONTENT DIGEST' — the harness does not build, so the workflow must build twice and pass --second-digest. Absent evidence of determinism is not evidence of determinism."
 elif [ -z "$DIGEST" ]; then
   record S7 fail "cannot compare: the digest under test did not resolve"
@@ -220,7 +228,9 @@ fi
 # cannot see: `cosign verify` keeps passing while the laptop that has to install the image finds no
 # signature at all, and that failure is silent.
 check_begin
-if [ -z "$REGISTRY_REF" ]; then
+if [[ "$DEFER" == *" S8 "* ]]; then
+  log "  [DEFER] S8 — evaluated by the job that signed; not recorded here"
+elif [ -z "$REGISTRY_REF" ]; then
   record S8 fail "no --registry-ref. S8 is a statement about what a customer's laptop can find in the registry, so it cannot be evaluated against a local image. See run/README.md 'The S8 ordering problem'."
 elif ! have cosign; then
   record S8 fail "cosign is not installed on this host (it is NOT preinstalled on ubuntu-latest — the workflow must add sigstore/cosign-installer, pinned per D17). A missing verifier is a fail."
