@@ -9,7 +9,7 @@
         "Category": "",
         "Description": "A Windows-shaped Plasma desktop: taskbar along the bottom, start menu at the left, clock and tray at the right, double-click to open.",
         "Id": "org.auros.windows.desktop",
-        "License": "Apache-2.0",
+        "License": "LicenseRef-Proprietary",
         "Name": "Auros",
         "Version": "1.0",
         "Website": "https://github.com/aarohkandy/auros-base"

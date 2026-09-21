@@ -301,7 +301,7 @@ open(p, 'w').write(s.replace(old, '  if [ "$countme_before" -gt 1 ]; then'))
 MUT
 
 mutate "H10: the dnf-automatic guard is inverted — the timers stay live on a read-only /usr" \
-       tests/10-hardening.test.sh "dnf-automatic" <<'MUT'
+       tests/10-hardening.test.sh "masked dnf-automatic.timer" <<'MUT'
 p = 'build/10-hardening.sh'
 s = open(p).read()
 old = 'if have_pkg dnf-automatic; then'

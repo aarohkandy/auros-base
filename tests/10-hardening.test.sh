@@ -535,7 +535,14 @@ group "dnf-automatic — masked when present, untouched when not"
 # and a unit that fails every night is how people learn to ignore failed units — which is what check
 # 40-no-new-failed-units.sh depends on them not doing. The `if have_pkg dnf-automatic` guard is one
 # `!` away from inverting, and nothing exercised either branch.
-DNFA_BLOCK="$(extract_between "$H" '^if have_pkg dnf-automatic; then' '^fi$')"
+# ANCHOR NOTE — this bit me three times in one afternoon and is worth stating once:
+# AN EXTRACTION ANCHOR MUST NOT CONTAIN THE TEXT ITS OWN MUTATION EDITS. Anchored on
+# `^if have_pkg dnf-automatic; then`, inverting that very guard to `if ! have_pkg` made the
+# extraction match nothing, and the suite ABORTED instead of failing. An abort is still a red, so
+# prove-red.sh scored it "caught" — but the abort means "I could not test this", not "this is
+# wrong", and a test that can only abort is not testing the behaviour at all. `.*` across the part
+# that can change keeps the range anchored while letting the mutant through to the assertions.
+DNFA_BLOCK="$(extract_between "$H" '^if .*have_pkg dnf-automatic' '^fi$')"
 DNFA_TIMERS="dnf-automatic.timer dnf-automatic-install.timer dnf-automatic-notifyonly.timer dnf-automatic-download.timer"
 
 dnfa_run() { # <root> <have_pkg: yes|no>
@@ -577,7 +584,7 @@ group "the protected-set spot-check at the end of hardening"
 # build log next to its cause. It names two commands, and bootc is the one that matters: bootc IS the
 # update path, and an image without it can never be patched again. Dropping it from the list leaves a
 # check that can only notice a missing systemctl.
-SPOT_BLOCK="$(extract_between "$H" '^for c in bootc systemctl; do' '^did "protected set spot-check')"
+SPOT_BLOCK="$(extract_between "$H" '^for c in ' '^did "protected set spot-check')"
 
 spot_run() { # <present commands...>
   local d; d="$(stubdir)"
