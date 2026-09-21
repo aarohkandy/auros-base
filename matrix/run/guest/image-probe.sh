@@ -19,7 +19,8 @@ unit_enabled() {
   fi
   if [ -z "$out" ]; then
     # Fallback: a .wants symlink is what "enabled" physically means.
-    if ls /etc/systemd/system/*.wants/"$u" /usr/lib/systemd/system/*.wants/"$u" >/dev/null 2>&1; then out=enabled; else out=unknown; fi
+    if ls /etc/systemd/system/*.wants/"$u" /usr/lib/systemd/system/*.wants/"$u" \
+          /etc/systemd/system/*.requires/"$u" /usr/lib/systemd/system/*.requires/"$u" >/dev/null 2>&1; then out=enabled; else out=unknown; fi
   fi
   printf '%s' "$out"
 }
@@ -40,8 +41,7 @@ emit BOOTC_BIN "$(command -v bootc || echo '')"
 # deliberately leaves it inert while enabling bootc's own timer (build/30-update-agent.sh, D22).
 # Two enabled updaters racing each other is worth seeing, which is why it is here at all.
 for u in bootc-fetch-apply-updates.timer bootc-fetch-apply-updates.service uupd.timer \
-         greenboot-healthcheck.service greenboot-rollback.service greenboot-grub2-set-counter.service \
-         redboot-auto-reboot.service NetworkManager.service; do
+         greenboot-healthcheck.service greenboot-set-rollback-trigger.service NetworkManager.service; do
   k=$(printf '%s' "$u" | tr '.-' '__' | tr '[:lower:]' '[:upper:]')
   emit "UNIT_${k}_PRESENT" "$(unit_present "$u")"
   emit "UNIT_${k}_ENABLED" "$(unit_enabled "$u")"
@@ -90,7 +90,8 @@ done
 emit POLICY_MODE_STAMP "$(cat /usr/lib/auros/policy-mode 2>/dev/null || echo '')"
 emit POLICY_ASSERT_BIN "$( [ -x /usr/libexec/auros/assert-policy ] && echo /usr/libexec/auros/assert-policy || echo '' )"
 emit POLICY_APPLY_BIN "$( [ -x /usr/libexec/auros/apply-policy ] && echo /usr/libexec/auros/apply-policy || echo '' )"
-emit GREENBOOT_REQUIRED_COUNT "$(ls -1 /etc/greenboot/check/required.d/ 2>/dev/null | wc -l | tr -d ' ')"
+# greenboot runs '*.sh' from BOTH dirs; build/30-update-agent.sh installs ours in the /usr/lib one.
+emit GREENBOOT_REQUIRED_COUNT "$(ls -1 /usr/lib/greenboot/check/required.d/*.sh /etc/greenboot/check/required.d/*.sh 2>/dev/null | wc -l | tr -d ' ')"
 
 # ── S5 / S3: the removal report, wherever the prune engine put it.
 REPORT=''

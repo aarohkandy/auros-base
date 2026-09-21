@@ -564,7 +564,11 @@ jobs:
             --digest '${{ needs.build.outputs.digest }}' \
             --checks matrix/checks.yaml \
             --profiles matrix/profiles.yaml \
-            --out fragments/static.json
+            --out fragments/static.json \
+            --defer S7 --defer S8
+          # S7 comes from the build job's fragment and S8 from the sign job's (both profile "static").
+          # Evaluated here they can only fail — no second build, not yet signed — and sign needs this
+          # job, so S8 could never go green. Deferred checks are not recorded; a missing one is refused.
           # Fail closed on a harness that exits 0 without producing anything.
           jq -e '.profile and (.checks|length > 0)' fragments/static.json >/dev/null
           jq -r '.checks[] | "\(.id) \(.status) \(.detail // "")"' fragments/static.json
