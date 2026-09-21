@@ -559,6 +559,24 @@ assert old in s
 open(p, 'w').write(s.replace(old, '[ "$pages" -ge 1 ] || die'))
 MUT
 
+mutate "the image stops writing /etc/plasma-setup-done, so KDE's wizard takes seat0 on first boot" \
+       tests/40-windows-feel.test.sh "[plasma-setup] plasma-setup 6.7.5's own conditions" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = "  | install_text \"$PS_DONE\" 0644\n"
+assert old in s
+open(p, 'w').write(s.replace(old, "  >/dev/null\n"))
+MUT
+
+mutate "the first-boot account detector counts system accounts as people, hiding the no-user gap" \
+       tests/40-windows-feel.test.sh "today's image: system accounts only" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = "$3>=1000 && $3<60000"
+assert old in s
+open(p, 'w').write(s.replace(old, "$3>=900 && $3<60000"))
+MUT
+
 mutate "W06: enable_user_unit stops verifying the link, so the first-run wizard never runs for anyone" \
        tests/40-windows-feel.test.sh "ln exits 0 and creates no link" <<'MUT'
 p = 'build/00-common.sh'
