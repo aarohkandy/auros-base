@@ -17,6 +17,11 @@
 # produce the same filesystem, because check S7 builds twice and compares content digests.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
+# Any command that ends a build script by failing prints WHERE, not just "FAILED in <script>".
+# Run 35655232586 died inside 10-hardening.sh with no message: a pipeline in a $( ) failed under
+# pipefail and set -e exited silently. -E makes functions and command substitutions inherit the trap.
+set -E
+trap '_auros_rc=$?; printf "auros: command failed (exit %s) at %s:%s: %s\n" "$_auros_rc" "${BASH_SOURCE[0]##*/}" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 # Guard against double-sourcing. Sourced twice, the log prefix stack would grow and the manifest
 # would gain duplicate rows, and S7 would see two different images from one input.

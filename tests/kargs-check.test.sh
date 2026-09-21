@@ -166,6 +166,27 @@ run_case "rd.selinux=0 (initramfs only) is NOT treated as disabling" clean 'karg
 # The anchors are ^ and $ on purpose: a longer argument that merely contains the text must not flag.
 run_case "an argument that merely contains the text"          clean   'kargs = ["myapp.selinux=0mode"]'
 
+echo
+echo "under the build's own shell options (set -euo pipefail), the way 10-hardening.sh calls it:"
+# run_case above runs without set -e/pipefail, so it could not see this: an ostree-boot tree with an
+# entry but no options= line made the function's last grep exit 1, pipefail failed the $( ), and
+# set -e ended the build with no message (run 35655232586, the D43 blacklist read).
+strict_case () {
+  local name="$1" entry="$2" root got
+  root="$(mktemp -d)"; mkdir -p "$root/usr/lib/bootc/kargs.d" "$root/usr/lib/ostree-boot/loader/entries"
+  printf 'kargs = ["modprobe.blacklist=zfs"]\n' > "$root/usr/lib/bootc/kargs.d/20.toml"
+  printf '%s\n' "$entry" > "$root/usr/lib/ostree-boot/loader/entries/ostree-1.conf"
+  got=$(ROOT="$root" bash -c "set -euo pipefail
+$FN
+b=\" \$(_auros_effective_kargs | tr -d ' \t' | sed -n 's/^modprobe\\.blacklist=//p' | tr '\n' ' ')\"
+echo \"survived:\$b\"" 2>&1)
+  rm -rf "$root"
+  case "$got" in *"survived: zfs "*) printf '  ok   %-62s\n' "$name"; PASS=$((PASS+1)) ;;
+    *) printf '  FAIL %-62s got=[%s]\n' "$name" "$got"; FAIL=$((FAIL+1)) ;; esac
+}
+strict_case "ostree-boot entry with NO options= line"   'title Fedora'
+strict_case "ostree-boot entry WITH an options= line"   'options root=UUID=x quiet'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 
 # The direction audit, in miniature: a run in which nothing was ever flagged, or nothing was ever

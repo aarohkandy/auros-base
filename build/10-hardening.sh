@@ -71,7 +71,9 @@ _auros_effective_kargs() {
       || true   # a file with no kargs key is legitimate; grep's exit 1 must not abort the loop
   done
   if [ -d /usr/lib/ostree-boot ]; then
-    grep -RIhs '^[[:space:]]*options[[:space:]]' /usr/lib/ostree-boot 2>/dev/null | sed 's/^[[:space:]]*options[[:space:]]*//' | tr ' ' '\n'
+    # `|| true` for the same reason as the loop above: an ostree-boot tree with no options= line is
+    # legitimate, and grep's exit 1 under pipefail killed batch-4's build (run 35655232586) with no message.
+    grep -RIhs '^[[:space:]]*options[[:space:]]' /usr/lib/ostree-boot 2>/dev/null | sed 's/^[[:space:]]*options[[:space:]]*//' | tr ' ' '\n' || true
   fi
 }
 # NOTE: `tr -d '[:space:]'` would delete the NEWLINES too, collapsing every argument onto one line so
