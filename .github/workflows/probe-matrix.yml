@@ -135,6 +135,23 @@ jobs:
           sudo podman images --format '{{.Repository}}:{{.Tag}} {{.Size}}'
           df -h /
 
+      - name: What the image's display manager actually is, and where it reads its config
+        run: |
+          # NEVER GUESS A PATH. guest/Containerfile.testwrap writes display-manager autologin to
+          # /etc/sddm.conf.d/ so that B7, B8 and B12 have a live desktop session. On this base the
+          # display manager resolved to /usr/bin/plasmalogin, not sddm (run 35550693484), so that
+          # path may be read by nothing — and three boot checks would fail for a reason that has
+          # nothing to do with the image. This step asks the image.
+          R() { sudo podman run --rm --network=none --entrypoint= "$PROBE_IMAGE" "$@" 2>&1 | head -25; }
+          echo "── display-manager.service resolves to ──"
+          R readlink -f /etc/systemd/system/display-manager.service || true
+          R sh -c 'sed -n "1,25p" "$(readlink -f /etc/systemd/system/display-manager.service)"' || true
+          echo "── which login-manager config paths exist ──"
+          R sh -c 'for d in /etc/sddm.conf.d /usr/lib/sddm/sddm.conf.d /usr/share/sddm/sddm.conf.d /etc/plasmalogin.conf.d /usr/lib/plasmalogin/plasmalogin.conf.d /etc/sddm.conf /etc/plasmalogin.conf; do [ -e "$d" ] && echo "PRESENT $d" || echo "absent  $d"; done' || true
+          echo "── what the binary says about its own config ──"
+          R sh -c '/usr/bin/plasmalogin --help' || true
+          R sh -c 'rpm -qf /usr/bin/plasmalogin; rpm -ql "$(rpm -qf --qf "%{NAME}" /usr/bin/plasmalogin)" | grep -iE "conf|autologin" | head -20' || true
+
       - name: Static checks S1-S10
         id: phase
         run: |
@@ -219,10 +236,18 @@ jobs:
           # and a base build has already been lost to a CLI that did not have the option it was
           # given. The pull is needed by the next step anyway, so asking costs nothing.
           sudo podman pull -q quay.io/centos-bootc/bootc-image-builder:latest
-          sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder \
-            quay.io/centos-bootc/bootc-image-builder:latest --help 2>&1 | head -60 \
-            || sudo podman run --rm quay.io/centos-bootc/bootc-image-builder:latest --help 2>&1 | head -60 \
-            || echo "::warning::could not get --help out of bootc-image-builder; the build step will be the first thing that finds out"
+          # The top-level --help lists only the subcommands; --type/--rootfs/--local belong to
+          # `build`, which is also the default command — measured, run 35550414146. So ask `build`.
+          B=quay.io/centos-bootc/bootc-image-builder:latest
+          sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" version 2>&1 | head -5 || true
+          echo "──── build --help (the flags vm.sh actually passes) ────"
+          sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" build --help 2>&1 | head -60 \
+            || echo "::warning::could not get 'build --help' out of bootc-image-builder"
+          echo "──── are the three flags vm.sh passes present? ────"
+          H=$(sudo podman run --rm --entrypoint /usr/bin/bootc-image-builder "$B" build --help 2>&1 || true)
+          for f in --type --rootfs --local --config; do
+            printf '%-10s %s\n' "$f" "$(printf '%s' "$H" | grep -qE -- "$f" && echo present || echo 'NOT IN --help')"
+          done
 
       - name: Build the trivial derivative
         run: |

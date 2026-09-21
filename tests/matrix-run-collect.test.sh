@@ -50,7 +50,7 @@ collect() { # collect <rundir> <profile> <digest> <out> [phase] [checks.yaml]
 collect_phase() { # collect_phase <rundir> <profile> <out> <phase>
   node "$COLLECT_JS" "$1" "$2" '' "$3" "$4" "$CHECKS_YAML"
 }
-status_of() { node -e 'const j=require(process.argv[1]);const c=j.checks.find(c=>c.id===process.argv[2]);process.stdout.write(c?c.status:"MISSING")' "$1" "$2" 2>/dev/null || printf '?'; }
+status_of() { node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));const c=j.checks.find(c=>c.id===process.argv[2]);process.stdout.write(c?c.status:"MISSING")' "$1" "$2" 2>/dev/null || printf '?'; }
 
 mkrun() { # mkrun -> echoes a fresh run directory with checks/ and logs/
   local d; d="$(newroot)/run"
@@ -70,11 +70,11 @@ EOF
 OUT="$R/frag.json"
 run_check collect.jsonl green "two JSON Lines records in checks/static.jsonl are collected" -- collect "$R" static sha256:abc "$OUT"
 assert_file "a fragment was written" "$OUT"
-assert_eq "both records survived" "2" "$(node -e 'process.stdout.write(String(require(process.argv[1]).checks.length))' "$OUT" 2>/dev/null || echo 0)"
-assert_eq "S1 kept its pass" "pass" "$(node -e 'const j=require(process.argv[1]);process.stdout.write(j.checks.find(c=>c.id==="S1").status)' "$OUT" 2>/dev/null || echo '?')"
-assert_eq "S2 kept its fail" "fail" "$(node -e 'const j=require(process.argv[1]);process.stdout.write(j.checks.find(c=>c.id==="S2").status)' "$OUT" 2>/dev/null || echo '?')"
+assert_eq "both records survived" "2" "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$OUT" 2>/dev/null || echo 0)"
+assert_eq "S1 kept its pass" "pass" "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.checks.find(c=>c.id==="S1").status)' "$OUT" 2>/dev/null || echo '?')"
+assert_eq "S2 kept its fail" "fail" "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.checks.find(c=>c.id==="S2").status)' "$OUT" 2>/dev/null || echo '?')"
 assert_eq "the digest under test is carried into the fragment" "sha256:abc" \
-  "$(node -e 'process.stdout.write(String(require(process.argv[1]).digest||""))' "$OUT" 2>/dev/null || echo '?')"
+  "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).digest||""))' "$OUT" 2>/dev/null || echo '?')"
 
 # The boot phase names its file per profile. A collector that only knew "static.jsonl" would be just
 # as broken as one that only knew ".json", and it would be broken only for the boot phase.
@@ -116,7 +116,7 @@ group "shape normalisation, and the pessimistic merge"
 R6="$(mkrun)"
 echo '{"profile":"static","checks":[{"id":"S8","status":"pass","detail":"sig tag discoverable"}]}' > "$R6/checks/s8.json"
 run_check collect.jsonl green "a whole-document .json fragment is read as well as .jsonl" -- collect "$R6" static '' "$R6/frag.json"
-assert_eq "S8 came through" "pass" "$(node -e 'const j=require(process.argv[1]);process.stdout.write((j.checks.find(c=>c.id==="S8")||{}).status||"?")' "$R6/frag.json" 2>/dev/null || echo '?')"
+assert_eq "S8 came through" "pass" "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write((j.checks.find(c=>c.id==="S8")||{}).status||"?")' "$R6/frag.json" 2>/dev/null || echo '?')"
 
 # Two sources disagreeing about one id must resolve to the WORSE answer. A check that passed once and
 # failed once did not pass — and on a two-boot profile that is not hypothetical: the agent records B2
@@ -128,9 +128,9 @@ cat > "$R7/checks/boot-uefi-modern.jsonl" <<'EOF'
 EOF
 collect "$R7" uefi-modern '' "$R7/frag.json" >/dev/null 2>&1 || true
 assert_eq "a pass and a fail for one id collapses to fail" "fail" \
-  "$(node -e 'const j=require(process.argv[1]);process.stdout.write((j.checks.find(c=>c.id==="B2")||{}).status||"?")' "$R7/frag.json" 2>/dev/null || echo '?')"
+  "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write((j.checks.find(c=>c.id==="B2")||{}).status||"?")' "$R7/frag.json" 2>/dev/null || echo '?')"
 assert_eq "and only one record survives" "1" \
-  "$(node -e 'process.stdout.write(String(require(process.argv[1]).checks.length))' "$R7/frag.json" 2>/dev/null || echo '?')"
+  "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R7/frag.json" 2>/dev/null || echo '?')"
 
 # Anything that is not literally "pass" or "skip" is a fail. An absent answer is a failure, not an
 # unknown — that rule lives in exactly one place and this is it.
@@ -141,9 +141,9 @@ cat > "$R8/checks/static.jsonl" <<'EOF'
 EOF
 collect "$R8" static '' "$R8/frag.json" >/dev/null 2>&1 || true
 assert_eq "an unrecognised status becomes fail" "fail" \
-  "$(node -e 'const j=require(process.argv[1]);process.stdout.write((j.checks.find(c=>c.id==="S1")||{}).status||"?")' "$R8/frag.json" 2>/dev/null || echo '?')"
+  "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write((j.checks.find(c=>c.id==="S1")||{}).status||"?")' "$R8/frag.json" 2>/dev/null || echo '?')"
 assert_eq "skip stays skip, so the gate can refuse it separately" "skip" \
-  "$(node -e 'const j=require(process.argv[1]);process.stdout.write((j.checks.find(c=>c.id==="S2")||{}).status||"?")' "$R8/frag.json" 2>/dev/null || echo '?')"
+  "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write((j.checks.find(c=>c.id==="S2")||{}).status||"?")' "$R8/frag.json" 2>/dev/null || echo '?')"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "matrix/run.sh's own verdict line — a phase with a failing check must exit non-zero"
@@ -195,7 +195,7 @@ echo '{"status":"pass","detail":"no flatpak refs declared"}' > "$R_W/work/flatpa
 echo '{"schemaVersion":2,"layers":[{"size":1}]}'             > "$R_W/work/manifest.json"
 run_check collect.jsonl green "JSON under work/ is ignored, not mistaken for a corrupt record" -- collect "$R_W" static '' "$R_W/frag.json"
 assert_eq "only the real record came through" "1" \
-  "$(node -e 'process.stdout.write(String(require(process.argv[1]).checks.length))' "$R_W/frag.json" 2>/dev/null || echo '?')"
+  "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R_W/frag.json" 2>/dev/null || echo '?')"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "completeness — a check that never reported is recorded as a fail, not omitted"
@@ -215,8 +215,8 @@ run_check completeness green "a static phase that recorded only S1 and S2 still 
 assert_file "and it still wrote the fragment, so the evidence survives" "$R9/frag.json"
 assert_eq "S1's real verdict is preserved" "pass" "$(status_of "$R9/frag.json" S1)"
 assert_eq "S10, never reached, is recorded as a fail" "fail" "$(status_of "$R9/frag.json" S10)"
-assert_eq "all ten static ids are present" "10"   "$(node -e 'process.stdout.write(String(require(process.argv[1]).checks.length))' "$R9/frag.json" 2>/dev/null || echo '?')"
-assert_has "and the synthesised detail says the harness never reached it" "recorded NO verdict"   "$(node -e 'const j=require(process.argv[1]);process.stdout.write(j.checks.find(c=>c.id==="S10").detail)' "$R9/frag.json" 2>/dev/null || echo '')"
+assert_eq "all ten static ids are present" "10"   "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R9/frag.json" 2>/dev/null || echo '?')"
+assert_has "and the synthesised detail says the harness never reached it" "recorded NO verdict"   "$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(j.checks.find(c=>c.id==="S10").detail)' "$R9/frag.json" 2>/dev/null || echo '')"
 
 # GREEN: a complete phase is left alone.
 R10="$(mkrun)"
@@ -224,7 +224,7 @@ for id in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10; do
   printf '{"id":"%s","status":"pass","detail":"synthetic"}\n' "$id" >> "$R10/checks/static.jsonl"
 done
 run_check completeness green "a static phase with all ten ids passes through untouched" -- collect_phase "$R10" static "$R10/frag.json" static
-assert_eq "nothing was added" "10"   "$(node -e 'process.stdout.write(String(require(process.argv[1]).checks.length))' "$R10/frag.json" 2>/dev/null || echo '?')"
+assert_eq "nothing was added" "10"   "$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).checks.length))' "$R10/frag.json" 2>/dev/null || echo '?')"
 
 # The update phase's contract spans two sections of checks.yaml: `update` and `restore` (R1).
 R11="$(mkrun)"

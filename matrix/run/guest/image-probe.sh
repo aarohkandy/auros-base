@@ -92,6 +92,19 @@ emit DISPLAY_MANAGER_EXECSTART "$(sed -n 's/^ExecStart=//p' "$DM_UNIT" 2>/dev/nu
 DM_EXEC=$(sed -n 's/^ExecStart=//p' "$DM_UNIT" 2>/dev/null | head -1 | awk '{print $1}' | sed 's/^[-@+!]*//')
 emit DISPLAY_MANAGER_EXEC_PRESENT "$( [ -n "$DM_EXEC" ] && [ -e "$DM_EXEC" ] && echo 1 || echo 0 )"
 emit DISPLAY_MANAGER_EXEC_PATH "$DM_EXEC"
+# WHERE THE LOGIN MANAGER READS ITS CONFIG. The test wrapper writes autologin so that B7, B8 and B12
+# have a live desktop session, and it writes it to /etc/sddm.conf.d/. On this base the display
+# manager is /usr/bin/plasmalogin (measured, run 35550693484) — not sddm — so that path may be read
+# by nothing at all, in which case there is no session and three checks fail for a reason that has
+# nothing to do with the image. Emit what EXISTS instead of assuming.
+DMCONF=''
+for d in /etc/sddm.conf.d /usr/lib/sddm/sddm.conf.d /usr/share/sddm/sddm.conf.d \
+         /etc/plasmalogin.conf.d /usr/lib/plasmalogin/plasmalogin.conf.d \
+         /etc/sddm.conf /etc/plasmalogin.conf; do
+  [ -e "$d" ] && DMCONF="$DMCONF $d"
+done
+emit DISPLAY_MANAGER_CONF_PATHS "${DMCONF# }"
+emit DISPLAY_MANAGER_AUTOLOGIN_FOUND "$(grep -rls '^\[Autologin\]' /etc/sddm.conf.d /etc/sddm.conf /etc/plasmalogin.conf.d /etc/plasmalogin.conf /usr/lib/sddm 2>/dev/null | tr '\n' ',')"
 emit AUROS_POLICY_DIRS "$(ls -1 /usr/share/auros/policy 2>/dev/null | tr '\n' ',')"
 emit AUROS_POLICY_UNITS "$(ls -1 /usr/lib/systemd/system/ 2>/dev/null | grep -c '^auros-policy-' || true)"
 for m in open managed locked kiosk; do

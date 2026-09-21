@@ -70,6 +70,18 @@ fail_all() {
   exit 1
 }
 
+# THE PROFILE IS VALIDATED BEFORE ANYTHING IS BUILT.
+# `eval "$(profile.mjs "$PROFILE")"` used to sit AFTER build_qcow2. On an unknown profile id
+# profile.mjs exits 2 and prints nothing, so the eval was of an empty string, and the failure landed
+# ten minutes later as `P_DISK_GB: unbound variable` — a typo diagnosed as a shell error, after a
+# full image build. profile.mjs's own message lists the ids that do exist; it belongs here, before
+# the expensive part, where it can be read.
+PROFILE_ENV="$(node "$HARNESS_DIR/lib/profile.mjs" "$PROFILE" 2>"$AUROS_RUN_DIR/logs/profile.err")" || {
+  fail_all "profile '${PROFILE}' could not be resolved from matrix/profiles.yaml: $(tr '\n' ' ' < "$AUROS_RUN_DIR/logs/profile.err")"
+}
+eval "$PROFILE_ENV"
+[ -n "${P_DISK_GB:-}" ] && [ -n "${P_RAM_MB:-}" ] || fail_all "profile '${PROFILE}' resolved but produced no P_DISK_GB/P_RAM_MB — lib/profile.mjs and this script disagree about the variable names, and every later use would be an unbound-variable error somewhere unhelpful. It printed: $(printf '%s' "$PROFILE_ENV" | tr '\n' ' ')"
+
 ACCEL=$(accel_mode)
 if [ "$ACCEL" = tcg ] && [ "$AUROS_ALLOW_TCG" != 1 ]; then
   fail_all "no writable /dev/kvm on this host and AUROS_ALLOW_TCG is not set. The runner probe measured KVM as present and usable after 'chmod 666 /dev/kvm'; a CI job silently falling back to emulation would quietly stop enforcing B1's 120-second budget, so the harness refuses instead."
@@ -97,7 +109,8 @@ fi
 chmod 666 "$QCOW" 2>/dev/null || true
 
 # The profile's disk floor. small-disk exists to prove two deployments plus Flatpaks fit at 64 GB.
-eval "$(node "$HARNESS_DIR/lib/profile.mjs" "$PROFILE")"
+# (Already evaluated above, before the build; re-evaluated here so this block still reads on its own.)
+eval "$PROFILE_ENV"
 VIRT_BYTES=$(qemu-img info --output=json "$QCOW" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)["virtual-size"]||0))}catch{process.stdout.write("0")}})')
 WANT_BYTES=$(( P_DISK_GB * 1024 * 1024 * 1024 ))
 if [ "${VIRT_BYTES:-0}" -gt "$WANT_BYTES" ]; then

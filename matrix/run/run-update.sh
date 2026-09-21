@@ -54,6 +54,7 @@ export AUROS_RUN_DIR TEST_USER TEST_PASSWORD AUTOLOGIN
 mkdir -p "$AUROS_RUN_DIR/checks" "$AUROS_RUN_DIR/logs" "$AUROS_RUN_DIR/work"
 CHECKS_FILE="$AUROS_RUN_DIR/checks/update.jsonl"; : > "$CHECKS_FILE"
 L="$AUROS_RUN_DIR/logs"; W="$AUROS_RUN_DIR/work"
+sign_err() { [ -s "$L/cosign.log" ] && printf 'Last of cosign.log: %s' "$(tail -4 "$L/cosign.log" | tr '\n' ' ')" || printf 'cosign.log is empty, so cosign produced no output at all — check that the key file is non-empty and that COSIGN_PASSWORD matches it'; }
 need podman; need qemu-system-x86_64; need node
 
 fail_all() {
@@ -101,7 +102,12 @@ if [ -z "$PUBKEY" ]; then
   fi
 fi
 if [ -n "$PUBKEY" ]; then
-  cosign public-key --key "$SIGNING_KEY" > "$W/signing.pub" 2>/dev/null || true
+  cosign public-key --key "$SIGNING_KEY" > "$W/signing.pub" 2>>"$L/cosign.log" || true
+  if [ ! -s "$W/signing.pub" ]; then
+    # Silently skipping the comparison here is how a wrong or unreadable key reaches sign_digest and
+    # fails four images later with no reason attached.
+    warn "could not derive a public key from --signing-key: the image/key match could NOT be checked. $(sign_err)"
+  fi
   if [ -s "$W/signing.pub" ] && ! diff -q <(tr -d ' \n' < "$W/signing.pub") <(tr -d ' \n' < "$PUBKEY") >/dev/null 2>&1; then
     fail_all "the signing key does not match the public key the image ships at /usr/lib/pki/containers/. Every image the harness offers would be refused, U1 would fail and U4 would 'pass' for a reason that has nothing to do with the check."
   fi
@@ -262,7 +268,7 @@ chmod 666 "$QCOW" 2>/dev/null || true
 
 # ── push and sign A and B ────────────────────────────────────────────────────────────────────────
 DIG_A=$(push_as "$WRAP" "$TAG") || fail_all "could not push image A to the harness registry. $(push_err)"
-sign_digest "$DIG_A" || fail_all "cosign could not sign image A"
+sign_digest "$DIG_A" || fail_all "cosign could not sign image A. $(sign_err)"
 log "A (booted image) = $DIG_A"
 
 VM_NETDEV_EXTRA="guestfwd=tcp:${GUEST_REG_IP}:443-tcp:127.0.0.1:${REG_PORT},guestfwd=tcp:${GUEST_REG_IP}:80-tcp:127.0.0.1:${REG_PORT}"
@@ -288,7 +294,7 @@ wait_for_digest() {
 # ── U1 — the update applies with NO human action ─────────────────────────────────────────────────
 check_begin
 DIG_B=$(push_as "localhost/auros-matrix-b:test" "$TAG") || fail_all "could not push image B to the harness registry. $(push_err)"
-sign_digest "$DIG_B" || fail_all "cosign could not sign image B"
+sign_digest "$DIG_B" || fail_all "cosign could not sign image B. $(sign_err)"
 log "B (the update) = $DIG_B — nothing else is touched from here; the machine must do this itself"
 U1_DEADLINE=$(scale "$(short 1200)")   # U1's criterion is 20 minutes; short() only bites in a probe
 if wait_for_digest "$DIG_B" "$U1_DEADLINE"; then
@@ -315,7 +321,7 @@ fi
 check_begin
 PRE_U3=$(last_status_field "$AGENT" digest)
 DIG_C=$(push_as "localhost/auros-matrix-c:test" "$TAG") || fail_all "could not push image C to the harness registry. $(push_err)"
-sign_digest "$DIG_C" || fail_all "cosign could not sign image C"
+sign_digest "$DIG_C" || fail_all "cosign could not sign image C. $(sign_err)"
 log "C (fails greenboot on purpose) = $DIG_C"
 U3_DEADLINE=$(scale "$(short 2400)")
 SAW_C=0
