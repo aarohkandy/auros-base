@@ -614,7 +614,8 @@ jobs:
             --profiles matrix/profiles.yaml \
             --out fragments/static.json \
             --defer S7 --defer S8 \
-            --budget-bytes 4628170380
+            --budget-bytes 4628170380 \
+            --mirror '${{ needs.plan.outputs.mirror }}'
           # S6 budget (OWNER, 2026-09-21, D44): the measured 4,207,427,618 B compressed pull + 10%,
           # S6's own regression rule. Raising it is a decision, not a fix.
           # S7 comes from the build job's fragment and S8 from the sign job's (both profile "static").

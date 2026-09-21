@@ -24,6 +24,7 @@ usage: run-static.sh --image REF [options]
   --second-digest sha256: digest of the second build of identical inputs; required for S7
   --containerfile PATH    Containerfile whose FROM is checked against base.lock (default: auros-base/Containerfile)
   --budget-bytes N        declared compressed-pull budget for S6
+  --mirror IMAGE          the D21 mirror a FROM line may name instead of upstream (S1)
   --policy MODE           open|managed|locked|kiosk (default: read from the image)
   --recipe NAME           recipe name; omit for a base build
   --install-rpm PKG       repeatable
@@ -54,6 +55,7 @@ while [ $# -gt 0 ]; do
     --flatpak-ref) FLATPAK_REFS+=("$2"); shift 2;;
     --remove-pkg) REMOVE_PKGS+=("$2"); shift 2;;
     --from-image) FROM_IMAGE=$2; shift 2;;
+    --mirror) MIRROR=$2; shift 2;;
     --cosign-key) COSIGN_KEY=$2; shift 2;;
     --ledger) LEDGER=$2; shift 2;;
     --defer) case "$2" in S7|S8) DEFER="$DEFER$2 ";; *) die "--defer accepts only S7 or S8 (the checks another job can own), not '$2'";; esac; shift 2;;
@@ -92,11 +94,14 @@ else
     FROM_IMG=${FROM_REF%@*}; FROM_DIG=${FROM_REF#*@}
     if [ "$FROM_DIG" != "$LOCK_DIG" ]; then
       record S1 fail "FROM digest $FROM_DIG != base.lock UPSTREAM_DIGEST $LOCK_DIG"
-    elif [ "$FROM_IMG" != "$LOCK_IMG" ] && [ "$FROM_IMG" != "$(read_lock UPSTREAM_MIRROR)" ]; then
+    # D21 mirror: the workflow passes the name it derives from auros.config.json (--mirror), the same
+    # source resolve-upstream.sh assert uses. base.lock's MIRROR_IMAGE / UPSTREAM_MIRROR remain accepted.
+    elif [ "$FROM_IMG" != "$LOCK_IMG" ] && [ "$FROM_IMG" != "${MIRROR:-}" ] \
+         && [ "$FROM_IMG" != "$(read_lock MIRROR_IMAGE)" ] && [ "$FROM_IMG" != "$(read_lock UPSTREAM_MIRROR)" ]; then
       # D21: upstream garbage-collects the digest we pin, so the base mirrors it into our own
       # namespace and FROM may resolve against the mirror. The DIGEST is what S1 is really about, and
       # it is identical either way; the image name may be upstream's or base.lock's UPSTREAM_MIRROR.
-      record S1 fail "FROM image $FROM_IMG is neither base.lock UPSTREAM_IMAGE ($LOCK_IMG) nor UPSTREAM_MIRROR ($(read_lock UPSTREAM_MIRROR | sed 's/^$/unset/'))"
+      record S1 fail "FROM image $FROM_IMG is neither base.lock UPSTREAM_IMAGE ($LOCK_IMG) nor the D21 mirror (--mirror: ${MIRROR:-unset}; base.lock MIRROR_IMAGE: $(read_lock MIRROR_IMAGE | sed 's/^$/unset/'))"
     else
       record S1 pass "FROM ${FROM_IMG}@${FROM_DIG} == base.lock exactly"
     fi
