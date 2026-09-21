@@ -286,7 +286,7 @@ that it is B11's territory, in a VM, where demanding zero is fair.
 |---|---|
 | `50-signature-enforcement.sh` | the booted deployment's signature mode is `containerPolicy`, and `policy.json` really carries a scoped `sigstoreSigned` rule |
 | `60-rollback-wiring.sh` | ostree backend (not composefs — D9), the counter units exist, a rollback deployment is retained once there is one to retain (D10), `boot_counter` logic in `grub.cfg`, `MAX_BOOT_ATTEMPTS=2` |
-| `70-update-freshness.sh` | a successful fetch happened within 14 days — and that one was *due* |
+| `70-update-freshness.sh` | the **running** image (`.status.booted.image.timestamp`) is under 21 days old — a fresh fetch stamp alone cannot pass it, since "nothing new" is also a successful fetch (SYSTEM-REVIEW §2.4) — **and** a successful fetch happened within 14 days, once one was *due* |
 
 > **Both wanted checks were broken in the same way and neither could be noticed.**
 >
@@ -398,7 +398,7 @@ is what `--self-test` is for.
 |---|---|
 | A | `auros-update` swallowing a fetch failure; the freshness stamp moving after a rejected image; `set -e` killing the unit on a transient `bootc status`; the negated-capture construct returning |
 | B | every branch of `60-rollback-wiring.sh`, **including that a healthy machine is green** — the fatal made the healthy case red, so a test of only the failure paths would have passed |
-| C | `70-update-freshness.sh` shouting on a first boot, or staying quiet on a machine that has gone dark |
+| C | `70-update-freshness.sh` shouting on a first boot, staying quiet on a machine that has gone dark, or staying green on a stale image because the fetch stamp is fresh |
 | D | the baseline and the reading being sampled at different points in the boot |
 | E | a trigger list losing its empty reset and the fleet's update traffic silently doubling |
 | F | a health check that greenboot will never run (wrong extension), or a fifth rollback trigger arriving quietly |

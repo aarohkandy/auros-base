@@ -505,6 +505,18 @@ assert old in s
 open(p, 'w').write(s.replace(old, "grep -q 'ExecStart=' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf"))
 MUT
 
+# SYSTEM-REVIEW §2.4 / H4: the freshness canary measured registry reachability, so a fleet whose
+# publisher had stopped stayed green forever. Reverting the image-age verdict to "ignored" is exactly
+# the pre-fix behaviour, and test C8 (stale image, fresh fetch stamp) has to see it.
+mutate "the freshness check ignores the booted image's age again, so a stopped publisher stays green" \
+       update-agent/tests/run-tests.sh "C8 stale image + fresh fetch stamp exits 1" <<'MUT'
+p = 'update-agent/greenboot/check/wanted.d/70-update-freshness.sh'
+s = open(p).read()
+old = 'exit "${image_rc}"'
+assert s.count(old) == 2, "the image-age verdict is no longer folded into both OK exits"
+open(p, 'w').write(s.replace(old, 'exit 0'))
+MUT
+
 printf '\n%s\n' "$(c 1 'build/40-windows-feel.sh — the Windows-familiarity layer')"
 
 mutate "the double-click check goes back to a group-blind grep" \
