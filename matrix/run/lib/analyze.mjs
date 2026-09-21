@@ -212,10 +212,28 @@ const declaredRemove = lines(args['declared-remove']);
   // Both directories count: greenboot 0.16 packages /usr/lib/greenboot/check/required.d (image-owned,
   // where build/30-update-agent.sh installs ours) alongside /etc (site-owned).
   if (Number(kv.GREENBOOT_REQUIRED_COUNT || 0) < 1) problems.push('no *.sh in /usr/lib/greenboot/check/required.d/ or /etc/greenboot/check/required.d/ — greenboot would declare every boot healthy, and U3 could never fire');
-  // Two enabled update timers is not a pass. It is two updaters racing, and the loser's failure is
-  // the kind of thing that shows up once a month on one machine in a fleet of 180.
-  if (['enabled', 'enabled-runtime'].includes(kv.UNIT_UUPD_TIMER_ENABLED) && ['enabled', 'enabled-runtime'].includes(kv.UNIT_BOOTC_FETCH_APPLY_UPDATES_TIMER_ENABLED)) {
-    problems.push('both uupd.timer and bootc-fetch-apply-updates.timer are enabled. D22 and build/30-update-agent.sh say exactly one drives updates; two do, and they will collide.');
+  // Exactly ONE thing updates the OS: bootc's timer (required above). uupd stays for Flatpaks, and is
+  // a second OS updater iff something can start it AND its system module is on. Two OS updaters is
+  // not a pass: the loser's failure shows up once a month on one machine in a fleet of 180.
+  // Schema: ublue-os/uupd pkg/config/config.go -- modules.system.disable, read by viper (keys are
+  // case-insensitive, bools weakly typed) from /etc/uupd/config.json; absent means false.
+  const on = (v) => ['enabled', 'enabled-runtime'].includes(v);
+  const uupdTriggers = [
+    on(kv.UNIT_UUPD_TIMER_ENABLED) && 'uupd.timer',
+    on(kv.UNIT_UUPD_RESUME_TIMER_ENABLED) && 'uupd-resume.timer',
+    kv.UNIT_UUPD_ON_AC_SERVICE_PRESENT === '1' && 'uupd-on-ac.service',
+  ].filter(Boolean);
+  if (uupdTriggers.length) {
+    const ci = (o, k) => (o && typeof o === 'object' ? Object.entries(o).find(([x]) => x.toLowerCase() === k)?.[1] : undefined);
+    let sysOff = false, why = '/etc/uupd/config.json absent, so uupd runs its defaults';
+    if (kv.UUPD_CONFIG_B64 !== undefined) {
+      try {
+        const d = ci(ci(ci(JSON.parse(b64('UUPD_CONFIG_B64')), 'modules'), 'system'), 'disable');
+        sysOff = /^(1|t|true)$/i.test(String(d));
+        why = `/etc/uupd/config.json has modules.system.disable=${JSON.stringify(d)}`;
+      } catch (e) { why = `/etc/uupd/config.json does not parse (${e.message}), so uupd refuses to start -- and updates no Flatpaks either`; }
+    }
+    if (!sysOff) problems.push(`two OS updaters: bootc-fetch-apply-updates.timer and uupd (started by ${uupdTriggers.join(', ')}; ${why}). Exactly one may update the OS -- build/30-update-agent.sh A4b turns uupd's system module off.`);
   }
 
   // D8: the whole point. Enforcement that verifies nothing is worse than no enforcement.
@@ -248,7 +266,7 @@ const declaredRemove = lines(args['declared-remove']);
   if (kv.REGISTRIES_D_SIGSTORE_TRUE !== '1') problems.push(`no /etc/containers/registries.d/*.yaml sets use-sigstore-attachments: true — without it the machine never looks for the signature at all (D8). Files present: ${kv.REGISTRIES_D_FILES || '(none)'}`);
 
   if (problems.length) rec('S10', 'fail', problems.join('; '));
-  else rec('S10', 'pass', `bootc, update timer, greenboot (healthcheck+rollback), NetworkManager and systemd all present and enabled; policy.json carries a sigstoreSigned rule for ${scope} with its key in the image; registries.d requests sigstore attachments`);
+  else rec('S10', 'pass', `bootc (the only OS updater), update timer, greenboot (healthcheck+rollback), NetworkManager and systemd all present and enabled; policy.json carries a sigstoreSigned rule for ${scope} with its key in the image; registries.d requests sigstore attachments`);
 }
 
 // ── S11 — the removal floor, against what actually left the image ───────────────────────────────

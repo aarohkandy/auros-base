@@ -353,6 +353,62 @@ if [ -f "$ALIB" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "uupd — keeps Flatpaks, gives up the OS (owner decision 2026-09-21, A4b)"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# bootc's timer is the one OS updater. uupd must stay (it is the Flatpak updater, spec §3) with
+# modules.system.disable=true. The stub below stands in for `uupd config-dump` the way viper does it:
+# keys case-insensitive, defaults filled in, and UnmarshalExact's refusal of an unknown key
+# (ublue-os/uupd pkg/config/config.go). The real read-back runs against the real binary in the build.
+UUPD_BLOCK="$(extract_between "$U" '^UUPD_CONF=/etc/uupd/config.json' '^record uupd-system-module' \
+  | rootify /etc/uupd /usr/lib/systemd/system)"
+UUPD_STUBS="$(stubdir)"
+stub "$UUPD_STUBS" uupd <<'STUB'
+#!/usr/bin/env python3
+import json, os, sys
+assert sys.argv[1:] == ["config-dump"], sys.argv
+SCHEMA = {"modules": {"flatpak": {"disable", "binary-path"}, "brew": {"disable", "prefix", "repository", "cellar", "path"},
+                      "system": {"disable", "rpm-ostree-binary", "bootc-binary", "skopeo-binary"}, "distrobox": {"disable", "binary-path"}},
+          "checks": {"hardware": {"enable", "bat-min-percent", "net-max-bytes", "mem-max-percent", "cpu-max-percent"}}}
+lower = lambda o: {k.lower(): lower(v) for k, v in o.items()} if isinstance(o, dict) else o
+c = lower(json.load(open(os.environ["ROOT"] + "/etc/uupd/config.json")))
+for top, v in c.items():
+    for sec, w in v.items():
+        for k in w:
+            if k not in SCHEMA.get(top, {}).get(sec, ()): print("failed to init config: has invalid keys: %s.%s.%s" % (top, sec, k)); sys.exit(1)
+out = {"modules": {m: {"disable": False} for m in SCHEMA["modules"]}}
+for m, w in c.get("modules", {}).items(): out["modules"][m].update(w)
+print(json.dumps(out, indent=4))
+STUB
+# The config the uupd RPM installs and Aurora ships unchanged (uupd's own config.json).
+UUPD_STOCK='{"checks":{"hardware":{"enable":true,"bat-min-percent":20,"cpu-max-percent":50,"mem-max-percent":90,"net-max-bytes":700000}},
+ "modules":{"brew":{"disable":false},"distrobox":{"disable":false},"flatpak":{"disable":false},"system":{"disable":false}}}'
+uupd_case() { # <config.json body, or 'absent'> [no-unit] [repeat-block]
+  local root; root="$(newroot)"; mkdir -p "$root/etc/uupd" "$root/usr/lib/systemd/system"
+  [ "$1" = absent ] || printf '%s\n' "$1" > "$root/etc/uupd/config.json"
+  [ "${2:-}" = no-unit ] || touch "$root/usr/lib/systemd/system/uupd.service"
+  ROOT="$root" AUROS_WRITTEN_LIST=/dev/null PATH="$UUPD_STUBS:$PATH" bash -c "$PRE
+have_cmd() { command -v \"\$1\" >/dev/null 2>&1; }
+auros_stamp() { :; }
+$UUPD_BLOCK
+${3:-}" && cat "$root/etc/uupd/config.json"
+}
+run_check uupd.system-off green "Aurora's stock config: system module switched off" -- uupd_case "$UUPD_STOCK"
+assert_has "system.disable is now true"          '"disable": true' "$(printf '%s' "$T_LAST_OUT" | tr -d '\n' | grep -o '"system": {[^}]*}')"
+assert_has "flatpak is still on"                 '"disable": false' "$(printf '%s' "$T_LAST_OUT" | tr -d '\n' | grep -o '"flatpak": {[^}]*}')"
+assert_has "Aurora's hardware checks are kept"   '"bat-min-percent": 20' "$T_LAST_OUT"
+run_check uupd.system-off green "running the block twice (check S7 builds twice) is idempotent" -- uupd_case "$UUPD_STOCK" '' "$UUPD_BLOCK"
+run_check uupd.system-off red   "/etc/uupd/config.json absent — uupd would run its defaults"   -- uupd_case absent
+assert_has "says why" "a second OS updater" "$T_LAST_OUT"
+run_check uupd.system-off red   "uupd not installed — no Flatpak update path at all"          -- uupd_case "$UUPD_STOCK" no-unit
+assert_has "says why" "only thing that updates Flatpaks" "$T_LAST_OUT"
+run_check uupd.system-off red   "a key uupd does not know — UnmarshalExact, uupd refuses to start" \
+  -- uupd_case '{"modules":{"system":{"disable":false,"enabled":false}}}'
+assert_has "says it updates nothing" "Flatpaks included" "$T_LAST_OUT"
+run_check uupd.system-off red   "the Flatpak module is off — nothing would update the apps"  \
+  -- uupd_case '{"modules":{"flatpak":{"disable":true}}}'
+assert_has "says why" "nothing would update Flatpaks" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "every shipped health check parses, and greenboot will actually run it"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # greenboot globs '*.sh' and sorts by name. A check whose filename does not end in .sh is a check

@@ -201,8 +201,8 @@ fi
 date -uIseconds > "${STATE_DIR}/last-fetch-attempt"
 
 if (( upgrade_rc != 0 )); then
-    # Could not fetch. Offline (U5), or uupd.timer is holding the bootc lock -- Aurora ships
-    # uupd.timer enabled at 04:00 and uupd also runs `bootc upgrade`; bootc serialises with its
+    # Could not fetch. Offline (U5), or uupd is holding the bootc lock -- uupd's system module is
+    # off (build A4b) but it still runs `bootc upgrade --check` first; bootc serialises with its
     # own lock and the loser errors out. Neither is a fault of this machine's, and neither should
     # produce a failed unit. Leave a breadcrumb and exit clean.
     #

@@ -34,6 +34,9 @@ ANALYZE_CALL="$(extract_between "$RS" '^node "\$HARNESS_DIR/lib/analyze.mjs"' 'f
 W="$(newroot)"
 : > "$W/empty.txt"
 printf '{"status":"pass","detail":"no flatpak refs declared"}' > "$W/fp.json"
+# uupd as the pinned Aurora ships it (all three triggers live), with A4b's system module off.
+uupd_b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+UUPD_OFF_B64="$(uupd_b64 '{"modules":{"system":{"disable":true},"flatpak":{"disable":false}}}')"
 POLICY_B64="$(printf '%s' '{"default":[{"type":"reject"}],"transports":{"docker":{"ghcr.io/aarohkandy":[{"type":"sigstoreSigned","keyPath":"/usr/lib/pki/containers/auros.pub"}]}}}' | base64 | tr -d '\n')"
 
 # good_probe [KEY=VALUE overrides...] — the probe output of a correctly built base, as far as S3/S10 go.
@@ -44,7 +47,8 @@ good_probe() {
       UNIT_GREENBOOT_HEALTHCHECK_SERVICE_PRESENT=1 UNIT_GREENBOOT_HEALTHCHECK_SERVICE_ENABLED=enabled \
       UNIT_GREENBOOT_SET_ROLLBACK_TRIGGER_SERVICE_PRESENT=1 UNIT_GREENBOOT_SET_ROLLBACK_TRIGGER_SERVICE_ENABLED=enabled \
       UNIT_NETWORKMANAGER_SERVICE_PRESENT=1 UNIT_NETWORKMANAGER_SERVICE_ENABLED=enabled \
-      UNIT_UUPD_TIMER_ENABLED=disabled GREENBOOT_REQUIRED_COUNT=4 \
+      UNIT_UUPD_TIMER_ENABLED=enabled UNIT_UUPD_RESUME_TIMER_ENABLED=enabled UNIT_UUPD_ON_AC_SERVICE_PRESENT=1 \
+      "UUPD_CONFIG_B64=$UUPD_OFF_B64" GREENBOOT_REQUIRED_COUNT=4 \
       POLICY_JSON=1 "POLICY_JSON_B64=$POLICY_B64" PKI_KEYS=auros.pub, REGISTRIES_D_SIGSTORE_TRUE=1 \
       POLICY_MODE_STAMP=open "$@"
     printf -- '---RPM-NAMES---\nbash\t1\n---END---\n'
@@ -77,6 +81,35 @@ good_probe UNIT_GREENBOOT_SET_ROLLBACK_TRIGGER_SERVICE_ENABLED=disabled
 run_check S10-greenboot red   'rollback trigger present but disabled'       -- analyze_says S10 ''
 good_probe GREENBOOT_REQUIRED_COUNT=0
 run_check S10-greenboot red   'no required checks anywhere'                 -- analyze_says S10 ''
+
+group "S10 — exactly one thing updates the OS: bootc's timer, and uupd only with its system module off"
+good_probe
+run_check S10-one-updater green 'uupd on all three triggers, modules.system.disable=true' -- analyze_says S10 ''
+good_probe "UUPD_CONFIG_B64=$(uupd_b64 '{"Modules":{"System":{"Disable":"true"}}}')"
+run_check S10-one-updater green 'viper reads keys case-insensitively and "true" weakly'   -- analyze_says S10 ''
+good_probe UNIT_UUPD_TIMER_ENABLED=disabled UNIT_UUPD_RESUME_TIMER_ENABLED=disabled UNIT_UUPD_ON_AC_SERVICE_PRESENT=0 UUPD_CONFIG_B64=
+run_check S10-one-updater green 'nothing starts uupd at all'                                -- analyze_says S10 ''
+good_probe "UUPD_CONFIG_B64=$(uupd_b64 '{"modules":{"system":{"disable":false}}}')"
+run_check S10-one-updater red   'Aurora default: system module on — two OS updaters'        -- analyze_says S10 ''
+good_probe "UUPD_CONFIG_B64=$(uupd_b64 '{"modules":{"flatpak":{"disable":true}}}')"
+run_check S10-one-updater red   'system module unset (uupd default is on)'                  -- analyze_says S10 ''
+good_probe UUPD_CONFIG_B64=
+run_check S10-one-updater red   '/etc/uupd/config.json absent — uupd runs defaults'         -- analyze_says S10 ''
+good_probe "UUPD_CONFIG_B64=$(uupd_b64 '{"modules":')"
+run_check S10-one-updater red   'config does not parse'                                     -- analyze_says S10 ''
+good_probe UNIT_UUPD_TIMER_ENABLED=disabled UNIT_UUPD_RESUME_TIMER_ENABLED=disabled UUPD_CONFIG_B64=
+run_check S10-one-updater red   'uupd.timer disabled, but uupd-on-ac.service still starts it' -- analyze_says S10 ''
+
+group "image-probe.sh reads /etc/uupd/config.json byte for byte"
+UUPD_LINE="$(extract_lines "$PROBE" '^\[ -e /etc/uupd/config.json \] && emit UUPD_CONFIG_B64' | rootify /etc/uupd)"
+[ -n "$UUPD_LINE" ] || t_abort "could not find the UUPD_CONFIG_B64 line in image-probe.sh"
+probe_uupd() { # <root> <expected-json> — exit 0 iff the probe emits exactly that file
+  ROOT="$1" bash -c "emit() { [ \"\$(printf '%s' \"\$2\" | base64 -d 2>/dev/null || printf '%s' \"\$2\" | base64 -D)\" = '$2' ]; }
+$UUPD_LINE"
+}
+R3="$(newroot)"; mkdir -p "$R3/etc/uupd"; printf '%s' '{"modules":{"system":{"disable":true}}}' > "$R3/etc/uupd/config.json"
+run_check probe-uupd-config green 'config present: emitted and decodes to the file'      -- probe_uupd "$R3" '{"modules":{"system":{"disable":true}}}'
+run_check probe-uupd-config red   'config absent: nothing emitted'                      -- probe_uupd "$(newroot)" ''
 
 # ── the probe counts the directory the build writes ─────────────────────────────────────────────
 group "image-probe.sh counts required checks where build/30-update-agent.sh installs them"

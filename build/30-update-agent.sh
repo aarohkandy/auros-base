@@ -189,10 +189,18 @@ step "A4. the update timer -- verified by name, not assumed"
 # Had we assumed bootc's timer was running, this image would stage updates and never apply them,
 # check U1 would fail, and the cause would look like a bootc bug rather than a systemd preset.
 #
-# We enable bootc's timer and override its ExecStart. uupd.timer is left alone: it also updates
-# Flatpaks, which is where the customer's applications live (spec §3). The two can collide on
-# bootc's lock; auros-update retries once and then exits clean, so a collision costs one skipped
-# cycle and never a failed unit.
+# We enable bootc's timer and override its ExecStart. OWNER DECISION 2026-09-21: bootc's timer is the
+# ONE thing that updates the OS. uupd stays -- it is what updates Flatpaks, which is where the
+# customer's applications live (spec §3) -- but with its system module switched off (A4b below).
+#
+# Disabling uupd.timer instead would NOT stop uupd touching the OS: projectbluefin/common, which
+# Aurora copies in, also starts uupd.service from uupd-resume.timer (20 min after resume) and from
+# uupd-on-ac.service (a udev rule, on AC plug-in). Turning the module off in uupd's own config
+# covers every trigger at once and keeps Flatpak updates on all of them.
+#
+# uupd still runs a read-only `bootc upgrade --check` before it consults the module flag, so the two
+# can still meet on bootc's lock; auros-update retries once and then exits clean, so a collision
+# costs one skipped cycle and never a failed unit.
 
 TIMER_UNIT=/usr/lib/systemd/system/bootc-fetch-apply-updates.timer
 SVC_UNIT=/usr/lib/systemd/system/bootc-fetch-apply-updates.service
@@ -216,6 +224,42 @@ done
 grep -qx 'ExecStart=' /usr/lib/systemd/system/bootc-fetch-apply-updates.service.d/10-auros.conf \
   || die "the service drop-in does not clear ExecStart= first; systemd would run both bootc's command and ours"
 did "ExecStart replaced, not appended"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+step "A4b. uupd keeps Flatpaks, gives up the OS"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# SCHEMA, from source, not memory: ublue-os/uupd pkg/config/config.go, `type Config struct` --
+# modules.{system,flatpak,brew,distrobox}.disable (bool), read by viper from /etc/uupd/config.json
+# (config.DEFAULT_PATH) with UnmarshalExact, so AN UNKNOWN KEY MAKES uupd REFUSE TO START -- and it
+# then updates nothing, Flatpaks included. cmd/update.go ANDs `!modules.System.Disable` into the
+# system driver's Enabled, which gates both `bootc upgrade` and the --apply reboot. Aurora ships the
+# uupd RPM's own config.json unchanged: every module `"disable": false`.
+#
+# The read-back does not trust our own parser. It asks uupd (`uupd config-dump`, added in the same
+# commit as the JSON config, ublue-os/uupd#129), so what is asserted is what uupd will actually see.
+UUPD_CONF=/etc/uupd/config.json
+{ [ -f /usr/lib/systemd/system/uupd.service ] && have_cmd uupd; } || die \
+  "uupd is not in this image. It is the only thing that updates Flatpaks, where the customer's apps live (spec §3). Do not ship without a Flatpak update path: find what replaced it, or add a flatpak timer, and record it in DECISIONS.md."
+[ -f "$UUPD_CONF" ] || die "$UUPD_CONF is missing. uupd would run on its defaults, which include the system module -- a second OS updater racing bootc's timer."
+python3 - "$UUPD_CONF" <<'PY' || die "could not set modules.system.disable in $UUPD_CONF"
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+c.setdefault("modules", {}).setdefault("system", {})["disable"] = True
+json.dump(c, open(p, "w"), indent=4)
+PY
+auros_stamp "$UUPD_CONF"
+printf '%s\n' "$UUPD_CONF" >> "$AUROS_WRITTEN_LIST"
+UUPD_DUMP="$(uupd config-dump 2>&1)" || die "uupd rejected $UUPD_CONF (UnmarshalExact -- an unknown key?). It would update nothing at all, Flatpaks included: $UUPD_DUMP"
+python3 - "$UUPD_DUMP" <<'PY' || die "uupd does not read the config we wrote -- see the line above"
+import json, sys
+m = json.loads(sys.argv[1]).get("modules", {})
+def fail(msg): print("  ✗ uupd config-dump: %s" % msg, file=sys.stderr); sys.exit(1)
+if m.get("system", {}).get("disable") is not True: fail("modules.system.disable is not true -- uupd would still update the OS")
+if m.get("flatpak", {}).get("disable") is not False: fail("modules.flatpak.disable is not false -- nothing would update Flatpaks")
+PY
+did "uupd: system module off, flatpak module on (read back through uupd config-dump)"
+record uupd-system-module disabled
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 step "A5. health checks"
@@ -518,6 +562,7 @@ step "summary"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 found "update path   bootc-fetch-apply-updates.timer (bootc's own unit, enabled by us; Aurora"
 found "              preset-enables uupd.timer instead and leaves this one inert)"
+found "              uupd kept for Flatpaks only: modules.system.disable=true (A4b)"
 found "              boot+3min, then every 6h, 10min jitter -- U1's 20-minute window vs B6's"
 found "              3.5 GB-per-machine shared uplink"
 found "apply rule    always stage; reboot only with no active user session (apply-policy=when-idle)"

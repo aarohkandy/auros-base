@@ -452,9 +452,15 @@ build ever cares.)*
 
 ---
 
-## Interaction with `uupd`, left in place on purpose
+## Interaction with `uupd`: Flatpaks only
 
-Aurora's `uupd.timer` stays enabled: it updates Flatpaks, which is where the customer's
-applications live (spec §3), and we do not want to own that. Its `bootc upgrade` can collide with
-ours — bootc serialises on its own lock and the loser errors out. `auros-update` retries once
-after 60 s and then exits clean, so a collision costs one skipped cycle and never a failed unit.
+Owner decision 2026-09-21: bootc's timer is the one OS updater. Aurora's `uupd` stays, because it
+updates Flatpaks, which is where the customer's applications live (spec §3), but
+`build/30-update-agent.sh` step A4b sets `modules.system.disable: true` in `/etc/uupd/config.json`
+(schema: `ublue-os/uupd` `pkg/config/config.go`) and reads it back through `uupd config-dump`. That
+covers every trigger for `uupd.service`, including `uupd-resume.timer` and `uupd-on-ac.service`, which
+disabling `uupd.timer` alone would miss. Check S10 fails if uupd can still update the OS.
+
+uupd still runs a read-only `bootc upgrade --check`, which can meet ours on bootc's lock.
+`auros-update` retries once after 60 s and then exits clean, so a collision costs one skipped cycle
+and never a failed unit.
