@@ -111,6 +111,66 @@ run_check accounts green "an open laptop" -- run "$O"
 assert_eq "the admin joins wheel there" "wheel:school-it" "$(cat "$O/etc/group.members")"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "choose your own password at first sign-in: root's marker, and root's clearing of it"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+PW="$M/var/lib/auros/choose-password"
+assert_file "the enrolled account gets a marker"            "$PW/school-it"
+assert_nofile "an account with no first password does not"  "$PW/pupil"
+assert_eq  "the marker is the SHA-256 of the hash that was set" \
+           "$(printf '%s' "$FAKE_HASH" | sha256sum | cut -d' ' -f1)" "$(cat "$PW/school-it")"
+assert_not "…never the hash itself"                         'FAKEHASH' "$(cat "$PW/school-it")"
+assert_eq  "a session can see its own marker (dir 0755)"    "drwxr-xr-x" "$(ls -ld "$PW" | cut -c1-10)"
+assert_eq  "…but not read it (file 0600, the script's umask)" "-rw-------" "$(ls -l "$PW/school-it" | cut -c1-10)"
+assert_has "said, without the hash"                         "school-it will choose their own password" "$OUT"
+
+C2="$REPO/desktop/accounts/auros-password-chosen"
+[ -s "$C2" ] || t_abort "no $C2"
+CHOSEN="$(rootify /var/lib/auros < "$C2")"
+chosen() { # <root> <name> -> 0 iff root removed that account's marker
+  ROOT="$1" PATH="$STUBS:$PATH" bash -c "$CHOSEN" && [ ! -e "$1/var/lib/auros/choose-password/$2" ]
+}
+run_check chosen red "/etc/shadow changed, but not this account's password: the step stays" -- chosen "$M" school-it
+awk -F: -v OFS=: '$1=="school-it" {$2="$6$newsalt$CHOSENBYTHEPERSON"} {print}' "$M/etc/shadow" > "$M/sh" && mv "$M/sh" "$M/etc/shadow"
+run_check chosen green "the person set a new password: the step is done" -- chosen "$M" school-it
+assert_not "said without the hash" 'CHOSENBYTHEPERSON' "$T_LAST_OUT"
+G="$(machine managed "$TWO" "school-it:$FAKE_HASH")"; run "$G" >/dev/null 2>&1
+sed -i.bak '/^school-it:/d' "$G/etc/shadow"
+run_check chosen green "the account is gone: nothing left to ask" -- chosen "$G" school-it
+GATE="$(rootify /var/lib/auros < "$REPO/desktop/welcome/auros-choose-password")"
+GS="$(stubdir)"
+printf '#!/bin/sh\necho "kdialog" >> "$ROOT/gate.calls"\n' | stub "$GS" kdialog
+# the person sets a password on the Users page; root's path unit then clears the marker
+printf '#!/bin/sh\necho "kcmshell6 $* skip=${KDE_SKIP_KDERC:-}" >> "$ROOT/gate.calls"\n[ "${GATE_DOES_IT:-}" = 1 ] && rm -f "$ROOT/var/lib/auros/choose-password/$(id -un)"\nexit 0\n' | stub "$GS" kcmshell6
+asks_again() { # <root> <person chooses 0|1> -> 0 iff the Users page was opened a second time within ~2s
+  ( ROOT="$1" GATE_DOES_IT="$2" PATH="$GS:$PATH" bash -c "$GATE" & p=$!; perl -e 'select(undef,undef,undef,2)'; kill $p 2>/dev/null; wait $p 2>/dev/null ) >/dev/null 2>&1
+  [ "$(grep -c kcmshell6 "$1/gate.calls" 2>/dev/null)" -ge 2 ]
+}
+gate() { # <root> [chooses 0|1] -> 0 iff the step ended by itself within ~3s with root's marker gone
+  ( ROOT="$1" GATE_DOES_IT="${2:-1}" PATH="$GS:$PATH" bash -c "$GATE" & p=$!
+    for _ in 1 2 3 4 5 6; do kill -0 $p 2>/dev/null || { wait $p; exit $?; }; perl -e 'select(undef,undef,undef,0.5)'; done
+    kill $p 2>/dev/null; exit 1 ) && [ ! -e "$1/var/lib/auros/choose-password/$(id -un)" ]
+}
+GR="$(newroot)"; mkdir -p "$GR/var/lib/auros/choose-password"; : > "$GR/var/lib/auros/choose-password/$(id -un)"
+run_check gate green "marker present, the person sets a password: the step ends" -- gate "$GR"
+assert_eq "KDE's Users page, opened even where kde5rc hides it" "kcmshell6 kcm_users skip=1" "$(grep kcmshell6 "$GR/gate.calls")"
+assert_has "after saying what to do" "kdialog" "$(head -1 "$GR/gate.calls")"
+GN="$(newroot)"
+run_check gate green "no marker (done, or never enrolled): nothing is shown" -- gate "$GN"
+assert_nofile "not one dialog" "$GN/gate.calls"
+printf '#!/bin/sh\nexit 0\n' | stub "$GS" sleep   # root's clearing poll, made instant
+GX="$(newroot)"; mkdir -p "$GX/var/lib/auros/choose-password"; : > "$GX/var/lib/auros/choose-password/$(id -un)"
+run_check gate.again green "closing the page without choosing one asks again" -- asks_again "$GX" 0
+GY="$(newroot)"; mkdir -p "$GY/var/lib/auros/choose-password"; : > "$GY/var/lib/auros/choose-password/$(id -un)"
+run_check gate.again red "…and once chosen, it does not" -- asks_again "$GY" 1
+GZ="$(newroot)"; mkdir -p "$GZ/var/lib/auros/choose-password"; : > "$GZ/var/lib/auros/choose-password/$(id -un)"
+run_check gate red "never chosen: the step does not end" -- gate "$GZ" 0
+U="$REPO/desktop/welcome/auros-choose-password.service"
+assert_has "the session step keys on root's marker for THIS user" 'ConditionPathExists=/var/lib/auros/choose-password/%u' "$(cat "$U")"
+assert_has "…and the script on the same path" 'MARK="/var/lib/auros/choose-password/$(id -un)"' "$(cat "$REPO/desktop/welcome/auros-choose-password")"
+assert_has "first run (layout, welcome) waits for it" 'After=auros-choose-password.service' "$(cat "$REPO/desktop/welcome/auros-first-run.service")"
+assert_has "root watches /etc/shadow" 'PathChanged=/etc/shadow' "$(cat "$REPO/desktop/accounts/auros-password-chosen.path")"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 group "A6: a new password at first sign-in, every account — built, and OFF in the shipped unit"
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 E="$(machine managed "$TWO" "school-it:$FAKE_HASH"$'\n'"pupil:$FAKE_HASH")"

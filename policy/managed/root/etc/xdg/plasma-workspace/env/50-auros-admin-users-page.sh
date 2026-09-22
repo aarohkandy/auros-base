@@ -1,4 +1,4 @@
-# Auros policy (managed/locked) — sourced by startplasma for every Plasma session, before the session's
+# Auros policy (managed) — sourced by startplasma for every Plasma session, before the session's
 # environment is handed to D-Bus and systemd (plasma-workspace startplasma.cpp: runEnvironmentScripts,
 # then syncDBusEnvironment).
 #

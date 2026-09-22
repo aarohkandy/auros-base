@@ -73,6 +73,11 @@ var DENY_STORAGE = [
 
 function aurosGuarded(id) {
     var i;
+    /* The one account change left to the seat: choosing your OWN password (accountsservice asks for
+     * this id only when caller uid == target uid). Not guarded here, so 10-auros-own-password.rules
+     * answers it -- yes, for a person in a local session. Every other org.freedesktop.accounts. id,
+     * user-administration included, stays in DENY_PREFIX below. */
+    if (id === "org.freedesktop.accounts.change-own-password") { return false; }
     for (i = 0; i < DENY_EXACT.length; i++) {
         if (id === DENY_EXACT[i]) { return true; }
     }

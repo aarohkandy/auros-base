@@ -24,7 +24,8 @@ log out, shut it down.
   offer a door it is going to slam.
 
 The IT account (the recipe's `admin`) sees one page the students do not: **Users**, where it changes
-anyone's password, including its own, after typing its own password.
+anyone's password, including its own, after typing its own password. The one account change a student
+makes is their own password: the first time they sign in, that page opens for them to choose it.
 
 ## What happens when they try
 

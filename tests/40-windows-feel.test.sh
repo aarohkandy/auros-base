@@ -539,7 +539,7 @@ run_check welcome.user-unit red "ln exits 0 and creates no link" -- euu_run "$R"
 assert_has "says it could not enable it" "could not enable" "$T_LAST_OUT"
 
 # And the two user units the layer actually ships must be the ones that pass.
-for uu in welcome/auros-first-run.service compat/auros-bottles-setup.service; do
+for uu in welcome/auros-first-run.service welcome/auros-choose-password.service compat/auros-bottles-setup.service; do
   assert_file "the repo ships $uu" "$D/$uu"
 done
 
@@ -619,7 +619,7 @@ ACC_BUILD="$(extract_between "$W" '^ENROL_DIR=/etc/auros/enrolment' '^enable_uni
 # <mode>: ok | secret-in-image | no-chpasswd | unit-after-login
 accb_case() {
   local root tools; root="$(newroot)"; tools="$(stubdir)"
-  local t; for t in python3 getent useradd usermod chpasswd chage stat grep mkdir cp dirname; do
+  local t; for t in python3 getent useradd usermod chpasswd chage stat sha256sum grep mkdir cp dirname; do
     [ "$1" = no-chpasswd ] && [ "$t" = chpasswd ] && continue
     printf '#!/bin/sh\nexec %s "$@"\n' "$(command -v "$t" 2>/dev/null || echo true)" | stub "$tools" "$t"
   done
@@ -639,5 +639,29 @@ run_check accounts.build red "an image with no chpasswd" -- accb_case no-chpassw
 assert_has "names the missing tool" "needs chpasswd" "$T_LAST_OUT"
 run_check accounts.build red "a unit that no longer runs before sign-in opens" -- accb_case unit-after-login
 assert_has "names the lost ordering" "lost 'Before=display-manager.service" "$T_LAST_OUT"
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+group "choose your own password — the session step ships only with the GUI it needs"
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+CP_BUILD="$(extract_between "$W" '^# Choose your own password, once per account' '^enable_user_unit auros-choose-password.service')"
+# <tools present, space-separated> <package manager installs kdialog: yes|no>
+cp_case() {
+  local tools t; tools="$(stubdir)"
+  for t in $1; do printf '#!/bin/sh\nexit 0\n' | stub "$tools" "$t"; done
+  printf '#!/bin/sh\n[ "%s" = yes ] && printf "#!/bin/sh\\n" > "%s/kdialog" && chmod +x "%s/kdialog"\n' "$2" "$tools" "$tools" | stub "$tools" pkgmgr
+  bash -c "$PRE
+PATH='$tools:/usr/bin:/bin'
+SRC=/src AUROS_LIBEXEC=/libexec
+auros_pkg_mgr() { echo pkgmgr; }
+install_file() { :; }
+enable_user_unit() { echo \"ENABLED \$1\"; }
+$CP_BUILD"
+}
+run_check welcome.choose-password green "kdialog and kcmshell6 on the base"                -- cp_case "kdialog kcmshell6" no
+run_check welcome.choose-password green "kdialog missing, installed from the repositories" -- cp_case "kcmshell6" yes
+run_check welcome.choose-password red   "kdialog missing and not installable"              -- cp_case "kcmshell6" no
+assert_has "names it" "needs kdialog" "$T_LAST_OUT"
+run_check welcome.choose-password red   "no kcmshell6, so no Users page to choose it on"   -- cp_case "kdialog" no
+assert_has "names it" "needs kcmshell6" "$T_LAST_OUT"
 
 t_finish "40-windows-feel.sh"

@@ -18,7 +18,9 @@ look. It does not feel like a locked machine to somebody who is using it to do t
 - Change the network configuration, or turn networking off.
 - Start, stop, disable or mask any system service, **including the automatic update**.
 - Get root, by any route: `sudo`, `pkexec`, `su`, `machinectl`, `systemd-run`.
-- Change the time, the hostname, the language, or the accounts on the machine.
+- Change the time, the hostname, the language, or the accounts on the machine -- except one thing:
+  each person may change their **own** password, in System Settings, **Users**. They are asked to
+  choose one the first time they sign in, so the password your IT team set is not the one they keep.
 - Reach a terminal from inside a KDE application -- Dolphin's "Open Terminal Here", Kate's terminal
   panel, and the run-command box are all switched off. We check this by actually trying it on every
   build: the test machine asks a KDE application to run a command and fails the build if anything
@@ -27,8 +29,8 @@ look. It does not feel like a locked machine to somebody who is using it to do t
 In `managed` these things ask for a password. In `locked` the answer is no, and there is no password
 that changes it. The IT account can still authenticate for a few specific things, but the ordinary
 user's answer is refusal rather than a prompt. One of those things is passwords: signed in as the IT
-account, System Settings shows a **Users** page that nobody else sees, and it changes any account's
-password after the IT account types its own.
+account, the **Users** page in System Settings changes any account's password after the IT account
+types its own. Everyone else sees the same page, but it lets them change only their own password.
 
 ## How you change a locked machine, then
 

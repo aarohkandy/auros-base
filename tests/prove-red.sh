@@ -1199,7 +1199,7 @@ open(p, 'w').write(s.replace(old, '*aurosadmin*)'))
 MUT
 
 mutate "ACCT: B12 audits a pupil as if they were the IT account" \
-       desktop/tests/b12-modes.test.sh "locked, a pupil: the Users page refuses to open" <<'MUT'
+       desktop/tests/b12-modes.test.sh "managed, a pupil: the Users page refuses to open" <<'MUT'
 p = 'desktop/assert-zero-terminal.sh'
 s = open(p).read()
 old = '[[ " $(id -nG 2>/dev/null) " != *" aurosadmin "* ]]'
@@ -1214,6 +1214,89 @@ s = open(p).read()
 old = 'a_deny "$level" "accounts.user-admin"'
 assert old in s
 open(p, 'w').write(s.replace(old, 'a_deny admin "accounts.user-admin"'))
+MUT
+
+# Owner decisions 2026-09-21: every account chooses its own password at first sign-in, and on locked
+# that is the one account change a pupil may make.
+mutate "OWNPW: locked's polkit guards change-own-password again (the pupil's only door shut)" \
+       tests/20-policy.test.sh "locked: a pupil at the seat may choose their own password" <<'MUT'
+p = 'policy/locked/root/etc/polkit-1/rules.d/00-auros-locked.rules'
+s = open(p).read()
+old = 'if (id === "org.freedesktop.accounts.change-own-password") { return false; }'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "OWNPW: the own-password grant goes to any subject, not only a person at the seat" \
+       tests/20-policy.test.sh "service account with no session may not" <<'MUT'
+p = 'policy/common/root/etc/polkit-1/rules.d/10-auros-own-password.rules'
+s = open(p).read()
+old = ' && subject.local && subject.active'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "OWNPW: B5 accepts the pupil's own password refused outright" \
+       policy/tests/assert-lib.test.sh "locked: own password refused outright => FAIL" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = '1) a_bad "accounts.own-password"'
+assert old in s
+open(p, 'w').write(s.replace(old, '1) a_ok "accounts.own-password"'))
+MUT
+
+mutate "OWNPW: B12 on locked accepts account management behind a password for a pupil" \
+       desktop/tests/b12-modes.test.sh "a pupil offered account management behind a password" <<'MUT'
+p = 'desktop/assert-zero-terminal.sh'
+s = open(p).read()
+old = 'else pk_refused "users/polkit" "$UA"; fi'
+assert old in s
+open(p, 'w').write(s.replace(old, 'else pk_not_granted "users/polkit" "$UA"; fi'))
+MUT
+
+mutate "OWNPW: B12 no longer attempts the own-password grant" \
+       desktop/tests/b12-modes.test.sh "locked, a pupil: polkit lets them choose their own password" <<'MUT'
+p = 'desktop/assert-zero-terminal.sh'
+s = open(p).read()
+old = '    own_password_granted\n'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "OWNPW: root clears the choose-password marker on ANY change to /etc/shadow" \
+       tests/accounts.test.sh "the step stays" <<'MUT'
+p = 'desktop/accounts/auros-password-chosen'
+s = open(p).read()
+old = '!= "$(cat "$f")" ]'
+assert old in s
+open(p, 'w').write(s.replace(old, '!= "never" ]'))
+MUT
+
+mutate "OWNPW: the session step ends when the page is closed, chosen or not" \
+       tests/accounts.test.sh "closing the page without choosing one asks again" <<'MUT'
+p = 'desktop/welcome/auros-choose-password'
+s = open(p).read()
+old = 'while [ -e "$MARK" ]; do'
+assert old in s and '\ndone\nexit 0' in s
+open(p, 'w').write(s.replace(old, 'if [ -e "$MARK" ]; then').replace('\ndone\nexit 0', '\nfi\nexit 0'))
+MUT
+
+mutate "OWNPW: first boot writes no choose-password marker" \
+       tests/accounts.test.sh "the enrolled account gets a marker" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = '> "$PENDING/$n"'
+assert old in s
+open(p, 'w').write(s.replace(old, '> /dev/null'))
+MUT
+
+mutate "OWNPW: first run (taskbar, welcome) no longer waits for the password step" \
+       tests/accounts.test.sh "first run (layout, welcome) waits for it" <<'MUT'
+p = 'desktop/welcome/auros-first-run.service'
+s = open(p).read()
+old = 'After=auros-choose-password.service\n'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
 MUT
 
 printf '\n'

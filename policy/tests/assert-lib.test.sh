@@ -44,6 +44,8 @@ EOS
 # A stub pkcheck whose answer comes from $PK_RC, so the three polkit judgements can be driven.
 cat > "$BIN/pkcheck" <<'EOS'
 #!/usr/bin/env bash
+# $PK_OWN, when set, answers change-own-password alone, so a_suite_accounts' two actions can differ.
+for a in "$@"; do [ "$a" = org.freedesktop.accounts.change-own-password ] && [ -n "${PK_OWN:-}" ] && exit "$PK_OWN"; done
 [ "${PK_RC:-1}" = 0 ] || echo "stub pkcheck: answer ${PK_RC:-1}" >&2
 exit "${PK_RC:-1}"
 EOS
@@ -205,7 +207,7 @@ else
 fi
 
 echo "── a_suite_accounts: A4 shows the Users page to aurosadmin, so polkit must stop the pupil ───"
-export PK_EXTRA=org.freedesktop.accounts.user-administration
+export PK_EXTRA=org.freedesktop.accounts.user-administration PK_OWN=2
 reset; PK_RC=1 a_suite_accounts hard >/dev/null 2>&1
 [ "$A_FAIL" = 0 ] && ok "locked: user-administration refused outright => pass" || no "locked: refused outright => pass" "$(last)"
 reset; PK_RC=2 a_suite_accounts hard >/dev/null 2>&1
@@ -216,7 +218,14 @@ reset; PK_RC=0 a_suite_accounts admin >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "managed: a pupil AUTHORISED to manage accounts => FAIL" || no "managed: pupil authorised => FAIL" "$(last)"
 reset; PK_RC=1 a_suite_accounts control >/dev/null 2>&1
 [ "$A_FAIL" = 1 ] && ok "open: refused outright on the control => FAIL (a locked refusal would not be ours)" || no "open control: refused => FAIL" "$(last)"
-unset PK_EXTRA
+# The own-password line (last() is it): the pupil's one account change, never refused outright.
+reset; PK_RC=1 a_suite_accounts hard >/dev/null 2>&1
+grep -q 'own-password.*not refused outright' <<<"$(last)" && [ "$A_FAIL" = 0 ] && ok "locked: own password left to accountsservice's default for a sessionless probe => pass" || no "locked: own password pkcheck 2 => pass" "$(last)"
+reset; PK_OWN=1 PK_RC=1 a_suite_accounts hard >/dev/null 2>&1
+grep -q 'own-password.*REFUSED OUTRIGHT' <<<"$(last)" && [ "$A_FAIL" = 1 ] && ok "locked: the pupil's own password refused outright => FAIL" || no "locked: own password refused outright => FAIL" "$(last)"
+reset; PK_OWN=0 PK_RC=2 a_suite_accounts admin >/dev/null 2>&1
+grep -q 'own-password.*no session' <<<"$(last)" && [ "$A_FAIL" = 1 ] && ok "own password granted to a subject with no session => FAIL" || no "own password granted sessionless => FAIL" "$(last)"
+unset PK_EXTRA PK_OWN
 
 echo "── a_deny refuses to guess ─────────────────────────────────────────────────────────────────"
 reset; a_deny nonsense x org.example.action >/dev/null 2>&1

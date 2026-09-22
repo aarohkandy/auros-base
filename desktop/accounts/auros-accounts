@@ -14,7 +14,11 @@
 #   4. refuses to finish with zero accounts that can sign in: says so ON SCREEN (the sign-in console's
 #      issue text and the boot splash) and stops the display manager from showing an empty sign-in
 #      screen, instead of leaving it in a log nobody at the machine can read
-#   5. writes /var/lib/auros/accounts.done, which the unit's ConditionPathExists=! keys on
+#   5. leaves /var/lib/auros/choose-password/<name> (root's; the SHA-256 of the hash just set, never
+#      the hash) for each account whose first password came from the file: that person's first sign-in
+#      then stops at "choose your own password" until root sees /etc/shadow change
+#      (auros-password-chosen, auros-choose-password; control repo docs/ACCOUNTS.md §5)
+#   6. writes /var/lib/auros/accounts.done, which the unit's ConditionPathExists=! keys on
 #
 # Owner decision A6 (force a password change at first sign-in, every account) is built and OFF:
 # AUROS_EXPIRE_FIRST_PASSWORD=1 in the unit's environment runs `chage -d 0` on each account created
@@ -42,6 +46,7 @@ BUNDLE=/etc/auros/enrolment/accounts.secret
 DONE=/var/lib/auros/accounts.done
 ISSUE=/etc/issue.d/50-auros-accounts.issue
 FAILED=/run/auros/accounts-failed
+PENDING=/var/lib/auros/choose-password
 
 log() { printf 'auros-accounts: %s\n' "$*"; }
 
@@ -133,19 +138,29 @@ if [ -e "$BUNDLE" ]; then
     *) forget_bundle
        fail "The enrolment file on this laptop could be read by other accounts ($owner_mode), so it was deleted unused. Reinstall from fresh install media." ;;
   esac
-  pairs=""
+  pairs=""; enrolled=()
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
     n="${line%%:*}"; h="${line#*:}"
     if ! declared "$n"; then log "the enrolment file names '$n', which this image does not declare; ignored"; continue; fi
     case "$h" in
-      '$'*) pairs+="$n:$h"$'\n' ;;
+      '$'*) pairs+="$n:$h"$'\n'; enrolled+=("$n") ;;
       *)    log "the enrolment entry for '$n' is not a crypt(3) hash; ignored (it never carries a plain password)" ;;
     esac
   done < "$BUNDLE"
   if [ -n "$pairs" ]; then
     printf '%s' "$pairs" | chpasswd -e || { pairs=""; forget_bundle; fail "The first passwords from the enrolment file could not be set."; }
     log "first passwords set from the enrolment file"
+    # 0755 leaf and o+x on /var/lib/auros (created 0700 under this umask): each person's session
+    # checks its own marker's existence; the markers themselves stay 0600 root.
+    mkdir -p "$PENDING"; chmod 0755 "$PENDING"; chmod go+x "$(dirname "$PENDING")"
+    for n in "${enrolled[@]}"; do
+      h="$(getent shadow "$n" | cut -d: -f2)"
+      printf '%s' "$h" | sha256sum | cut -d' ' -f1 > "$PENDING/$n" \
+        || { h=""; forget_bundle; fail "The account '$n' could not be set to choose its own password at first sign-in."; }
+      log "$n will choose their own password at first sign-in"
+    done
+    h=""
   fi
   pairs=""
   forget_bundle
