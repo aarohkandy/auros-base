@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Auros — installed to /usr/libexec/auros/auros-accounts
+# Run once, on first boot, by auros-accounts.service (a system oneshot, before the display manager).
+# Design and every owner decision behind it: control repo docs/ACCOUNTS.md.
+#
+# WHAT IT DOES, in order:
+#   1. kiosk: nobody signs in. Deletes any enrolment secret unused and finishes.
+#   2. reads the accounts the recipe declared (/usr/lib/auros/accounts.json, written by the recipe
+#      compiler) and creates each one that does not exist yet; an admin joins the policy's admin group
+#      (open: wheel; managed/locked: aurosadmin — the only group their sudoers and polkit rules honour)
+#   3. if the install media left an enrolment secret (/etc/auros/enrolment/accounts.secret, root-only,
+#      lines of name:<crypt(3) hash>), sets those first passwords with `chpasswd -e` on stdin, then
+#      deletes the file whether or not that worked
+#   4. refuses to finish with zero accounts that can sign in: says so ON SCREEN (the sign-in console's
+#      issue text and the boot splash) and stops the display manager from showing an empty sign-in
+#      screen, instead of leaving it in a log nobody at the machine can read
+#   5. leaves /var/lib/auros/choose-password/<name> (root's; the SHA-256 of the hash just set, never
+#      the hash) for each account whose first password came from the file: that person's first sign-in
+#      then stops at "choose your own password" until root sees /etc/shadow change
+#      (auros-password-chosen, auros-choose-password; control repo docs/ACCOUNTS.md §5)
+#   6. writes /var/lib/auros/accounts.done, which the unit's ConditionPathExists=! keys on
+#
+# Owner decision A6 (force a password change at first sign-in, every account) is built and OFF:
+# AUROS_EXPIRE_FIRST_PASSWORD=1 in the unit's environment runs `chage -d 0` on each account created
+# here (man chage: "If the LAST_DAY is set to 0 the user is forced to change his password on the next
+# log on"), after chpasswd, which sets the last-change day to today. It is off because Plasma Login
+# (plasmalogin) cannot finish a sign-in for an expired password: its PamHandle::acctMgmt() calls
+# pam_chauthtok(PAM_CHANGE_EXPIRED_AUTHTOK), but Display::slotRequestChanged() only answers requests of
+# one or two prompts, and the change request has three. Every laptop would be locked out at once.
+# Control repo docs/ACCOUNTS.md §5.
+#
+# Anaconda keeps copies of the kickstart (/root/anaconda-ks.cfg, /root/original-ks.cfg), and the
+# install media's kickstart carries the enrolment hashes, so those copies are deleted with the file.
+#
+# Idempotent: an account that already exists is left alone, and a failed run leaves no marker, so the
+# next boot tries again from the top.
+#
+# NEVER: print a password or a hash, pass one on a command line (`useradd -p` would show it in the
+# process list; man useradd), or leave the secret file behind. There is no `set -x` in this file.
+set -euo pipefail
+umask 077
+
+ACCOUNTS=/usr/lib/auros/accounts.json
+MODE_FILE=/usr/lib/auros/policy-mode
+BUNDLE=/etc/auros/enrolment/accounts.secret
+DONE=/var/lib/auros/accounts.done
+ISSUE=/etc/issue.d/50-auros-accounts.issue
+FAILED=/run/auros/accounts-failed
+PENDING=/var/lib/auros/choose-password
+
+log() { printf 'auros-accounts: %s\n' "$*"; }
+
+forget_bundle() {
+  local k
+  rm -f "$BUNDLE"; rmdir "$(dirname "$BUNDLE")" 2>/dev/null || true
+  for k in /root/anaconda-ks.cfg /root/original-ks.cfg; do
+    if grep -qs 'auros/enrolment' "$k"; then rm -f "$k"; fi
+  done
+}
+
+fail() {
+  log "FAILED: $1"
+  mkdir -p "$(dirname "$FAILED")" "$(dirname "$ISSUE")"
+  printf '%s\n' "$1" > "$FAILED"
+  printf '\n  THIS LAPTOP HAS NO ACCOUNT ANYONE CAN SIGN IN WITH YET.\n\n  %s\n\n  Please tell your IT helpdesk. Nothing on this laptop has been lost.\n\n' "$1" > "$ISSUE"
+  chmod 0644 "$ISSUE" "$FAILED"
+  if command -v plymouth >/dev/null 2>&1; then plymouth display-message --text="$1" 2>/dev/null || true; fi
+  exit 1
+}
+
+finish() {
+  mkdir -p "$(dirname "$DONE")"
+  : > "$DONE"
+  rm -f "$ISSUE" "$FAILED"
+  log "done"
+  exit 0
+}
+
+[ -r "$MODE_FILE" ] || fail "This image has no policy mode ($MODE_FILE), so it cannot tell who may sign in."
+mode="$(cat "$MODE_FILE")"
+
+if [ "$mode" = kiosk ]; then
+  [ ! -e "$BUNDLE" ] || log "kiosk: an enrolment secret was present and has been deleted unused"
+  forget_bundle
+  log "kiosk: nobody signs in on this machine; no accounts created"
+  finish
+fi
+
+case "$mode" in
+  open)           ADMIN_GROUP=wheel ;;
+  managed|locked) ADMIN_GROUP=aurosadmin ;;
+  *)              forget_bundle; fail "This image's policy mode '$mode' is not one this setup knows." ;;
+esac
+
+[ -r "$ACCOUNTS" ] || { forget_bundle; fail "This image was built without a list of accounts ($ACCOUNTS)."; }
+
+# The compiler already refused bad names; the image is checked again because this runs as root and a
+# name reaches useradd. Tab-separated out, one account per line.
+rows="$(python3 - "$ACCOUNTS" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+if d.get("schema") != 1:
+    sys.exit("accounts.json schema %r is not 1" % d.get("schema"))
+for a in d["accounts"]:
+    n, r, dn = a["name"], a["role"], a["display_name"]
+    if (not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", n) or len(n) > 32
+            or r not in ("admin", "user") or not dn or re.search(r"[:,\x00-\x1f\x7f]", dn)):
+        sys.exit("accounts.json has an entry this setup will not create: %r" % n)
+    print("%s\t%s\t%s" % (n, r, dn))
+PY
+)" || { forget_bundle; fail "This image's list of accounts could not be read."; }
+[ -n "$rows" ] || { forget_bundle; fail "This image's list of accounts is empty."; }
+
+names=(); created=()
+while IFS=$'\t' read -r name role display; do
+  names+=("$name")
+  if entry="$(getent passwd "$name")"; then
+    uid="$(printf '%s' "$entry" | cut -d: -f3)"
+    [ "$uid" -ge 1000 ] || { forget_bundle; fail "The account name '$name' already belongs to the system on this laptop."; }
+    log "$name exists (uid $uid); left as it is"
+  else
+    useradd -m -c "$display" "$name" || { forget_bundle; fail "The account '$name' could not be created."; }
+    created+=("$name")
+    log "created $name ($role)"
+  fi
+  if [ "$role" = admin ]; then
+    usermod -a -G "$ADMIN_GROUP" "$name" || { forget_bundle; fail "The account '$name' could not be made an administrator."; }
+    log "$name is in $ADMIN_GROUP"
+  fi
+done <<<"$rows"
+
+declared() { local n; for n in "${names[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+
+if [ -e "$BUNDLE" ]; then
+  owner_mode="$(stat -c '%u:%a' "$BUNDLE")"
+  case "$owner_mode" in
+    0:600|0:400) ;;
+    *) forget_bundle
+       fail "The enrolment file on this laptop could be read by other accounts ($owner_mode), so it was deleted unused. Reinstall from fresh install media." ;;
+  esac
+  pairs=""; enrolled=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    n="${line%%:*}"; h="${line#*:}"
+    if ! declared "$n"; then log "the enrolment file names '$n', which this image does not declare; ignored"; continue; fi
+    case "$h" in
+      '$'*) pairs+="$n:$h"$'\n'; enrolled+=("$n") ;;
+      *)    log "the enrolment entry for '$n' is not a crypt(3) hash; ignored (it never carries a plain password)" ;;
+    esac
+  done < "$BUNDLE"
+  if [ -n "$pairs" ]; then
+    printf '%s' "$pairs" | chpasswd -e || { pairs=""; forget_bundle; fail "The first passwords from the enrolment file could not be set."; }
+    log "first passwords set from the enrolment file"
+    # 0755 leaf and o+x on /var/lib/auros (created 0700 under this umask): each person's session
+    # checks its own marker's existence; the markers themselves stay 0600 root.
+    mkdir -p "$PENDING"; chmod 0755 "$PENDING"; chmod go+x "$(dirname "$PENDING")"
+    for n in "${enrolled[@]}"; do
+      h="$(getent shadow "$n" | cut -d: -f2)"
+      printf '%s' "$h" | sha256sum | cut -d' ' -f1 > "$PENDING/$n" \
+        || { h=""; forget_bundle; fail "The account '$n' could not be set to choose its own password at first sign-in."; }
+      log "$n will choose their own password at first sign-in"
+    done
+    h=""
+  fi
+  pairs=""
+  forget_bundle
+  log "enrolment file deleted"
+fi
+
+if [ "${AUROS_EXPIRE_FIRST_PASSWORD:-0}" = 1 ]; then
+  for n in ${created[@]+"${created[@]}"}; do
+    chage -d 0 "$n" || fail "The account '$n' could not be set to ask for a new password at first sign-in."
+    log "$n will be asked for a new password at first sign-in"
+  done
+fi
+
+capable=0
+for n in "${names[@]}"; do
+  h="$(getent shadow "$n" | cut -d: -f2)"
+  case "$h" in
+    ''|'!'*|'*'*) log "$n has no password yet; an administrator can set one in System Settings" ;;
+    *)            capable=$((capable + 1)) ;;
+  esac
+done
+[ "$capable" -gt 0 ] || fail "None of its accounts (${names[*]}) has a first password: the install media carried no enrolment file for them."
+
+finish

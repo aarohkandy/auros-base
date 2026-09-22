@@ -40,7 +40,11 @@ SH
   cat > "$d/bin/podman" <<SH
 #!/usr/bin/env bash
 echo "\$*" >> "$d/podman.log"
+# the image's declared accounts: \$STUB_ACCOUNTS names a file standing in for /usr/lib/auros/accounts.json
+case " \$* " in *" --entrypoint /usr/bin/cat "*)
+  [ -n "\${STUB_ACCOUNTS:-}" ] && exec cat "\$STUB_ACCOUNTS"; exit 1 ;; esac
 if [ "\$1" = run ]; then
+  for a in "\$@"; do case "\$a" in *:/config.toml:ro) c="\${a%:/config.toml:ro}"; cp "\$c" "$d/config.captured"; ls -l "\$c" > "$d/config.mode";; esac; done
   while [ \$# -gt 0 ]; do case "\$1" in -v) case "\$2" in *:/output) o="\${2%:/output}";; esac; shift 2;; *) shift;; esac; done
   [ "\${STUB_BIB_NOISO:-0}" = 1 ] || { mkdir -p "\$o/bootiso"; echo iso > "\$o/bootiso/install.iso"; }
 fi
@@ -69,6 +73,62 @@ assert_not "the script source has no '|| true'" "|| true" "$(cat "$SCRIPT")"
 
 # green for every id, so the direction audit sees each check accept good input
 for id in gate key cosign bib ctl out; do ctx; run_check "$id" green "happy path passes the $id check" -- mim "$GOOD"; done
+
+group "enrolment (owner decision A1) — first-password hashes into the ISO's kickstart"
+FAKE='$6$fakesalt$FAKEHASHFORTESTSONLY'
+SCHOOL='{"schema":1,"accounts":[{"display_name":"Pupil","name":"pupil","role":"user"},{"display_name":"School IT","name":"school-it","role":"admin"}]}'
+enrol() { # <body> [mode] — an enrolment file in the scratch dir
+  printf '%s\n' "$1" > "$D/enrol"; chmod "${2:-600}" "$D/enrol"
+}
+ctx; printf '%s' "$SCHOOL" > "$D/accounts.json"; enrol "# made by make-enrolment.sh"$'\n'"school-it:$FAKE"$'\n'"pupil:$FAKE"
+export STUB_ACCOUNTS="$D/accounts.json"
+run_check enrol green "declared accounts + a 0600 hash file → ISO" -- mim "$GOOD" --enrolment "$D/enrol"
+out="$T_LAST_OUT"
+assert_has "bib got the kickstart config" "config.toml:/config.toml:ro" "$(cat "$D/podman.log")"
+K="$(cat "$D/config.captured" 2>/dev/null)"
+assert_has "…as [customizations.installer.kickstart]" "[customizations.installer.kickstart]" "$K"
+assert_has "…with the unattended install bib no longer adds itself" "clearpart --all --initlabel" "$K"
+assert_has "…and a %post writing the file where auros-accounts reads it" "> /etc/auros/enrolment/accounts.secret" "$K"
+assert_has "…root-only" "chmod 0600 /etc/auros/enrolment/accounts.secret" "$K"
+assert_not "…with no ostreecontainer line (bib adds it; its README)" "ostreecontainer" "$K"
+b64="$(sed -n "s/^echo '\(.*\)' | base64 -d.*/\1/p" <<<"$K")"
+assert_eq "the %post payload decodes to exactly the hash lines, comment dropped" \
+  "school-it:$FAKE"$'\n'"pupil:$FAKE" "$(printf '%s' "$b64" | base64 -d 2>/dev/null)"
+assert_has "the config file bib read was 0600" "-rw-------" "$(cat "$D/config.mode" 2>/dev/null)"
+assert_not "no hash is printed" "FAKEHASH" "$out"
+assert_has "the ISO is called a secret" "FIRST-PASSWORD HASHES" "$out"
+
+ctx; printf '%s' "$SCHOOL" > "$D/accounts.json"; export STUB_ACCOUNTS="$D/accounts.json"
+run_check enrol red "the image declares accounts and no --enrolment is given" -- mim "$GOOD"
+assert_has "…says nobody could sign in" "nobody able to sign in" "$T_LAST_OUT"
+assert_not "…before bib ran" "--type anaconda-iso" "$(cat "$D/podman.log")"
+
+ctx; enrol "school-it:not-a-real-password"
+run_check enrol red "a plain-text password in the file" -- mim "$GOOD" --enrolment "$D/enrol"
+assert_has "…refused as not a hash" "not a crypt(3) hash" "$T_LAST_OUT"
+assert_not "…never echoed" "not-a-real-password" "$T_LAST_OUT"
+assert_nofile "…before the gate ran" "$D/node.log"
+
+ctx; enrol "school-it:$FAKE" 644
+run_check enrol red "an enrolment file other accounts can read" -- mim "$GOOD" --enrolment "$D/enrol"
+assert_has "…says its mode" "mode 644" "$T_LAST_OUT"
+
+ctx; enrol "school-it:$FAKE"$'\n'"school-it:$FAKE"
+run_check enrol red "an account named twice" -- mim "$GOOD" --enrolment "$D/enrol"
+
+ctx; printf '%s' "$SCHOOL" > "$D/accounts.json"; export STUB_ACCOUNTS="$D/accounts.json"; enrol "school-it:$FAKE"$'\n'"head-teacher:$FAKE"
+run_check enrol red "a name this image does not declare (the wrong school's file?)" -- mim "$GOOD" --enrolment "$D/enrol"
+assert_has "…names it" "head-teacher" "$T_LAST_OUT"
+
+ctx; printf '%s' "$SCHOOL" > "$D/accounts.json"; export STUB_ACCOUNTS="$D/accounts.json"; enrol "pupil:$FAKE"
+run_check enrol red "no admin gets a first password" -- mim "$GOOD" --enrolment "$D/enrol"
+
+unset STUB_ACCOUNTS
+ctx; enrol "school-it:$FAKE"
+run_check enrol red "an image that declares no accounts (kiosk), given --enrolment" -- mim "$GOOD" --enrolment "$D/enrol"
+ctx
+run_check enrol green "an image that declares no accounts, no --enrolment" -- mim "$GOOD"
+assert_not "…and bib gets no kickstart" "/config.toml" "$(cat "$D/podman.log")"
 
 group "refusals"
 ctx

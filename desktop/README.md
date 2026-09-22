@@ -130,6 +130,11 @@ against `open`'s list is not a strict test — it is an **unshippable recipe**:
   `build/40-windows-feel.sh` rewriting `/etc/xdg/kdeglobals` after `20-policy.sh` merged the KDE
   Kiosk groups into it, which is a real ordering hazard that `20-policy.sh` warns about at build time
   and nothing else observes at run time.
+* **Users page** (`AUROS_MODE_B12_USERS`, not one of the four): `seat` (open), `aurosadmin` (managed:
+  only the IT account's session opens it, polkit never grants a pupil account management), and
+  `own-password` (locked: it opens for everyone, polkit grants `change-own-password` (pkcheck 0 in the
+  session) and refuses `user-administration` outright (1) to a pupil, and asks the IT account for its
+  password). `pkcheck` 2 is the challenge answer (polkit's pkcheck.c); 3 is accepted too.
 * **`n/a`** — kiosk has no session. The kiosk criterion is asserted instead: `auros-kiosk.service` is
   active, an application is configured, and no desktop shell, display manager or terminal emulator
   survived the removal pass.

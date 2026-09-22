@@ -11,6 +11,8 @@ Documentation=file:///usr/share/doc/auros/desktop-README.md
 # MUST match STAMP_VERSION in /usr/libexec/auros/auros-first-run.
 ConditionPathExists=!%S/auros/first-run.v1.stamp
 After=graphical-session.target
+# The choose-your-password step comes first, and this waits until the person has done it.
+After=auros-choose-password.service
 PartOf=graphical-session.target
 
 [Service]

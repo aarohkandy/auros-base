@@ -83,6 +83,12 @@ EOS
 #!/usr/bin/env bash
 echo false
 EOS
+    # `id -nG` answers from a groups: fact, so a scenario picks pupil or aurosadmin member.
+    cat > "$bin/id" <<'EOS'
+#!/usr/bin/env bash
+if [ "${1:-}" = -nG ]; then g="$(grep '^groups:' "$FACTS" | cut -d: -f2)"; echo "${g:-pupil}"; exit 0; fi
+exec /usr/bin/id "$@"
+EOS
     for extra in konsole gnome-terminal xterm dolphin plasmashell gnome-shell sddm gdm; do
         cat > "$bin/$extra" <<EOS
 #!/usr/bin/env bash
@@ -124,6 +130,16 @@ AUROS_MODE_B12_INSTALL_APP=none
 AUROS_MODE_B12_WIFI=none
 AUROS_MODE_B12_PRINTER=seat
 AUROS_MODE_B12_LANGUAGE=none
+AUROS_MODE_B12_USERS=own-password
+AUROS_MODE_B12_DESKTOP=yes'
+
+MANAGED_USERS='AUROS_MODE=managed
+AUROS_MODE_B1=login-prompt
+AUROS_MODE_B12_INSTALL_APP=admin
+AUROS_MODE_B12_WIFI=admin
+AUROS_MODE_B12_PRINTER=seat
+AUROS_MODE_B12_LANGUAGE=admin
+AUROS_MODE_B12_USERS=aurosadmin
 AUROS_MODE_B12_DESKTOP=yes'
 
 OPEN='AUROS_MODE=open
@@ -132,6 +148,7 @@ AUROS_MODE_B12_INSTALL_APP=seat
 AUROS_MODE_B12_WIFI=seat
 AUROS_MODE_B12_PRINTER=seat
 AUROS_MODE_B12_LANGUAGE=seat
+AUROS_MODE_B12_USERS=seat
 AUROS_MODE_B12_DESKTOP=yes'
 
 KIOSK='AUROS_MODE=kiosk
@@ -140,6 +157,7 @@ AUROS_MODE_B12_INSTALL_APP=n/a
 AUROS_MODE_B12_WIFI=n/a
 AUROS_MODE_B12_PRINTER=n/a
 AUROS_MODE_B12_LANGUAGE=n/a
+AUROS_MODE_B12_USERS=n/a
 AUROS_MODE_B12_DESKTOP=no'
 
 echo "── locked: the green case ──────────────────────────────────────────────────────────────────"
@@ -156,6 +174,9 @@ pk:org.freedesktop.Flatpak.app-install=1
 pk:org.freedesktop.packagekit.package-install=1
 pk:org.freedesktop.NetworkManager.settings.modify.system=1
 pk:org.freedesktop.locale1.set-locale=1
+kcm:kcm_users
+pk:org.freedesktop.accounts.user-administration=1
+pk:org.freedesktop.accounts.change-own-password=0
 EOF
 run_sut "$LOCKED"
 expect_line PASS 'install-app/polkit-flatpak'  "locked: installing software is refused outright"
@@ -163,6 +184,59 @@ expect_line PASS 'wifi/polkit'                 "locked: changing the network is 
 expect_line PASS 'wifi/settings-page'          "locked: the network settings page refuses to open"
 expect_line PASS 'language/settings-page'      "locked: the language settings page refuses to open"
 expect_line PASS 'wifi/daemon'                 "locked: NetworkManager is still running (the floor)"
+expect_line PASS 'users/settings-page'         "locked, a pupil: the Users page opens (to choose their own password)"
+expect_line PASS 'users/own-password'          "locked, a pupil: polkit lets them choose their own password"
+expect_line PASS 'users/polkit'                "locked, a pupil: managing accounts is refused outright"
+
+echo "── locked, owner decision: a pupil changes their own password and NOTHING else ────────────"
+cp "$WORK/facts" "$WORK/facts.pupil"
+sed -i.bak 's|change-own-password=0|change-own-password=2|' "$WORK/facts"
+run_sut "$LOCKED"
+expect_line FAIL 'users/own-password.*cannot choose' "a pupil who needs IT to choose their own password => RED"
+cp "$WORK/facts.pupil" "$WORK/facts"
+sed -i.bak 's|user-administration=1|user-administration=2|' "$WORK/facts"
+run_sut "$LOCKED"
+expect_line FAIL 'users/polkit.*administrator password' "a pupil offered account management behind a password => RED (that is managed)"
+cp "$WORK/facts.pupil" "$WORK/facts"
+sed -i.bak 's|user-administration=1|user-administration=0|' "$WORK/facts"
+run_sut "$LOCKED"
+expect_line FAIL 'users/polkit.*AUTHORISED' "a pupil polkit lets manage accounts => RED"
+cp "$WORK/facts.pupil" "$WORK/facts"
+echo 'kcm-denied:kcm_users' >> "$WORK/facts"
+run_sut "$LOCKED"
+expect_line FAIL 'users/settings-page' "the Users page still hidden from the pupil => RED (no GUI to choose a password)"
+# the aurosadmin member on locked: the page opens and polkit asks for their password
+cp "$WORK/facts.pupil" "$WORK/facts"
+sed -i.bak 's|user-administration=1|user-administration=2|' "$WORK/facts"
+echo 'groups:school-it aurosadmin' >> "$WORK/facts"
+run_sut "$LOCKED"
+expect_line PASS 'users/polkit'                "locked, an aurosadmin member: managing accounts asks for the admin password"
+expect_line PASS 'users/own-password'          "locked, an aurosadmin member: chooses their own password too"
+cp "$WORK/facts.pupil" "$WORK/facts"
+
+echo "── managed, A4: the Users page is the IT account's, and only the IT account's ───────────────"
+echo 'kcm-denied:kcm_users' >> "$WORK/facts"
+cp "$WORK/facts" "$WORK/facts.mpupil"
+run_sut "$MANAGED_USERS"
+expect_line PASS 'users/settings-page'         "managed, a pupil: the Users page refuses to open (A4)"
+expect_line PASS 'users/polkit'                "managed, a pupil: managing accounts is not granted"
+sed -i.bak '/kcm-denied:kcm_users/d' "$WORK/facts"
+run_sut "$MANAGED_USERS"
+expect_line FAIL 'users/settings-page.*OPENED AND STAYED UP' "a pupil for whom the Users page opens => RED"
+cp "$WORK/facts.mpupil" "$WORK/facts"
+sed -i.bak 's|pk:org.freedesktop.accounts.user-administration=1|pk:org.freedesktop.accounts.user-administration=0|' "$WORK/facts"
+run_sut "$MANAGED_USERS"
+expect_line FAIL 'users/polkit.*AUTHORISED' "a pupil polkit lets manage accounts => RED"
+cp "$WORK/facts.mpupil" "$WORK/facts"
+sed -i.bak -e '/kcm-denied:kcm_users/d' -e 's|user-administration=1|user-administration=3|' "$WORK/facts"
+echo 'groups:school-it aurosadmin' >> "$WORK/facts"
+run_sut "$MANAGED_USERS"
+expect_line PASS 'users/settings-page'         "an aurosadmin member: the Users page opens"
+expect_line PASS 'users/polkit'                "an aurosadmin member: polkit asks for the admin password"
+echo 'kcm-denied:kcm_users' >> "$WORK/facts"
+run_sut "$MANAGED_USERS"
+expect_line FAIL 'users/settings-page'         "an aurosadmin member with the page still hidden => RED"
+cp "$WORK/facts.pupil" "$WORK/facts"
 
 echo "── locked: RED when the KDE restriction is not in force ────────────────────────────────────"
 # This is build/40-windows-feel.sh rewriting /etc/xdg/kdeglobals after apply-policy merged the
@@ -189,11 +263,14 @@ app:plasma-discover
 pk:org.freedesktop.Flatpak.app-install=0
 pk:org.freedesktop.NetworkManager.settings.modify.system=0
 pk:org.freedesktop.locale1.set-locale=0
+kcm:kcm_users
+pk:org.freedesktop.accounts.user-administration=3
 EOF
 run_sut "$OPEN"
 expect_line PASS 'wifi/launch'       "open: the network page opens"
 expect_line PASS 'language/launch'   "open: the language page opens"
 expect_line PASS 'install-app/launch' "open: the software shop opens"
+expect_line PASS 'users/settings-page' "open: the Users page opens"
 
 sed -i.bak '/kcm:kcm_networkmanagement/d' "$WORK/facts"
 run_sut "$OPEN"

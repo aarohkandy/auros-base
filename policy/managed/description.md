@@ -23,6 +23,10 @@ log out, shut it down.
 - Open the System Settings pages that control those things -- they are hidden, so the machine does not
   offer a door it is going to slam.
 
+The IT account (the recipe's `admin`) sees one page the students do not: **Users**, where it changes
+anyone's password, including its own, after typing its own password. The one account change a student
+makes is their own password: the first time they sign in, that page opens for them to choose it.
+
 ## What happens when they try
 
 A password box appears and asks for an **administrator's** password. The student does not have it.

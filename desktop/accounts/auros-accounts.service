@@ -1,0 +1,27 @@
+[Unit]
+# Auros — installed to /usr/lib/systemd/system/auros-accounts.service, enabled for multi-user.target.
+# Creates the accounts the recipe declared, once, before anyone can sign in. Control repo docs/ACCOUNTS.md.
+#
+# ConditionPathExists=!  — man systemd.unit: the unit only starts if the path does not exist. The script
+#   writes the marker only on success, so a failed first boot is retried on the next one.
+# Not ConditionFirstBoot= — man systemd.unit ties that to /etc being unpopulated at boot, and the
+#   installer has already populated /etc by the time this machine first boots.
+# Before=systemd-user-sessions.service — nobody can sign in until this has finished, one way or the other.
+Description=Auros first boot: create this fleet's accounts
+ConditionPathExists=!/var/lib/auros/accounts.done
+After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service
+Before=display-manager.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+# man systemd.service: the unit stays active after the script exits, so the ordering above holds.
+RemainAfterExit=yes
+ExecStart=/usr/libexec/auros/auros-accounts
+UMask=0077
+# Owner decision A6, built and OFF: plasmalogin cannot complete a sign-in with an expired password
+# (see the script's header; control repo docs/ACCOUNTS.md §5). Uncomment only after a VM shows a
+# first sign-in through the graphical login screen asking for, and accepting, a new password.
+#Environment=AUROS_EXPIRE_FIRST_PASSWORD=1
+
+[Install]
+WantedBy=multi-user.target

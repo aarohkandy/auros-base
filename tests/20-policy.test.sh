@@ -425,4 +425,76 @@ set -e
 LIBEXEC='$R/libexec'
 $MODE_BLOCK"
 
+group "A4 — the Users page: hidden by default in /etc/kde5rc, shown to an aurosadmin session"
+# The hide must be a per-KEY immutable in kde5rc: KConfig reads kde5rc first, so a group-level [$i]
+# there would lock [KDE Control Module Restrictions] before /etc/xdg/kdeglobals adds its pages.
+a4_hide() { # <kde5rc> <kdeglobals ini>
+  grep -qxF '[KDE Control Module Restrictions]' "$1" && grep -qxF 'kcm_users[$i]=false' "$1" \
+    && ! grep -q '^kcm_users' "$2"
+}
+A4BIN="$(stubdir)"
+printf '#!/bin/sh\n[ "$1" = -nG ] && echo "$A4_GROUPS"\n' > "$A4BIN/id"; chmod +x "$A4BIN/id"
+a4_env() { # <groups> <script> — sourced as startplasma would; 0 iff the session skips kde5rc
+  A4_GROUPS="$1" PATH="$A4BIN:$PATH" sh -c ". '$2'; [ \"\${KDE_SKIP_KDERC:-}\" = 1 ]"
+}
+for m in managed; do
+  run_check policy.a4-hide green "$m: kcm_users hidden in kde5rc (per key), not in the kdeglobals group" \
+    -- a4_hide "$POL/$m/root/etc/kde5rc" "$POL/$m/kdeglobals/20-control-module-restrictions.ini"
+  ENV="$POL/$m/root/etc/xdg/plasma-workspace/env/50-auros-admin-users-page.sh"
+  run_check policy.a4-env green "$m: an aurosadmin member's session skips kde5rc" -- a4_env "school-it aurosadmin" "$ENV"
+  run_check policy.a4-env red   "$m: a pupil's session does not"                 -- a4_env "pupil" "$ENV"
+  run_check policy.a4-env red   "$m: nor a member of a group merely NAMED like it" -- a4_env "pupil aurosadmins" "$ENV"
+done
+B="$(newroot)"; sed 's/^\[KDE Control Module Restrictions\]$/[KDE Control Module Restrictions][$i]/' "$POL/managed/root/etc/kde5rc" > "$B/kde5rc"
+run_check policy.a4-hide red "a group-level [\$i] in kde5rc (would lock out kdeglobals' pages)" \
+  -- a4_hide "$B/kde5rc" "$POL/managed/kdeglobals/20-control-module-restrictions.ini"
+printf '[KDE Control Module Restrictions][$i]\nkcm_users=false\n' > "$B/ini"
+run_check policy.a4-hide red "kcm_users still in the immutable kdeglobals group (no session could show it)" \
+  -- a4_hide "$POL/managed/root/etc/kde5rc" "$B/ini"
+
+# Owner decision (2): on locked a pupil may choose their own password in the GUI, so the Users page
+# is no longer hidden there. What still stops them managing accounts is polkit (below and B5/B12).
+run_check policy.a4-locked-shown red "locked: no kde5rc hides the Users page from a pupil" \
+  -- test -e "$POL/locked/root/etc/kde5rc"
+run_check policy.a4-locked-shown green "managed still hides it (the control for the line above)" \
+  -- test -e "$POL/managed/root/etc/kde5rc"
+
+group "own password: the ONE account change a pupil makes — the real rule files, evaluated"
+# polkit's JS API, as far as these files use it (polkit(8) "AUTHORIZATION RULES"): rule files run in
+# lexical order and the first rule returning a value decides. `default` = no rule answered, so
+# accountsservice's own default applies (auth_admin for change-own-password and user-administration).
+PKJS="$(newroot)/pk.js"
+cat > "$PKJS" <<'JS'
+const fs = require("fs"), vm = require("vm");
+const [files, id, user, groups, local, active] = [process.argv[2].split(":"), ...process.argv.slice(3)];
+const rules = [];
+const R = { YES: "yes", NO: "no", AUTH_ADMIN: "auth_admin", AUTH_SELF: "auth_self", NOT_HANDLED: null };
+const polkit = { Result: R, addRule: f => rules.push(f), addAdminRule() {}, log() {} };
+for (const f of files.filter(f => fs.existsSync(f)).sort((a, b) => a.split("/").pop() < b.split("/").pop() ? -1 : 1))
+  vm.runInNewContext(fs.readFileSync(f, "utf8"), { polkit });
+const subject = { user, local: local === "1", active: active === "1", isInGroup: g => groups.split(",").includes(g) };
+for (const r of rules) { const v = r({ id }, subject); if (v) { console.log(v); process.exit(0); } }
+console.log("default");
+JS
+OWN=org.freedesktop.accounts.change-own-password
+UADM=org.freedesktop.accounts.user-administration
+pk_says() { # <mode> <action> <user> <groups> <local 0|1> <active 0|1> <expected answer>
+  local got; got="$(node "$PKJS" "$POL/$1/root/etc/polkit-1/rules.d/00-auros-$1.rules:$POL/common/root/etc/polkit-1/rules.d/10-auros-own-password.rules" "$2" "$3" "$4" "$5" "$6")" || return 2
+  echo "$1 $2 $3 -> $got"; [ "$got" = "$7" ]
+}
+if command -v node >/dev/null 2>&1; then
+  for m in locked managed open; do
+    run_check policy.own-password green "$m: a pupil at the seat may choose their own password" -- pk_says $m $OWN pupil pupil 1 1 yes
+    run_check policy.own-password red   "$m: …a service account with no session may not (upstream default applies)" -- pk_says $m $OWN aurosprobe aurosprobe 0 0 yes
+  done
+  run_check policy.own-password red   "kiosk: nobody signs in, so nobody chooses a password"              -- pk_says kiosk $OWN auroskiosk auroskiosk 1 1 yes
+  run_check policy.own-password green "locked: a pupil managing accounts is refused outright"            -- pk_says locked $UADM pupil pupil 1 1 no
+  run_check policy.own-password green "locked: …and so is changing their own name or picture (ONLY the password)" \
+    -- pk_says locked org.freedesktop.accounts.change-own-user-data pupil pupil 1 1 no
+  run_check policy.own-password green "locked: the IT account may manage accounts, with its password" -- pk_says locked $UADM school-it school-it,aurosadmin 1 1 auth_admin
+  run_check policy.own-password red   "locked: the pupil is NOT granted account management"              -- pk_says locked $UADM pupil pupil 1 1 yes
+else
+  t_exempt policy.own-password "node is not installed here; the rule files cannot be evaluated"
+fi
+
 t_finish "20-policy.sh"

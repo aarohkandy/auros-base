@@ -333,6 +333,20 @@ install_file "$SRC/welcome/auros-first-run.service"   /usr/lib/systemd/user/auro
 install_file "$SRC/welcome/org.auros.Welcome.desktop" /usr/share/applications/org.auros.Welcome.desktop 0644
 enable_user_unit auros-first-run.service graphical-session.target
 
+# Choose your own password, once per account, before first run (control repo docs/ACCOUNTS.md §5).
+# kdialog explains, KDE's Users page (kcmshell6 kcm_users) does it. Without either, a first sign-in
+# could never finish the step, so their absence fails the build rather than every laptop.
+if ! command -v kdialog >/dev/null 2>&1; then
+  "$(auros_pkg_mgr)" install -y --setopt=install_weak_deps=False kdialog >/dev/null 2>&1 \
+    && record installed-package kdialog && did "installed kdialog"
+fi
+for tool in kdialog kcmshell6; do
+  command -v "$tool" >/dev/null 2>&1 || die "the choose-your-password step needs $tool and this image has none — no first sign-in could finish it"
+done
+install_file "$SRC/welcome/auros-choose-password"         "${AUROS_LIBEXEC}/auros-choose-password"         0755
+install_file "$SRC/welcome/auros-choose-password.service" /usr/lib/systemd/user/auros-choose-password.service 0644
+enable_user_unit auros-choose-password.service graphical-session.target
+
 # The stamp version in the unit's ConditionPathExists and the one in the script must agree, or the
 # unit stops short-circuiting and the welcome wizard reopens on every single login. Cheap to check,
 # and the failure is invisible to us and infuriating to a customer every morning.
@@ -364,18 +378,49 @@ else
   found "plasma-setup is not in this image — nothing to suppress (the marker is harmless)"
 fi
 
+# ── the accounts a recipe declares (owner decision 2026-09-21; control repo docs/ACCOUNTS.md) ──────
+# A recipe lists its accounts (auros-recipes: `accounts:`, compiled to /usr/lib/auros/accounts.json).
+# This oneshot creates them on first boot, before the display manager, and sets their first passwords
+# from the enrolment file the install media leaves behind. The base ships the mechanism, never a
+# secret: an enrolment directory in the IMAGE would be the same file on every machine and in every
+# registry copy, so its presence fails the build.
+ENROL_DIR=/etc/auros/enrolment
+[ ! -e "$ENROL_DIR" ] || die "$ENROL_DIR exists in the image. First passwords come from the install media, one school at a time; a secret baked into the image is published with it"
+for tool in python3 getent useradd usermod chpasswd chage stat sha256sum; do
+  command -v "$tool" >/dev/null 2>&1 || die "auros-accounts needs $tool at first boot and this image has none — every machine would start with nobody able to sign in"
+done
+install_file "$SRC/accounts/auros-accounts"          "${AUROS_LIBEXEC}/auros-accounts"                          0755
+install_file "$SRC/accounts/auros-accounts.service"  /usr/lib/systemd/system/auros-accounts.service             0644
+install_file "$SRC/accounts/50-auros-accounts.conf"  /usr/lib/systemd/system/display-manager.service.d/50-auros-accounts.conf 0644
+install_file "$SRC/accounts/auros-password-chosen"         "${AUROS_LIBEXEC}/auros-password-chosen"                 0755
+install_file "$SRC/accounts/auros-password-chosen.path"    /usr/lib/systemd/system/auros-password-chosen.path       0644
+install_file "$SRC/accounts/auros-password-chosen.service" /usr/lib/systemd/system/auros-password-chosen.service    0644
+ACC_UNIT=/usr/lib/systemd/system/auros-accounts.service
+for line in 'ConditionPathExists=!/var/lib/auros/accounts.done' 'Before=display-manager.service systemd-user-sessions.service' \
+            'ExecStart=/usr/libexec/auros/auros-accounts'; do
+  grep -qxF "$line" "$ACC_UNIT" || die "auros-accounts.service lost '$line' — accounts would be created after sign-in opens, or every boot, or never"
+done
+grep -qxF 'DONE=/var/lib/auros/accounts.done' "${AUROS_LIBEXEC}/auros-accounts" \
+  || die "auros-accounts and its unit disagree on the done-marker — it would run on every boot, or never"
+enable_unit auros-accounts.service
+enable_unit auros-password-chosen.path
+
 # With no wizard, SOMETHING must put a person at seat0 on first boot, or the machine boots to a login
-# screen with nobody on it. Today the only path is kiosk (apply-policy masks the display manager and
-# auros-kiosk.service runs as auroskiosk). No recipe field and no provisioning step creates an account
-# (auros-recipes schema has none; tools/make-install-media.sh passes bootc-image-builder no
-# [[customizations.user]]) — a KNOWN BLOCKING GAP, recorded in the facts file and warned, not died on:
-# the base is always built `open` and a recipe applies its mode later, so dying here would block every
-# build without closing the gap. Whoever closes it teaches this detector the new path.
+# screen with nobody on it. Two paths: kiosk (apply-policy masks the display manager and
+# auros-kiosk.service runs as auroskiosk), and `recipe` — auros-accounts above, enabled. Neither found
+# is the old GAP, recorded in the facts file and warned, not died on: the base is always built `open`
+# and a recipe applies its mode later, so dying here would block every build without closing the gap.
 FIRST_BOOT_ACCOUNT=none
 [ "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)" != /dev/null ] || FIRST_BOOT_ACCOUNT=kiosk
 humans="$(cat /etc/passwd /usr/lib/passwd 2>/dev/null \
   | awk -F: '$3>=1000 && $3<60000 && $7 !~ /(nologin|false)$/ {print $1}' | sort -u | paste -sd, - || true)"
 [ -z "$humans" ] || FIRST_BOOT_ACCOUNT="users:$humans"
+# The recipe path: accounts are created at first boot by the unit enabled above. Checked by its link,
+# not assumed, so a build that stopped enabling it goes back to reporting the gap.
+for l in /etc/systemd/system/multi-user.target.wants/auros-accounts.service \
+         /usr/lib/systemd/system/multi-user.target.wants/auros-accounts.service; do
+  [ "$FIRST_BOOT_ACCOUNT" != none ] || [ ! -e "$l" ] || FIRST_BOOT_ACCOUNT=recipe
+done
 if [ "$FIRST_BOOT_ACCOUNT" = none ]; then
   warn "FIRST-BOOT ACCOUNT GAP: no account exists and nothing creates one — outside kiosk mode this image boots to a login screen with no users"
 else

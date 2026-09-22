@@ -1189,6 +1189,196 @@ assert old in s
 open(p, 'w').write(s.replace(old, "let sysOff = true, why"))
 MUT
 
+
+mutate "auros-accounts keeps the enrolment secret on disk after using it" \
+       tests/accounts.test.sh "the enrolment file is deleted" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = '  rm -f "$BUNDLE"; rmdir'
+assert old in s
+open(p, 'w').write(s.replace(old, '  : "$BUNDLE"; rmdir'))
+MUT
+
+mutate "auros-accounts finishes with nobody able to sign in, so the laptop shows an empty sign-in screen" \
+       tests/accounts.test.sh "no enrolment file on the install media" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = '[ "$capable" -gt 0 ] || fail'
+assert old in s
+open(p, 'w').write(s.replace(old, '[ "$capable" -ge 0 ] || fail'))
+MUT
+
+mutate "auros-accounts passes a plain-text password to chpasswd -e" \
+       tests/accounts.test.sh "a plain password in the enrolment file is never used" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = "      '$'*) pairs+="
+assert old in s
+open(p, 'w').write(s.replace(old, "      *) pairs+="))
+MUT
+
+mutate "the build stops failing on an enrolment directory baked into the image" \
+       tests/40-windows-feel.test.sh "an enrolment directory baked into the image" <<'MUT'
+p = 'build/40-windows-feel.sh'
+s = open(p).read()
+old = '[ ! -e "$ENROL_DIR" ] || die'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || die'))
+MUT
+
+mutate "ACCT: make-install-media builds an ISO for an image with accounts and no enrolment file" \
+       tests/make-install-media.test.sh "the image declares accounts and no --enrolment is given" <<'MUT'
+p = 'tools/make-install-media.sh'
+s = open(p).read()
+old = '  [ -n "$ENROL" ] || refuse "$REF declares accounts'
+assert old in s
+open(p, 'w').write(s.replace(old, '  true || refuse "$REF declares accounts'))
+MUT
+
+mutate "ACCT: make-install-media puts a plain-text password on the install media" \
+       tests/make-install-media.test.sh "a plain-text password in the file" <<'MUT'
+p = 'tools/make-install-media.sh'
+s = open(p).read()
+old = '[[ "$h" =~ ^\\$[^:[:space:]]+$ ]]'
+assert old in s
+open(p, 'w').write(s.replace(old, '[[ "$h" =~ ^[^:[:space:]]+$ ]]'))
+MUT
+
+mutate "ACCT: make-enrolment prints the passwords into a pipe or a file" \
+       tests/make-enrolment.test.sh "stdout is a file, not a terminal" <<'MUT'
+p = 'tools/make-enrolment.sh'
+s = open(p).read()
+old = '[ -t 1 ] || refuse'
+assert old in s
+open(p, 'w').write(s.replace(old, 'true || refuse'))
+MUT
+
+mutate "ACCT: auros-accounts expires every password even with A6 switched off (plasmalogin lock-out)" \
+       tests/accounts.test.sh "A6 is off by default" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = 'if [ "${AUROS_EXPIRE_FIRST_PASSWORD:-0}" = 1 ]; then'
+assert old in s
+open(p, 'w').write(s.replace(old, 'if true; then'))
+MUT
+
+mutate "ACCT: auros-accounts leaves anaconda's kickstart copy, with the hashes, in /root" \
+       tests/accounts.test.sh "/root/anaconda-ks.cfg deleted" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = "if grep -qs 'auros/enrolment' \"$k\"; then rm -f \"$k\"; fi"
+assert old in s
+open(p, 'w').write(s.replace(old, ': "$k"'))
+MUT
+
+mutate "ACCT: the admin env script un-hides the Users page for any group NAMED like aurosadmin" \
+       tests/20-policy.test.sh "nor a member of a group merely NAMED like it" <<'MUT'
+p = 'policy/managed/root/etc/xdg/plasma-workspace/env/50-auros-admin-users-page.sh'
+s = open(p).read()
+old = '*" aurosadmin "*)'
+assert old in s
+open(p, 'w').write(s.replace(old, '*aurosadmin*)'))
+MUT
+
+mutate "ACCT: B12 audits a pupil as if they were the IT account" \
+       desktop/tests/b12-modes.test.sh "managed, a pupil: the Users page refuses to open" <<'MUT'
+p = 'desktop/assert-zero-terminal.sh'
+s = open(p).read()
+old = '[[ " $(id -nG 2>/dev/null) " != *" aurosadmin "* ]]'
+assert old in s
+open(p, 'w').write(s.replace(old, 'false'))
+MUT
+
+mutate "ACCT: B5 accepts a password prompt for account management on a locked machine" \
+       policy/tests/assert-lib.test.sh "locked: answerable => FAIL" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = 'a_deny "$level" "accounts.user-admin"'
+assert old in s
+open(p, 'w').write(s.replace(old, 'a_deny admin "accounts.user-admin"'))
+MUT
+
+mutate "OWNPW: locked's polkit guards change-own-password again (the pupil's only door shut)" \
+       tests/20-policy.test.sh "locked: a pupil at the seat may choose their own password" <<'MUT'
+p = 'policy/locked/root/etc/polkit-1/rules.d/00-auros-locked.rules'
+s = open(p).read()
+old = 'if (id === "org.freedesktop.accounts.change-own-password") { return false; }'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "OWNPW: the own-password grant goes to any subject, not only a person at the seat" \
+       tests/20-policy.test.sh "service account with no session may not" <<'MUT'
+p = 'policy/common/root/etc/polkit-1/rules.d/10-auros-own-password.rules'
+s = open(p).read()
+old = ' && subject.local && subject.active'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "OWNPW: B5 accepts the pupil's own password refused outright" \
+       policy/tests/assert-lib.test.sh "locked: own password refused outright => FAIL" <<'MUT'
+p = 'policy/lib/assert-lib.sh'
+s = open(p).read()
+old = '1) a_bad "accounts.own-password"'
+assert old in s
+open(p, 'w').write(s.replace(old, '1) a_ok "accounts.own-password"'))
+MUT
+
+mutate "OWNPW: B12 on locked accepts account management behind a password for a pupil" \
+       desktop/tests/b12-modes.test.sh "a pupil offered account management behind a password" <<'MUT'
+p = 'desktop/assert-zero-terminal.sh'
+s = open(p).read()
+old = 'else pk_refused "users/polkit" "$UA"; fi'
+assert old in s
+open(p, 'w').write(s.replace(old, 'else pk_not_granted "users/polkit" "$UA"; fi'))
+MUT
+
+mutate "OWNPW: B12 no longer attempts the own-password grant" \
+       desktop/tests/b12-modes.test.sh "locked, a pupil: polkit lets them choose their own password" <<'MUT'
+p = 'desktop/assert-zero-terminal.sh'
+s = open(p).read()
+old = '    own_password_granted\n'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
+mutate "OWNPW: root clears the choose-password marker on ANY change to /etc/shadow" \
+       tests/accounts.test.sh "the step stays" <<'MUT'
+p = 'desktop/accounts/auros-password-chosen'
+s = open(p).read()
+old = '!= "$(cat "$f")" ]'
+assert old in s
+open(p, 'w').write(s.replace(old, '!= "never" ]'))
+MUT
+
+mutate "OWNPW: the session step ends when the page is closed, chosen or not" \
+       tests/accounts.test.sh "closing the page without choosing one asks again" <<'MUT'
+p = 'desktop/welcome/auros-choose-password'
+s = open(p).read()
+old = 'while [ -e "$MARK" ]; do'
+assert old in s and '\ndone\nexit 0' in s
+open(p, 'w').write(s.replace(old, 'if [ -e "$MARK" ]; then').replace('\ndone\nexit 0', '\nfi\nexit 0'))
+MUT
+
+mutate "OWNPW: first boot writes no choose-password marker" \
+       tests/accounts.test.sh "the enrolled account gets a marker" <<'MUT'
+p = 'desktop/accounts/auros-accounts'
+s = open(p).read()
+old = '> "$PENDING/$n"'
+assert old in s
+open(p, 'w').write(s.replace(old, '> /dev/null'))
+MUT
+
+mutate "OWNPW: first run (taskbar, welcome) no longer waits for the password step" \
+       tests/accounts.test.sh "first run (layout, welcome) waits for it" <<'MUT'
+p = 'desktop/welcome/auros-first-run.service'
+s = open(p).read()
+old = 'After=auros-choose-password.service\n'
+assert old in s
+open(p, 'w').write(s.replace(old, ''))
+MUT
+
 printf '\n'
 if [ "$FAIL" -eq 0 ]; then
   printf '%s\n' "$(c 32 "$PASS/$((PASS+FAIL)) reintroduced bugs were caught by the suite that owns them.")"

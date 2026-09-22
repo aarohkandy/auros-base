@@ -462,6 +462,33 @@ a_suite_update_timer() {
     [ "$found" = 1 ] || a_bad "update.timer-active" "no update timer is active (looked for ${A_UPDATE_TIMERS[*]})"
 }
 
+# a_suite_accounts <level> -- owner decision A4 (control repo docs/ACCOUNTS.md §3): on managed the
+# Users page is SHOWN only to aurosadmin members (policy/managed/root/etc/kde5rc), on locked to everyone
+# so a pupil can choose their own password there (§5); either way what stops
+# a pupil managing accounts is polkit alone, and this is where that is attempted. The probe is never
+# in aurosadmin (a_controls aborts if it is), so it is the pupil case. accountsservice's own default
+# for user-administration is auth_admin for every subject, so this is primary evidence: `open`
+# answers 2 (open/assert.sh, level control), managed must not answer 0, locked must answer 1.
+a_suite_accounts() {
+    local level="$1"
+    printf '\n-- try to manage accounts (A4: the Users page is for aurosadmin only) --------------------\n'
+    a_deny "$level" "accounts.user-admin" org.freedesktop.accounts.user-administration
+    # The pupil's ONE account change, in every desktop mode: their own password (owner decisions,
+    # ACCOUNTS.md §5). 10-auros-own-password.rules grants it only to a subject in an active local
+    # session, and this probe has none, so accountsservice's own default answers: auth_admin, pkcheck 2.
+    #   1  this mode's deny swallowed it -- the pupil's only door is shut (00-auros-<mode>.rules must
+    #      leave change-own-password out of its guarded set)
+    #   0  granted to a subject with NO session -- a daemon could give itself a password
+    # B12 (desktop/assert-zero-terminal.sh) proves the grant itself, from inside a real session.
+    local rc; rc="$(a_pk org.freedesktop.accounts.change-own-password)"
+    case "$rc" in
+        2) a_ok  "accounts.own-password" "org.freedesktop.accounts.change-own-password -- not refused outright, and not granted without a session (pkcheck 2)" ;;
+        1) a_bad "accounts.own-password" "org.freedesktop.accounts.change-own-password -- REFUSED OUTRIGHT (pkcheck 1): a pupil cannot choose their own password, which is the one change every mode allows" ;;
+        0) a_bad "accounts.own-password" "org.freedesktop.accounts.change-own-password -- AUTHORISED for a subject with no session (pkcheck 0): the grant must be for a person at the seat only" ;;
+        *) a_bad "accounts.own-password" "org.freedesktop.accounts.change-own-password -- pkcheck returned $rc (error). An error is not an answer." ;;
+    esac
+}
+
 # a_suite_policy_immutable -- WHAT THIS ACTUALLY PROVES, stated plainly because the name oversells it.
 #
 # All four writes below fail for any unprivileged account on any bootc host in any mode: /etc is

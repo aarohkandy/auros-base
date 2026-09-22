@@ -28,6 +28,7 @@ a_suite_no_software        admin
 a_suite_no_network_change  admin
 a_suite_update_timer       admin
 a_suite_policy_immutable   admin
+a_suite_accounts           admin
 
 printf '\n-- what managed deliberately still allows -----------------------------------------------\n'
 a_pk_allow "allowed.shutdown" org.freedesktop.login1.power-off

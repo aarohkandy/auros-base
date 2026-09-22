@@ -100,6 +100,7 @@ AUROS_MODE_B12_WIFI=
 AUROS_MODE_B12_PRINTER=
 AUROS_MODE_B12_LANGUAGE=
 AUROS_MODE_B12_DESKTOP=
+AUROS_MODE_B12_USERS=
 if [[ -r $CLAIMS_FILE ]]; then
     # shellcheck disable=SC1090
     . "$CLAIMS_FILE"
@@ -141,9 +142,13 @@ for v in AUROS_MODE_B12_INSTALL_APP AUROS_MODE_B12_WIFI AUROS_MODE_B12_PRINTER A
         *) echo "INCONCLUSIVE: $v='${!v}' is not one of seat|admin|none|n/a" >&2; exit 2 ;;
     esac
 done
+case $AUROS_MODE_B12_USERS in
+    seat|aurosadmin|own-password|n/a) ;;
+    *) echo "INCONCLUSIVE: AUROS_MODE_B12_USERS='$AUROS_MODE_B12_USERS' is not one of seat|aurosadmin|own-password|n/a (who may open the Users page)" >&2; exit 2 ;;
+esac
 
 echo "mode: $AUROS_MODE   B1=$AUROS_MODE_B1   desktop=$AUROS_MODE_B12_DESKTOP"
-echo "B12 claims: install-app=$AUROS_MODE_B12_INSTALL_APP wifi=$AUROS_MODE_B12_WIFI printer=$AUROS_MODE_B12_PRINTER language=$AUROS_MODE_B12_LANGUAGE"
+echo "B12 claims: install-app=$AUROS_MODE_B12_INSTALL_APP wifi=$AUROS_MODE_B12_WIFI printer=$AUROS_MODE_B12_PRINTER language=$AUROS_MODE_B12_LANGUAGE users=$AUROS_MODE_B12_USERS"
 echo
 
 # ── is this actually a session? ───────────────────────────────────────────────────────────────────
@@ -231,7 +236,7 @@ pk_refused() {  # pk_refused <label> <action> — for `none`: 1 and only 1
     case $rc in
         1) pass "$label" "$action — refused outright (pkcheck 1) for this seat user in an active session" ;;
         0) fail "$label" "$action — AUTHORISED (pkcheck 0) for an ordinary seat user. Mode '$AUROS_MODE' tells the customer this cannot be done at the machine." ;;
-        3) fail "$label" "$action — answerable with an administrator password (pkcheck 3). That is 'managed' behaviour; mode '$AUROS_MODE' promises a refusal that no password changes." ;;
+        2|3) fail "$label" "$action — answerable with an administrator password (pkcheck $rc). That is 'managed' behaviour; mode '$AUROS_MODE' promises a refusal that no password changes." ;;
         *) fail "$label" "$action — pkcheck returned $rc (error). An error is not a refusal." ;;
     esac
 }
@@ -240,9 +245,18 @@ pk_answerable() {  # pk_answerable <label> <action> — for `seat`/`admin`: anyt
     local label=$1 action=$2 rc; rc=$(pk "$action")
     case $rc in
         0) pass "$label" "$action — permitted for this seat user (pkcheck 0)" ;;
-        3) pass "$label" "$action — offered, and asks for the administrator password (pkcheck 3). A password is not a terminal." ;;
+        2|3) pass "$label" "$action — offered, and asks for the administrator password (pkcheck $rc). A password is not a terminal." ;;
         1) fail "$label" "$action — refused outright (pkcheck 1), but mode '$AUROS_MODE' claims this task is reachable. The GUI would offer a door it then slams." ;;
         *) fail "$label" "$action — pkcheck returned $rc (error)." ;;
+    esac
+}
+
+pk_not_granted() {  # pk_not_granted <label> <action> — a pupil: refused, or only with an administrator's password
+    local label=$1 action=$2 rc; rc=$(pk "$action")
+    case $rc in
+        1|2|3) pass "$label" "$action — not granted to this user (pkcheck $rc)" ;;
+        0) fail "$label" "$action — AUTHORISED (pkcheck 0) for a user outside aurosadmin. Mode '$AUROS_MODE' promises only the IT account manages accounts." ;;
+        *) fail "$label" "$action — pkcheck returned $rc (error). An error is not a refusal." ;;
     esac
 }
 
@@ -399,6 +413,40 @@ else
         fail "language/settings-page" "no region/language KCM in kcmshell6 --list"
     fi
     [[ $C == admin ]] && pk_answerable "language/polkit" org.freedesktop.locale1.set-locale
+fi
+
+# ── 4b. MANAGE USER ACCOUNTS (owner decision A4, control repo docs/ACCOUNTS.md §3) ────────────────
+# Not one of checks.yaml's four tasks. `aurosadmin` means: the Users page opens for an aurosadmin
+# member and for nobody else, and polkit refuses everyone else. The matrix session's user is one or the
+# other, so one run proves one half; desktop/tests/b12-modes.test.sh drives both.
+# `own-password` (locked, owner decision in ACCOUNTS.md §5): the Users page opens for EVERYONE, so a
+# pupil can choose their own password there; polkit grants a pupil exactly that (pkcheck 0 for
+# change-own-password in this real session) and refuses managing accounts outright (1). The IT account
+# still manages accounts, with its password.
+C=$AUROS_MODE_B12_USERS
+UA=org.freedesktop.accounts.user-administration
+OWNPW=org.freedesktop.accounts.change-own-password
+own_password_granted() {
+    local rc; rc=$(pk "$OWNPW")
+    if [[ $rc == 0 ]]; then pass "users/own-password" "$OWNPW — granted to $(id -un) in this session (pkcheck 0): they can choose their own password"
+    else fail "users/own-password" "$OWNPW — pkcheck $rc for $(id -un) in this session: they cannot choose their own password without IT (policy/common 10-auros-own-password.rules not in force)"; fi
+}
+if [[ $C == own-password ]]; then
+    if kcm_exists kcm_users; then reach seat "users/settings-page" kcm_users -- kcmshell6 kcm_users
+    else fail "users/settings-page" "no kcm_users in kcmshell6 --list: nobody here can choose their own password in the GUI"; fi
+    own_password_granted
+    if [[ " $(id -nG 2>/dev/null) " == *" aurosadmin "* ]]; then pk_answerable "users/polkit" "$UA"
+    else pk_refused "users/polkit" "$UA"; fi
+elif [[ $C == aurosadmin ]] && [[ " $(id -nG 2>/dev/null) " != *" aurosadmin "* ]]; then
+    if kcm_exists kcm_users; then reach none "users/settings-page" kcm_users -- kcmshell6 kcm_users
+    else pass "users/settings-page" "no Users page is offered to $(id -un), who is not in aurosadmin"; fi
+    pk_not_granted "users/polkit" "$UA"
+elif [[ $C == seat || $C == aurosadmin ]]; then
+    if kcm_exists kcm_users; then reach admin "users/settings-page" kcm_users -- kcmshell6 kcm_users
+    else fail "users/settings-page" "no kcm_users in kcmshell6 --list: the account that should manage passwords has no page to do it"; fi
+    pk_answerable "users/polkit" "$UA"
+else
+    info "users" "no desktop on this machine (mode $AUROS_MODE)"
 fi
 
 # ── THE KIOSK CRITERION — what B12 means on a machine with no desktop ─────────────────────────────

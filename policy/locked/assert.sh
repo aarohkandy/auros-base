@@ -32,6 +32,7 @@ a_suite_no_software        hard
 a_suite_no_network_change  hard
 a_suite_update_timer       hard
 a_suite_policy_immutable   hard
+a_suite_accounts           hard
 
 # The KDE half of the mode, which until now had NOTHING attempting it. D3 justifies choosing KDE on
 # the grounds that "the KDE Kiosk framework is the only lockdown mechanism strong enough to make our
