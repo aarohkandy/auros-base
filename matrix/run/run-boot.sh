@@ -30,6 +30,8 @@ usage: run-boot.sh --profile ID --image REF [options]
   --no-autologin      do not inject display-manager autologin (B7/B8/B12 will then fail honestly)
   --out DIR           run directory
 env: AUROS_ALLOW_TCG=1 permits running without /dev/kvm (see README, "TCG and the B1 budget")
+     AUROS_SCREENSHOT_PROFILE (default uefi-modern) is the one profile that screenshots each desktop
+     layout into AUROS_SCREENSHOT_DIR (default <run dir>/screenshots). Evidence only; gates nothing.
 USAGE
 exit 2; }
 
@@ -89,6 +91,62 @@ fi
 
 log "profile ${PROFILE} · accel=${ACCEL} · policy=${POLICY} · image=${IMAGE:-<prebuilt qcow2>}"
 
+# ── layout screenshots — EVIDENCE ONLY. Nothing below records a check, and every failure is written
+# down (screenshots.tsv) instead of raised. The guest puts each layout on screen and announces it on
+# the agent port (#AUROS-SCREEN# <name>); screen_watcher sees that and asks QEMU for a screendump of
+# both heads — console 0 (the default std VGA) and the virtio-gpu (id auros-gpu, lib/vm.sh) — because
+# the session spans both cards and nobody has yet measured which one carries the panel.
+SCREENSHOTS=0
+[ "$PROFILE" = "${AUROS_SCREENSHOT_PROFILE:-uefi-modern}" ] && SCREENSHOTS=1
+SHOT_DIR=${AUROS_SCREENSHOT_DIR:-$AUROS_RUN_DIR/screenshots}
+if [ "$SCREENSHOTS" = 1 ]; then mkdir -p "$SHOT_DIR" && SHOT_DIR=$(cd "$SHOT_DIR" && pwd) || SCREENSHOTS=0; fi
+
+# shoot_one <qmp socket> <name> <head> <device|""> [guest note] — one PNG, one TSV row; never fails.
+shoot_one() {
+  local f="$SHOT_DIR/${PROFILE}-$2-$3.png" out
+  if out=$(node "$HARNESS_DIR/lib/qmp.mjs" "$1" screendump 10 "$f" ${4:+"$4"} 2>&1) && [ -s "$f" ]; then
+    printf '%s\t%s\tok\t%s %s\n' "$2" "$3" "${f##*/}" "${5:-}"
+  else
+    printf '%s\t%s\tfail\t%s\n' "$2" "$3" "$(printf '%s' "${out:-qemu reported success but wrote no file}" | tail -1 | tr '\t\n' '  ')"
+  fi >> "$SHOT_DIR/screenshots.tsv"
+}
+
+# screen_watcher <agent.log> <qmp socket> <vm pid> — until the agent is done or QEMU is gone.
+screen_watcher() {
+  local log=$1 sock=$2 vm=$3 seen=' ' last tag name why
+  while :; do
+    last=0
+    if grep_file "$log" '#AUROS-DONE#' || ! kill -0 "$vm" 2>/dev/null; then last=1; fi
+    while read -r tag name why; do
+      case "$name" in ''|*[!a-z0-9-]*) continue;; esac   # it names a file: nothing but [a-z0-9-]
+      case "$seen" in *" $name "*) continue;; esac
+      seen="$seen$name "
+      if [ "$tag" = '#AUROS-SCREEN-SKIP#' ]; then
+        printf '%s\t-\tskipped\t%s\n' "$name" "$(printf '%s' "$why" | tr '\t' ' ')" >> "$SHOT_DIR/screenshots.tsv"
+      else
+        shoot_one "$sock" "$name" con0 '' "$why"
+        shoot_one "$sock" "$name" virtio-gpu auros-gpu "$why"
+      fi
+    done < <(grep -a '^#AUROS-SCREEN' "$log" 2>/dev/null || true)
+    [ "$last" = 1 ] && return 0
+    sleep "$AUROS_POLL_INTERVAL"
+  done
+}
+
+# screen_summary <screenshots.tsv> — the one non-gating line for the run summary.
+screen_summary() {
+  local tsv=$1
+  if [ ! -s "$tsv" ]; then
+    printf 'Layout screenshots (evidence only, gates nothing): NONE — the agent never reached the screenshot phase (it runs after B11 on the last full boot); see the boot logs\n'
+    return 0
+  fi
+  awk -F'\t' '$3=="ok"{ok++; if ($4 ~ /locked=yes/) lk++; next} {bad++; why=why (why?"; ":"") $1 (($2=="-")?"":"/" $2) ": " $3 " " $4}
+    END{printf "Layout screenshots (evidence only, gates nothing): %d PNG(s) captured", ok
+        if (lk) printf " (%d while logind said the session was LOCKED — expect a lock screen)", lk
+        if (bad) printf ", %d not: %s", bad, why
+        printf "\n"}' "$tsv"
+}
+
 # ── the bootable artifact ────────────────────────────────────────────────────────────────────────
 cat > "$W/config.env" <<CFG
 TEST_USER=${TEST_USER}
@@ -98,6 +156,7 @@ POLICY_MODE=${POLICY}
 FLATPAK_REFS=${FLATPAK_REFS[*]+${FLATPAK_REFS[*]}}
 SUSPEND_TEST=1
 FULL_BOOTS=2
+SCREENSHOTS=${SCREENSHOTS}
 CFG
 
 if [ -z "$QCOW" ]; then
@@ -153,6 +212,9 @@ boot_once() {
     fi ) &
   local qmp_helper=$!
 
+  local shot_helper=''
+  if [ "$SCREENSHOTS" = 1 ]; then ( screen_watcher "$agentlog" "$qmp" "$VM_PID" || true ) & shot_helper=$!; fi
+
   # Wait for the agent to finish this boot's work — or for QEMU to die, which we notice immediately
   # rather than at the end of a timeout.
   #
@@ -167,6 +229,12 @@ boot_once() {
      kill -0 "$2" 2>/dev/null || exit 0
      exit 1' _ "$agentlog" "$VM_PID" || true
   kill "$qmp_helper" 2>/dev/null || true
+  # The watcher ends itself on #AUROS-DONE# after one last pass, so the final layout is not lost to a kill.
+  # Bounded: an agent that timed out with QEMU still up would otherwise leave it polling forever.
+  if [ -n "$shot_helper" ]; then
+    poll_until 120 "screenshot watcher" -- bash -c '! kill -0 "$0" 2>/dev/null' "$shot_helper" || kill "$shot_helper" 2>/dev/null || true
+    wait "$shot_helper" 2>/dev/null || true
+  fi
 
   local done_ok=0
   grep_file "$agentlog" '#AUROS-DONE#' && done_ok=1
@@ -280,6 +348,11 @@ NOTE="matrix $( [ -z "$FAILED_IDS" ] && echo pass || echo "fail(${FAILED_IDS})")
 # One count per CHECK, not per record: the agent reports B2-B12 on each of FULL_BOOTS boots, so
 # counting "status":"fail" lines printed "10 failing check(s) — B5,B7,B8,B12,B11" (run 35566336512).
 # A check that failed on either boot failed — the same pessimistic rule matrix/run.sh's collector applies.
+if [ "$SCREENSHOTS" = 1 ]; then
+  screen_summary "$SHOT_DIR/screenshots.tsv" > "$SHOT_DIR/summary.txt" 2>/dev/null || true
+  log "$(cat "$SHOT_DIR/summary.txt" 2>/dev/null || true)"
+fi
+
 FAILS=$(printf '%s' "$FAILED_IDS" | tr ',' '\n' | grep -c . || true)
 log "profile ${PROFILE}: ${FAILS} failing check(s)${FAILED_IDS:+ — ${FAILED_IDS}}"
 [ "${FAILS:-0}" -eq 0 ]
