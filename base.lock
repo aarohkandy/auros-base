@@ -4,9 +4,9 @@
 # wearing the same name, and "same recipe in, same image out" would stop being true.
 UPSTREAM_IMAGE=ghcr.io/ublue-os/aurora
 UPSTREAM_TAG=stable
-UPSTREAM_DIGEST=sha256:911281f2aaa42bfd17532c5cef917aba8d7ac8c0faeb1c1edc6a43dc28d0d2f1
-UPSTREAM_RESOLVED_AT=2026-09-20T21:25:07Z
-UPSTREAM_CREATED=2026-09-15T20:33:50Z
+UPSTREAM_DIGEST=sha256:94b81908b565b2fa1a7c98836570c16f4c6d3e80f4bb1eadb8d497217433ab1d
+UPSTREAM_RESOLVED_AT=2026-09-22T09:18:34Z
+UPSTREAM_CREATED=2026-09-22T01:28:40Z
 UPSTREAM_ARCH=linux/amd64
 # MEASURED 2026-09-21 against the pinned digest, the same quantity tools/resolve-upstream.sh emits
 # (`skopeo inspect --raw docker://<image>@<digest> | jq '[.layers[].size] | add'`), read straight off
@@ -17,6 +17,6 @@ UPSTREAM_ARCH=linux/amd64
 #
 # The difference is only 1.4%, which is the point: it was small enough to never be questioned, and
 # S6 compares an image against a budget derived from this number.
-UPSTREAM_PULL_SIZE_BYTES=3706306117
+UPSTREAM_PULL_SIZE_BYTES=3720916550
 UPSTREAM_LAYERS=256
 UPSTREAM_LAYER_MEDIA_TYPE=application/vnd.oci.image.layer.v1.tar+zstd
