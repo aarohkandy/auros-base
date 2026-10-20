@@ -29,19 +29,19 @@
 #
 # Written as a literal rather than through an ARG so that the digest is greppable from this line by a
 # checker that does not have to evaluate build arguments to find it.
-FROM ghcr.io/aarohkandy/auros-upstream-mirror@sha256:ff8e14da269425529995a1dac043116246869d37b1233195068a68627dca1f6a
+FROM ghcr.io/aarohkandy/auros-upstream-mirror@sha256:78f6d78e2efe6a1d7105fdcc2541d5a58ed9f0b586d82d60ba0b4787d8398d14
 
 # Same three values again, as build arguments, so the build scripts and the OCI labels can see them.
 # 00-common.sh compares UPSTREAM_DIGEST against base.lock and fails the build on a mismatch.
 ARG UPSTREAM_IMAGE=ghcr.io/ublue-os/aurora
 ARG UPSTREAM_TAG=stable
-ARG UPSTREAM_DIGEST=sha256:ff8e14da269425529995a1dac043116246869d37b1233195068a68627dca1f6a
+ARG UPSTREAM_DIGEST=sha256:78f6d78e2efe6a1d7105fdcc2541d5a58ed9f0b586d82d60ba0b4787d8398d14
 
 # Fixed build clock. Every file the build writes is stamped with this, so that two builds from
 # identical inputs differ in as few bytes as possible (check S7). The default is the upstream base
 # image's own creation time (base.lock's UPSTREAM_CREATED; `resolve-upstream.sh update` rewrites both) rather
 # than 0, because a 1970 mtime on a system file confuses enough tooling to be its own problem.
-ARG SOURCE_DATE_EPOCH=1791855730
+ARG SOURCE_DATE_EPOCH=1792459858
 
 # When this image was built, as bootc reports it. `bootc status` takes an image's age from the
 # org.opencontainers.image.created LABEL (falling back to the config's `created`), and a LABEL is
@@ -52,7 +52,7 @@ ARG SOURCE_DATE_EPOCH=1791855730
 # argument: build.yml passes the COMMIT's timestamp (the same SOURCE_DATE_EPOCH it gives
 # --timestamp), so two builds of one commit carry the same label and S7 is untouched. The default
 # is the ISO form of the SOURCE_DATE_EPOCH default above; `resolve-upstream.sh update` rewrites both.
-ARG IMAGE_CREATED=2026-10-13T01:42:10Z
+ARG IMAGE_CREATED=2026-10-20T01:30:58Z
 
 # No ENV for any of the above, deliberately. Build arguments are already exposed to RUN as
 # environment variables, which is how build/00-common.sh reads UPSTREAM_DIGEST and SOURCE_DATE_EPOCH;
